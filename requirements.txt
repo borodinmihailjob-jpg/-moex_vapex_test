@@ -1,4 +1,4 @@
 aiogram
 aiohttp
-aiosqlite
+asyncpg
 python-dotenv
