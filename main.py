@@ -86,12 +86,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_DSN = (os.getenv("DATABASE_URL") or os.getenv("DB_PATH") or "").strip()
 
 class AddTradeFlow(StatesGroup):
+    waiting_date_mode = State()
+    waiting_date_manual = State()
     waiting_asset_type = State()
     waiting_query = State()
     waiting_pick = State()
-    waiting_date = State()
-    waiting_price = State()
     waiting_qty = State()
+    waiting_price = State()
+    waiting_confirm = State()
+    waiting_edit_step = State()
     waiting_more = State()
 
 def money(x: float) -> str:
@@ -103,6 +106,7 @@ async def make_candidates_kb(cands: list[dict]):
         display_name = c.get("shortname") or c.get("name") or ""
         title = f"{c['secid']} | {c.get('isin') or '-'} | {display_name} | {c.get('boardid') or ''}"
         kb.button(text=title[:64], callback_data=f"pick:{i}")
+    kb.button(text="⬅️ Назад", callback_data="back:query")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -110,6 +114,45 @@ async def make_asset_type_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="📈 Акции", callback_data=f"atype:{ASSET_TYPE_STOCK}")
     kb.button(text="🥇 Металл", callback_data=f"atype:{ASSET_TYPE_METAL}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+async def make_date_mode_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Сегодня", callback_data="date:today")
+    kb.button(text="Ввести дату", callback_data="date:manual")
+    kb.adjust(1)
+    return kb.as_markup()
+
+async def make_search_back_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="back:asset_type")
+    return kb.as_markup()
+
+async def make_qty_back_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="back:instrument")
+    return kb.as_markup()
+
+async def make_price_back_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="back:qty")
+    return kb.as_markup()
+
+async def make_confirm_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="💾 Сохранить", callback_data="confirm:save")
+    kb.button(text="✏️ Редактировать", callback_data="confirm:edit")
+    kb.adjust(1)
+    return kb.as_markup()
+
+async def make_edit_step_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Дата", callback_data="edit:date")
+    kb.button(text="Тип актива", callback_data="edit:asset_type")
+    kb.button(text="Инструмент", callback_data="edit:instrument")
+    kb.button(text="Количество", callback_data="edit:qty")
+    kb.button(text="Цена за единицу", callback_data="edit:price")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -125,12 +168,42 @@ def make_main_menu_kb() -> ReplyKeyboardMarkup:
 def today_ddmmyyyy() -> str:
     return datetime.now(MSK_TZ).strftime("%d.%m.%Y")
 
+def parse_ddmmyyyy(value: str) -> str | None:
+    d = (value or "").strip()
+    if len(d) != 10 or d[2] != "." or d[5] != ".":
+        return None
+    dd, mm, yyyy = d[:2], d[3:5], d[6:10]
+    if not (dd.isdigit() and mm.isdigit() and yyyy.isdigit()):
+        return None
+    try:
+        datetime.strptime(d, "%d.%m.%Y")
+    except ValueError:
+        return None
+    return d
+
+def build_trade_preview(data: dict) -> str:
+    chosen = data["chosen"]
+    asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
+    qty_unit = "гр" if asset_type == ASSET_TYPE_METAL else "шт"
+    qty = data["qty"]
+    price = data["price"]
+    total = qty * price
+    return (
+        "Проверь сделку:\n\n"
+        f"Дата: {data['trade_date']}\n"
+        f"Тип актива: {'Металл' if asset_type == ASSET_TYPE_METAL else 'Акции'}\n"
+        f"Инструмент: {chosen['secid']} ({chosen.get('shortname') or ''})\n"
+        f"Количество: {qty:g} {qty_unit}\n"
+        f"Цена за единицу: {money(price)} RUB\n"
+        f"Сумма: {money(total)} RUB\n"
+    )
+
 async def cmd_start(message: Message):
     logger.info("User %s started bot", message.from_user.id if message.from_user else None)
     await message.answer(
         "Привет! Это MVP портфельного бота.\n\n"
         "Команды:\n"
-        "/add_trade — добавить сделку (поиск по тикеру/ISIN/названию компании → цена → количество)\n"
+        "/add_trade — добавить сделку (дата → актив → инструмент → количество → цена)\n"
         "/portfolio — показать текущую стоимость портфеля\n"
         "/set_interval <минуты> — периодические уведомления по портфелю\n"
         "/interval_off — выключить периодические уведомления\n"
@@ -484,8 +557,36 @@ async def start_health_server():
 
 async def cmd_add_trade(message: Message, state: FSMContext):
     logger.info("User %s started add_trade flow", message.from_user.id if message.from_user else None)
+    await state.clear()
+    await state.set_state(AddTradeFlow.waiting_date_mode)
+    await message.answer("Выбери дату сделки:", reply_markup=await make_date_mode_kb())
+
+async def on_date_mode_pick(call: CallbackQuery, state: FSMContext):
+    mode = call.data.split(":", 1)[1]
+    if mode == "today":
+        d = today_ddmmyyyy()
+        await state.update_data(trade_date=d)
+        await state.set_state(AddTradeFlow.waiting_asset_type)
+        await call.message.edit_text(
+            f"Дата сделки: {d}\n\nЧто добавляем?",
+            reply_markup=await make_asset_type_kb(),
+        )
+    elif mode == "manual":
+        await state.set_state(AddTradeFlow.waiting_date_manual)
+        await call.message.edit_text("Введи дату сделки в формате dd.mm.yyyy (например: 08.02.2026):")
+    else:
+        await call.answer("Неизвестный выбор даты", show_alert=True)
+        return
+    await call.answer()
+
+async def on_date_manual(message: Message, state: FSMContext):
+    d = parse_ddmmyyyy(message.text or "")
+    if d is None:
+        await message.answer("Формат даты: dd.mm.yyyy. Пример: 08.02.2026")
+        return
+    await state.update_data(trade_date=d)
     await state.set_state(AddTradeFlow.waiting_asset_type)
-    await message.answer("Что добавляем?", reply_markup=await make_asset_type_kb())
+    await message.answer(f"Дата сделки: {d}\n\nЧто добавляем?", reply_markup=await make_asset_type_kb())
 
 async def on_asset_type_pick(call: CallbackQuery, state: FSMContext):
     asset_type = call.data.split(":", 1)[1]
@@ -493,14 +594,72 @@ async def on_asset_type_pick(call: CallbackQuery, state: FSMContext):
         await call.answer("Неизвестный тип инструмента", show_alert=True)
         return
 
-    await state.update_data(asset_type=asset_type)
+    await state.update_data(asset_type=asset_type, cands=None, chosen=None, qty=None, price=None)
+    await state.set_state(AddTradeFlow.waiting_query)
+    if asset_type == ASSET_TYPE_METAL:
+        prompt = "Выбрано: Металл\n\nВведи тикер или название металла (например: GLDRUB_TOM):"
+    else:
+        prompt = "Выбрано: Акции\n\nВведи тикер, ISIN или название компании (например: SBER, RU0009029540, Сбербанк):"
+
+    await call.message.edit_text(prompt, reply_markup=await make_search_back_kb())
+    await call.answer()
+
+async def on_back_to_asset_type(call: CallbackQuery, state: FSMContext):
+    await state.update_data(cands=None, chosen=None)
+    await state.set_state(AddTradeFlow.waiting_asset_type)
+    await call.message.edit_text("Что добавляем?", reply_markup=await make_asset_type_kb())
+    await call.answer()
+
+async def on_back_to_query(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    asset_type = data.get("asset_type")
+    if asset_type not in {ASSET_TYPE_STOCK, ASSET_TYPE_METAL}:
+        await state.set_state(AddTradeFlow.waiting_asset_type)
+        await call.message.edit_text("Что добавляем?", reply_markup=await make_asset_type_kb())
+        await call.answer()
+        return
+    await state.update_data(cands=None, chosen=None)
     await state.set_state(AddTradeFlow.waiting_query)
     if asset_type == ASSET_TYPE_METAL:
         prompt = "Введи тикер или название металла (например: GLDRUB_TOM):"
     else:
         prompt = "Введи тикер, ISIN или название компании (например: SBER, RU0009029540, Сбербанк):"
+    await call.message.edit_text(prompt, reply_markup=await make_search_back_kb())
+    await call.answer()
 
-    await call.message.edit_text(prompt)
+async def on_back_to_instrument(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    asset_type = data.get("asset_type")
+    if asset_type not in {ASSET_TYPE_STOCK, ASSET_TYPE_METAL}:
+        await state.set_state(AddTradeFlow.waiting_asset_type)
+        await call.message.edit_text("Сначала выбери тип актива:", reply_markup=await make_asset_type_kb())
+        await call.answer()
+        return
+    await state.update_data(cands=None, chosen=None, qty=None, price=None)
+    await state.set_state(AddTradeFlow.waiting_query)
+    if asset_type == ASSET_TYPE_METAL:
+        prompt = "Введи тикер или название металла (например: GLDRUB_TOM):"
+    else:
+        prompt = "Введи тикер, ISIN или название компании (например: SBER, RU0009029540, Сбербанк):"
+    await call.message.edit_text(prompt, reply_markup=await make_search_back_kb())
+    await call.answer()
+
+async def on_back_to_qty(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
+    if not data.get("chosen"):
+        await state.set_state(AddTradeFlow.waiting_query)
+        if asset_type == ASSET_TYPE_METAL:
+            prompt = "Сначала выбери инструмент. Введи тикер или название металла:"
+        else:
+            prompt = "Сначала выбери инструмент. Введи тикер, ISIN или название компании:"
+        await call.message.edit_text(prompt, reply_markup=await make_search_back_kb())
+        await call.answer()
+        return
+    await state.update_data(price=None)
+    await state.set_state(AddTradeFlow.waiting_qty)
+    qty_prompt = "Введи количество граммов металла (например 5.5):" if asset_type == ASSET_TYPE_METAL else "Введи количество акций (например 10):"
+    await call.message.edit_text(qty_prompt, reply_markup=await make_qty_back_kb())
     await call.answer()
 
 async def on_query(message: Message, state: FSMContext):
@@ -520,7 +679,10 @@ async def on_query(message: Message, state: FSMContext):
 
     if not cands:
         logger.info("Search returned no candidates for query=%r user=%s", q, message.from_user.id if message.from_user else None)
-        await message.answer("Ничего не нашёл. Попробуй другой тикер, ISIN или название компании.")
+        await message.answer(
+            "Ничего не нашёл. Попробуй другой запрос или нажми «Назад».",
+            reply_markup=await make_search_back_kb(),
+        )
         return
 
     logger.info("Search returned %s candidates for query=%r user=%s", len(cands), q, message.from_user.id if message.from_user else None)
@@ -530,40 +692,45 @@ async def on_query(message: Message, state: FSMContext):
 
 async def on_pick(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    cands = data["cands"]
-    idx = int(call.data.split(":")[1])
+    cands = data.get("cands") or []
+    try:
+        idx = int(call.data.split(":")[1])
+    except Exception:
+        await call.answer("Некорректный выбор", show_alert=True)
+        return
+    if idx < 0 or idx >= len(cands):
+        await call.answer("Инструмент не найден в списке", show_alert=True)
+        return
     chosen = cands[idx]
     logger.info("User %s picked %s (%s)", call.from_user.id if call.from_user else None, chosen["secid"], chosen.get("boardid"))
-    await state.update_data(chosen=chosen)
+    await state.update_data(chosen=chosen, qty=None, price=None)
+    await state.set_state(AddTradeFlow.waiting_qty)
+    data = await state.get_data()
+    asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
+    qty_prompt = "Введи количество граммов металла (например 5.5):" if asset_type == ASSET_TYPE_METAL else "Введи количество акций (например 10):"
 
     await call.message.edit_text(
-        f"Ок, выбрано:\n"
+        f"Выбрано:\n"
         f"SECID: {chosen['secid']}\n"
         f"ISIN: {chosen.get('isin')}\n"
         f"BOARD: {chosen.get('boardid')}\n"
         f"NAME: {chosen.get('shortname')}\n\n"
-        f"Теперь введи дату сделки в формате dd.mm.yyyy (например: {today_ddmmyyyy()}):"
+        f"{qty_prompt}",
+        reply_markup=await make_qty_back_kb(),
     )
-    await state.set_state(AddTradeFlow.waiting_date)
     await call.answer()
 
-async def on_date(message: Message, state: FSMContext):
-    d = (message.text or "").strip()
-    if len(d) != 10 or d[2] != "." or d[5] != ".":
-        await message.answer("Формат даты: dd.mm.yyyy. Пример: 08.02.2026")
+async def on_qty(message: Message, state: FSMContext):
+    try:
+        qty = float((message.text or "").replace(",", ".").strip())
+        if qty <= 0:
+            raise ValueError
+    except Exception:
+        await message.answer("Введите число > 0, например 10")
         return
-    dd, mm, yyyy = d[:2], d[3:5], d[6:10]
-    if not (dd.isdigit() and mm.isdigit() and yyyy.isdigit()):
-        await message.answer("Формат даты: dd.mm.yyyy. Пример: 08.02.2026")
-        return
-    day, month, year = int(dd), int(mm), int(yyyy)
-    if year < 1900 or month < 1 or month > 12 or day < 1 or day > 31:
-        await message.answer("Некорректная дата. Используйте формат dd.mm.yyyy.")
-        return
-
-    await state.update_data(trade_date=d)
+    await state.update_data(qty=qty, price=None)
     await state.set_state(AddTradeFlow.waiting_price)
-    await message.answer("Введи стоимость:")
+    await message.answer("Введи стоимость одной единицы:", reply_markup=await make_price_back_kb())
 
 async def on_price(message: Message, state: FSMContext):
     try:
@@ -574,29 +741,23 @@ async def on_price(message: Message, state: FSMContext):
         await message.answer("Введите число > 0, например 285.4")
         return
     await state.update_data(price=price)
-    await state.set_state(AddTradeFlow.waiting_qty)
     data = await state.get_data()
-    asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
-    if asset_type == ASSET_TYPE_METAL:
-        await message.answer("Введи количество граммов металла (например 5.5):")
-    else:
-        await message.answer("Введи количество акций (например 10):")
+    await state.set_state(AddTradeFlow.waiting_confirm)
+    await message.answer(build_trade_preview(data), reply_markup=await make_confirm_kb())
 
-async def on_qty(message: Message, state: FSMContext):
-    try:
-        qty = float((message.text or "").replace(",", ".").strip())
-        if qty <= 0:
-            raise ValueError
-    except Exception:
-        await message.answer("Введите число > 0, например 10")
+async def on_confirm_save(call: CallbackQuery, state: FSMContext):
+    user_id = call.from_user.id if call.from_user else None
+    if not user_id or call.message is None:
+        await call.answer("Не удалось определить пользователя", show_alert=True)
         return
+
     data = await state.get_data()
     chosen = data["chosen"]
     asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
     trade_date = data["trade_date"]
+    qty = data["qty"]
     price = data["price"]
     commission = 0.0
-
     instrument_id = await upsert_instrument(
         DB_DSN,
         secid=chosen["secid"],
@@ -605,13 +766,13 @@ async def on_qty(message: Message, state: FSMContext):
         shortname=chosen.get("shortname"),
         asset_type=asset_type,
     )
-    await add_trade(DB_DSN, message.from_user.id, instrument_id, trade_date, qty, price, commission)
+    await add_trade(DB_DSN, user_id, instrument_id, trade_date, qty, price, commission)
 
-    total_qty, total_cost, avg_price = await get_position_agg(DB_DSN, message.from_user.id, instrument_id)
+    total_qty, total_cost, avg_price = await get_position_agg(DB_DSN, user_id, instrument_id)
     instr = await get_instrument(DB_DSN, instrument_id)
     logger.info(
         "Trade saved user=%s secid=%s qty=%s price=%s commission=%s",
-        message.from_user.id if message.from_user else None,
+        user_id,
         instr["secid"] if instr else None,
         qty,
         price,
@@ -645,7 +806,7 @@ async def on_qty(message: Message, state: FSMContext):
 
     await state.set_state(AddTradeFlow.waiting_more)
 
-    await message.answer(
+    await call.message.answer(
         "Сделка сохранена ✅\n\n"
         f"{instr['secid']} ({instr.get('shortname') or ''})\n"
         f"Дата сделки: {trade_date}\n"
@@ -656,10 +817,89 @@ async def on_qty(message: Message, state: FSMContext):
         "Добавим новую сделку или закончим ввод?",
         reply_markup=kb.as_markup()
     )
+    await call.answer()
+
+async def on_confirm_edit(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AddTradeFlow.waiting_edit_step)
+    await call.message.edit_text(
+        "С какого шага редактировать?",
+        reply_markup=await make_edit_step_kb(),
+    )
+    await call.answer()
+
+async def on_edit_step(call: CallbackQuery, state: FSMContext):
+    step = call.data.split(":", 1)[1]
+    data = await state.get_data()
+    asset_type = data.get("asset_type")
+    chosen = data.get("chosen")
+
+    if step == "date":
+        await state.update_data(trade_date=None, asset_type=None, cands=None, chosen=None, qty=None, price=None)
+        await state.set_state(AddTradeFlow.waiting_date_mode)
+        await call.message.edit_text("Выбери дату сделки:", reply_markup=await make_date_mode_kb())
+    elif step == "asset_type":
+        await state.update_data(asset_type=None, cands=None, chosen=None, qty=None, price=None)
+        await state.set_state(AddTradeFlow.waiting_asset_type)
+        await call.message.edit_text("Что добавляем?", reply_markup=await make_asset_type_kb())
+    elif step == "instrument":
+        if asset_type not in {ASSET_TYPE_STOCK, ASSET_TYPE_METAL}:
+            await state.update_data(asset_type=None, cands=None, chosen=None, qty=None, price=None)
+            await state.set_state(AddTradeFlow.waiting_asset_type)
+            await call.message.edit_text("Сначала выбери тип актива:", reply_markup=await make_asset_type_kb())
+        else:
+            await state.update_data(cands=None, chosen=None, qty=None, price=None)
+            await state.set_state(AddTradeFlow.waiting_query)
+            if asset_type == ASSET_TYPE_METAL:
+                prompt = "Введи тикер или название металла (например: GLDRUB_TOM):"
+            else:
+                prompt = "Введи тикер, ISIN или название компании (например: SBER, RU0009029540, Сбербанк):"
+            await call.message.edit_text(prompt, reply_markup=await make_search_back_kb())
+    elif step == "qty":
+        if asset_type not in {ASSET_TYPE_STOCK, ASSET_TYPE_METAL}:
+            await state.update_data(asset_type=None, cands=None, chosen=None, qty=None, price=None)
+            await state.set_state(AddTradeFlow.waiting_asset_type)
+            await call.message.edit_text("Сначала выбери тип актива:", reply_markup=await make_asset_type_kb())
+        elif not chosen:
+            await state.set_state(AddTradeFlow.waiting_query)
+            if asset_type == ASSET_TYPE_METAL:
+                prompt = "Инструмент не выбран. Введи тикер или название металла:"
+            else:
+                prompt = "Инструмент не выбран. Введи тикер, ISIN или название компании:"
+            await call.message.edit_text(prompt, reply_markup=await make_search_back_kb())
+        else:
+            await state.update_data(qty=None, price=None)
+            await state.set_state(AddTradeFlow.waiting_qty)
+            qty_prompt = "Введи количество граммов металла (например 5.5):" if asset_type == ASSET_TYPE_METAL else "Введи количество акций (например 10):"
+            await call.message.edit_text(qty_prompt, reply_markup=await make_qty_back_kb())
+    elif step == "price":
+        if asset_type not in {ASSET_TYPE_STOCK, ASSET_TYPE_METAL}:
+            await state.update_data(asset_type=None, cands=None, chosen=None, qty=None, price=None)
+            await state.set_state(AddTradeFlow.waiting_asset_type)
+            await call.message.edit_text("Сначала выбери тип актива:", reply_markup=await make_asset_type_kb())
+        elif not chosen:
+            await state.set_state(AddTradeFlow.waiting_query)
+            if asset_type == ASSET_TYPE_METAL:
+                prompt = "Инструмент не выбран. Введи тикер или название металла:"
+            else:
+                prompt = "Инструмент не выбран. Введи тикер, ISIN или название компании:"
+            await call.message.edit_text(prompt, reply_markup=await make_search_back_kb())
+        elif data.get("qty") is None:
+            await state.set_state(AddTradeFlow.waiting_qty)
+            qty_prompt = "Сначала введи количество граммов металла:" if asset_type == ASSET_TYPE_METAL else "Сначала введи количество акций:"
+            await call.message.edit_text(qty_prompt)
+        else:
+            await state.update_data(price=None)
+            await state.set_state(AddTradeFlow.waiting_price)
+            await call.message.edit_text("Введи стоимость одной единицы:", reply_markup=await make_price_back_kb())
+    else:
+        await call.answer("Неизвестный шаг редактирования", show_alert=True)
+        return
+    await call.answer()
 
 async def on_new_trade(call: CallbackQuery, state: FSMContext):
-    await state.set_state(AddTradeFlow.waiting_asset_type)
-    await call.message.edit_text("Что добавляем?", reply_markup=await make_asset_type_kb())
+    await state.clear()
+    await state.set_state(AddTradeFlow.waiting_date_mode)
+    await call.message.edit_text("Выбери дату сделки:", reply_markup=await make_date_mode_kb())
     await call.answer()
 
 async def on_done(call: CallbackQuery, state: FSMContext):
@@ -701,12 +941,20 @@ async def main():
     dp.message.register(on_menu_alerts_status, StateFilter("*"), F.text == BTN_ALERTS)
 
     dp.callback_query.register(on_asset_type_pick, AddTradeFlow.waiting_asset_type, F.data.startswith("atype:"))
+    dp.callback_query.register(on_date_mode_pick, AddTradeFlow.waiting_date_mode, F.data.startswith("date:"))
+    dp.callback_query.register(on_back_to_asset_type, AddTradeFlow.waiting_query, F.data == "back:asset_type")
+    dp.callback_query.register(on_back_to_asset_type, AddTradeFlow.waiting_pick, F.data == "back:asset_type")
+    dp.callback_query.register(on_back_to_query, AddTradeFlow.waiting_pick, F.data == "back:query")
+    dp.callback_query.register(on_back_to_instrument, AddTradeFlow.waiting_qty, F.data == "back:instrument")
+    dp.callback_query.register(on_back_to_qty, AddTradeFlow.waiting_price, F.data == "back:qty")
+    dp.message.register(on_date_manual, AddTradeFlow.waiting_date_manual)
     dp.message.register(on_query, AddTradeFlow.waiting_query)
     dp.callback_query.register(on_pick, AddTradeFlow.waiting_pick, F.data.startswith("pick:"))
-
-    dp.message.register(on_date, AddTradeFlow.waiting_date)
-    dp.message.register(on_price, AddTradeFlow.waiting_price)
     dp.message.register(on_qty, AddTradeFlow.waiting_qty)
+    dp.message.register(on_price, AddTradeFlow.waiting_price)
+    dp.callback_query.register(on_confirm_save, AddTradeFlow.waiting_confirm, F.data == "confirm:save")
+    dp.callback_query.register(on_confirm_edit, AddTradeFlow.waiting_confirm, F.data == "confirm:edit")
+    dp.callback_query.register(on_edit_step, AddTradeFlow.waiting_edit_step, F.data.startswith("edit:"))
 
     dp.callback_query.register(on_new_trade, AddTradeFlow.waiting_more, F.data == "new_trade")
     dp.callback_query.register(on_done, AddTradeFlow.waiting_more, F.data == "done")
