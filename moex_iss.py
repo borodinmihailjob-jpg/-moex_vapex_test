@@ -523,6 +523,55 @@ async def get_stock_movers_by_date(
             break
         start += len(h_rows)
 
+    missing = [x for x in out if not str(x.get("shortname") or "").strip() or str(x.get("shortname")).strip() == str(x.get("secid")).strip()]
+    if missing:
+        try:
+            names_map = await _load_board_shortnames(session, boardid)
+            for row in out:
+                secid = str(row.get("secid") or "").strip()
+                if not secid:
+                    continue
+                shortname = str(row.get("shortname") or "").strip()
+                if not shortname or shortname == secid:
+                    row["shortname"] = names_map.get(secid) or shortname or secid
+        except Exception:
+            logger.warning("Failed enriching shortnames for board=%s", boardid)
+
+    return out
+
+
+async def _load_board_shortnames(session: aiohttp.ClientSession, boardid: str) -> dict[str, str]:
+    path = f"/engines/stock/markets/shares/boards/{boardid}/securities.json"
+    params = {
+        "iss.meta": "off",
+        "securities.columns": "SECID,SHORTNAME,NAME",
+    }
+    data = await get_json_with_fallback(session, path, params=params)
+    sec = data.get("securities", {})
+    cols = sec.get("columns", [])
+    rows = sec.get("data", [])
+    if not rows:
+        return {}
+    idx = {str(c).upper(): i for i, c in enumerate(cols)}
+    secid_i = idx.get("SECID")
+    short_i = idx.get("SHORTNAME")
+    name_i = idx.get("NAME")
+    if secid_i is None:
+        return {}
+    out: dict[str, str] = {}
+    for row in rows:
+        if secid_i >= len(row):
+            continue
+        secid = str(row[secid_i] or "").strip()
+        if not secid:
+            continue
+        shortname = ""
+        if short_i is not None and short_i < len(row):
+            shortname = str(row[short_i] or "").strip()
+        if not shortname and name_i is not None and name_i < len(row):
+            shortname = str(row[name_i] or "").strip()
+        if shortname:
+            out[secid] = shortname
     return out
 
 def _history_path_by_asset_type(secid: str, boardid: str | None, asset_type: str) -> str:
