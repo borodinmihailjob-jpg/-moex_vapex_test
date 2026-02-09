@@ -103,8 +103,17 @@ def money(x: float) -> str:
 async def make_candidates_kb(cands: list[dict]):
     kb = InlineKeyboardBuilder()
     for i, c in enumerate(cands):
-        display_name = c.get("shortname") or c.get("name") or ""
-        title = f"{c['secid']} | {c.get('isin') or '-'} | {display_name} | {c.get('boardid') or ''}"
+        secid = (c.get("secid") or "").strip()
+        boardid = (c.get("boardid") or "").strip()
+        display_name = (c.get("shortname") or c.get("name") or "").strip()
+        if display_name and boardid:
+            title = f"{secid} - {display_name} ({boardid})"
+        elif display_name:
+            title = f"{secid} - {display_name}"
+        elif boardid:
+            title = f"{secid} ({boardid})"
+        else:
+            title = secid
         kb.button(text=title[:64], callback_data=f"pick:{i}")
     kb.button(text="⬅️ Назад", callback_data="back:query")
     kb.adjust(1)
@@ -688,7 +697,12 @@ async def on_query(message: Message, state: FSMContext):
     logger.info("Search returned %s candidates for query=%r user=%s", len(cands), q, message.from_user.id if message.from_user else None)
     await state.update_data(cands=cands)
     await state.set_state(AddTradeFlow.waiting_pick)
-    await message.answer("Нашёл варианты. Выбери нужный:", reply_markup=await make_candidates_kb(cands))
+    await message.answer(
+        "Нашёл варианты.\n"
+        "Формат кнопки: Тикер - Название (режим торгов).\n"
+        "Выбери нужный инструмент:",
+        reply_markup=await make_candidates_kb(cands),
+    )
 
 async def on_pick(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
