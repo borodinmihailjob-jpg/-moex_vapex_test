@@ -179,6 +179,7 @@ async def make_candidates_kb(cands: list[dict]):
         secid = (c.get("secid") or "").strip()
         boardid = (c.get("boardid") or "").strip()
         display_name = (c.get("shortname") or c.get("name") or "").strip()
+        available_qty = c.get("available_qty")
         if display_name and boardid:
             title = f"{secid} - {display_name} ({boardid})"
         elif display_name:
@@ -187,6 +188,9 @@ async def make_candidates_kb(cands: list[dict]):
             title = f"{secid} ({boardid})"
         else:
             title = secid
+        if available_qty is not None:
+            unit = "гр" if c.get("asset_type") == ASSET_TYPE_METAL else "шт"
+            title = f"{title} | доступно {float(available_qty):g} {unit}"
         kb.button(text=title[:64], callback_data=f"pick:{i}")
     kb.button(text="⬅️ Назад", callback_data="back:query")
     kb.adjust(1)
@@ -544,6 +548,30 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
 
     text = "💼 Портфель:\n" + "\n".join(lines) + "\n\n" + footer
     return (text, total_value_known, positions)
+
+
+async def _load_sell_candidates(user_id: int, asset_type: str) -> list[dict]:
+    positions = await get_user_positions(DB_DSN, user_id)
+    out: list[dict] = []
+    for pos in positions:
+        if (pos.get("asset_type") or ASSET_TYPE_STOCK) != asset_type:
+            continue
+        qty = float(pos.get("total_qty") or 0.0)
+        if qty <= 1e-12:
+            continue
+        out.append(
+            {
+                "secid": pos.get("secid"),
+                "shortname": pos.get("shortname"),
+                "name": pos.get("shortname"),
+                "isin": pos.get("isin"),
+                "boardid": pos.get("boardid"),
+                "asset_type": pos.get("asset_type"),
+                "available_qty": qty,
+            }
+        )
+    out.sort(key=lambda x: str(x.get("secid") or ""))
+    return out
 
 
 def _pick_stock_candidate_by_isin(cands: list[dict], isin: str) -> dict | None:
@@ -1142,6 +1170,33 @@ async def on_asset_type_pick(call: CallbackQuery, state: FSMContext):
 
     side_label = "Покупка" if trade_side == TRADE_SIDE_BUY else "Продажа"
     await state.update_data(asset_type=asset_type, cands=None, chosen=None, qty=None, price=None)
+
+    if trade_side == TRADE_SIDE_SELL:
+        user_id = call.from_user.id if call.from_user else None
+        if not user_id:
+            await call.answer("Не удалось определить пользователя", show_alert=True)
+            return
+        cands = await _load_sell_candidates(user_id, asset_type)
+        if not cands:
+            asset_label = "металлов" if asset_type == ASSET_TYPE_METAL else "акций"
+            await state.set_state(AddTradeFlow.waiting_asset_type)
+            await safe_edit_text(
+                call.message,
+                f"У вас нет позиций {asset_label} для продажи.\n\nВыберите другой тип актива:",
+                reply_markup=await make_asset_type_kb(),
+            )
+            await call.answer()
+            return
+        await state.update_data(cands=cands)
+        await state.set_state(AddTradeFlow.waiting_pick)
+        if asset_type == ASSET_TYPE_METAL:
+            prompt = f"Выбрано: {side_label}, Металл\n\nВыбери инструмент из текущего портфеля:"
+        else:
+            prompt = f"Выбрано: {side_label}, Акции\n\nВыбери инструмент из текущего портфеля:"
+        await safe_edit_text(call.message, prompt, reply_markup=await make_candidates_kb(cands))
+        await call.answer()
+        return
+
     await state.set_state(AddTradeFlow.waiting_query)
     if asset_type == ASSET_TYPE_METAL:
         prompt = f"Выбрано: {side_label}, Металл\n\nВведи тикер или название металла (например: GLDRUB_TOM):"
@@ -1184,18 +1239,38 @@ async def on_back_to_query(call: CallbackQuery, state: FSMContext):
 async def on_back_to_instrument(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     asset_type = data.get("asset_type")
+    trade_side = data.get("trade_side") or TRADE_SIDE_BUY
     if asset_type not in {ASSET_TYPE_STOCK, ASSET_TYPE_METAL}:
         await state.set_state(AddTradeFlow.waiting_asset_type)
         await call.message.edit_text("Сначала выбери тип актива:", reply_markup=await make_asset_type_kb())
         await call.answer()
         return
+
+    if trade_side == TRADE_SIDE_SELL:
+        user_id = call.from_user.id if call.from_user else None
+        if not user_id:
+            await call.answer("Не удалось определить пользователя", show_alert=True)
+            return
+        cands = await _load_sell_candidates(user_id, asset_type)
+        if not cands:
+            await state.update_data(cands=None, chosen=None, qty=None, price=None)
+            await state.set_state(AddTradeFlow.waiting_asset_type)
+            await safe_edit_text(call.message, "Позиции для продажи не найдены. Выберите тип актива:", reply_markup=await make_asset_type_kb())
+            await call.answer()
+            return
+        await state.update_data(cands=cands, chosen=None, qty=None, price=None)
+        await state.set_state(AddTradeFlow.waiting_pick)
+        await safe_edit_text(call.message, "Выбери инструмент из текущего портфеля:", reply_markup=await make_candidates_kb(cands))
+        await call.answer()
+        return
+
     await state.update_data(cands=None, chosen=None, qty=None, price=None)
     await state.set_state(AddTradeFlow.waiting_query)
     if asset_type == ASSET_TYPE_METAL:
         prompt = "Введи тикер или название металла (например: GLDRUB_TOM):"
     else:
         prompt = "Введи тикер, ISIN или название компании (например: SBER, RU0009029540, Сбербанк):"
-    await call.message.edit_text(prompt, reply_markup=await make_search_back_kb())
+    await safe_edit_text(call.message, prompt, reply_markup=await make_search_back_kb())
     await call.answer()
 
 async def on_back_to_qty(call: CallbackQuery, state: FSMContext):
@@ -1223,6 +1298,10 @@ async def on_query(message: Message, state: FSMContext):
         return
 
     data = await state.get_data()
+    trade_side = data.get("trade_side") or TRADE_SIDE_BUY
+    if trade_side == TRADE_SIDE_SELL:
+        await message.answer("Для продажи выбери инструмент из текущего портфеля кнопками.")
+        return
     asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
 
     async with aiohttp.ClientSession() as session:
@@ -1293,6 +1372,13 @@ async def on_qty(message: Message, state: FSMContext):
         return
     data = await state.get_data()
     trade_side = data.get("trade_side") or TRADE_SIDE_BUY
+    if trade_side == TRADE_SIDE_SELL:
+        chosen = data.get("chosen") or {}
+        available_qty = float(chosen.get("available_qty") or 0.0)
+        if qty - available_qty > 1e-12:
+            unit = "гр" if (data.get("asset_type") == ASSET_TYPE_METAL) else "шт"
+            await message.answer(f"Нельзя продать больше, чем есть в портфеле. Доступно: {available_qty:g} {unit}.")
+            return
     signed_qty = -qty if trade_side == TRADE_SIDE_SELL else qty
     await state.update_data(qty=signed_qty, price=None)
     await state.set_state(AddTradeFlow.waiting_price)
@@ -1333,6 +1419,16 @@ async def on_confirm_save(call: CallbackQuery, state: FSMContext):
         shortname=chosen.get("shortname"),
         asset_type=asset_type,
     )
+    if trade_side == TRADE_SIDE_SELL:
+        total_qty_now, _, _ = await get_position_agg(DB_DSN, user_id, instrument_id)
+        if abs(float(qty)) - float(total_qty_now) > 1e-12:
+            qty_unit = "гр" if asset_type == ASSET_TYPE_METAL else "шт"
+            await call.message.answer(
+                f"Продажа отклонена: доступно только {total_qty_now:g} {qty_unit}, "
+                f"а вы указали {abs(float(qty)):g} {qty_unit}."
+            )
+            await call.answer()
+            return
     await add_trade(DB_DSN, user_id, instrument_id, trade_date, qty, price, commission)
 
     total_qty, total_cost, avg_price = await get_position_agg(DB_DSN, user_id, instrument_id)
@@ -1420,13 +1516,29 @@ async def on_edit_step(call: CallbackQuery, state: FSMContext):
             await state.set_state(AddTradeFlow.waiting_asset_type)
             await call.message.edit_text("Сначала выбери тип актива:", reply_markup=await make_asset_type_kb())
         else:
-            await state.update_data(cands=None, chosen=None, qty=None, price=None)
-            await state.set_state(AddTradeFlow.waiting_query)
-            if asset_type == ASSET_TYPE_METAL:
-                prompt = "Введи тикер или название металла (например: GLDRUB_TOM):"
+            trade_side = data.get("trade_side") or TRADE_SIDE_BUY
+            if trade_side == TRADE_SIDE_SELL:
+                user_id = call.from_user.id if call.from_user else None
+                if not user_id:
+                    await call.answer("Не удалось определить пользователя", show_alert=True)
+                    return
+                cands = await _load_sell_candidates(user_id, asset_type)
+                if not cands:
+                    await state.update_data(cands=None, chosen=None, qty=None, price=None)
+                    await state.set_state(AddTradeFlow.waiting_asset_type)
+                    await safe_edit_text(call.message, "Позиции для продажи не найдены. Выберите тип актива:", reply_markup=await make_asset_type_kb())
+                else:
+                    await state.update_data(cands=cands, chosen=None, qty=None, price=None)
+                    await state.set_state(AddTradeFlow.waiting_pick)
+                    await safe_edit_text(call.message, "Выбери инструмент из текущего портфеля:", reply_markup=await make_candidates_kb(cands))
             else:
-                prompt = "Введи тикер, ISIN или название компании (например: SBER, RU0009029540, Сбербанк):"
-            await call.message.edit_text(prompt, reply_markup=await make_search_back_kb())
+                await state.update_data(cands=None, chosen=None, qty=None, price=None)
+                await state.set_state(AddTradeFlow.waiting_query)
+                if asset_type == ASSET_TYPE_METAL:
+                    prompt = "Введи тикер или название металла (например: GLDRUB_TOM):"
+                else:
+                    prompt = "Введи тикер, ISIN или название компании (например: SBER, RU0009029540, Сбербанк):"
+                await safe_edit_text(call.message, prompt, reply_markup=await make_search_back_kb())
     elif step == "qty":
         if asset_type not in {ASSET_TYPE_STOCK, ASSET_TYPE_METAL}:
             await state.update_data(asset_type=None, cands=None, chosen=None, qty=None, price=None)
