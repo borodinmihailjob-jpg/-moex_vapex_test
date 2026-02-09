@@ -174,6 +174,89 @@ async def get_last_price_by_asset_type(
         return await get_last_price_metal(session, secid, boardid)
     return await get_last_price_stock_shares(session, secid, boardid)
 
+
+async def get_stock_day_movers(session: aiohttp.ClientSession, boardid: str = "TQBR") -> list[dict]:
+    """
+    Возвращает список акций с изменением за текущую торговую сессию:
+    OPEN (цена открытия) -> LAST (последняя цена).
+    """
+    path = f"/engines/stock/markets/shares/boards/{boardid}/securities.json"
+    start = 0
+    out: list[dict] = []
+
+    while True:
+        params = {
+            "iss.meta": "off",
+            "start": start,
+            "limit": 100,
+            "securities.columns": "SECID,SHORTNAME",
+            "marketdata.columns": "SECID,OPEN,LAST",
+        }
+        data = await iss_get_json(session, path, params=params)
+        sec = data.get("securities", {})
+        md = data.get("marketdata", {})
+        sec_cols = sec.get("columns", [])
+        sec_rows = sec.get("data", [])
+        md_cols = md.get("columns", [])
+        md_rows = md.get("data", [])
+
+        if not md_rows:
+            break
+
+        sec_idx = {str(c).upper(): i for i, c in enumerate(sec_cols)}
+        md_idx = {str(c).upper(): i for i, c in enumerate(md_cols)}
+        secid_i = sec_idx.get("SECID")
+        shortname_i = sec_idx.get("SHORTNAME")
+        md_secid_i = md_idx.get("SECID")
+        open_i = md_idx.get("OPEN")
+        last_i = md_idx.get("LAST")
+        if md_secid_i is None or open_i is None or last_i is None:
+            break
+
+        names: dict[str, str] = {}
+        for row in sec_rows:
+            if secid_i is None or secid_i >= len(row):
+                continue
+            secid = str(row[secid_i] or "").strip()
+            if not secid:
+                continue
+            shortname = ""
+            if shortname_i is not None and shortname_i < len(row):
+                shortname = str(row[shortname_i] or "").strip()
+            names[secid] = shortname
+
+        for row in md_rows:
+            secid = str(row[md_secid_i] or "").strip()
+            if not secid:
+                continue
+            open_px = row[open_i] if open_i < len(row) else None
+            last_px = row[last_i] if last_i < len(row) else None
+            if open_px is None or last_px is None:
+                continue
+            try:
+                open_f = float(open_px)
+                last_f = float(last_px)
+            except Exception:
+                continue
+            if open_f <= 0:
+                continue
+            pct = (last_f - open_f) / open_f * 100.0
+            out.append(
+                {
+                    "secid": secid,
+                    "shortname": names.get(secid) or secid,
+                    "open": open_f,
+                    "last": last_f,
+                    "pct": pct,
+                }
+            )
+
+        if len(md_rows) < 100:
+            break
+        start += len(md_rows)
+
+    return out
+
 def _history_path_by_asset_type(secid: str, boardid: str | None, asset_type: str) -> str:
     if asset_type == ASSET_TYPE_METAL:
         if boardid:

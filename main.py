@@ -49,6 +49,7 @@ from db import (
 from moex_iss import (
     ASSET_TYPE_METAL,
     ASSET_TYPE_STOCK,
+    get_stock_day_movers,
     get_history_prices_by_asset_type,
     get_last_price_by_asset_type,
     search_metals,
@@ -683,6 +684,7 @@ async def cmd_start(message: Message):
         "/add_trade — добавить сделку (покупка/продажа)\n"
         "/portfolio — текущая стоимость портфеля и P&L\n"
         "/asset_lookup — текущая цена и динамика за неделю/месяц/6 мес/год\n\n"
+        "/top_movers — топ роста/падения акций за текущую сессию\n\n"
         "/clear_portfolio — удалить все сделки и очистить портфель\n\n"
         "📥 Импорт\n"
         "/import_broker_xml — загрузить XML брокерской выписки и импортировать сделки\n\n"
@@ -711,6 +713,46 @@ async def cmd_set_interval(message: Message):
 
     await set_periodic_alert(DB_DSN, user_id, True, interval)
     await message.answer(f"Готово. Периодические уведомления включены: каждые {interval} мин.")
+
+
+async def cmd_top_movers(message: Message):
+    now_msk = datetime.now(MSK_TZ)
+    open_label = f"{MOEX_OPEN_HOUR:02d}:{MOEX_OPEN_MINUTE:02d}"
+    asof_label = now_msk.strftime("%H:%M")
+
+    async with aiohttp.ClientSession() as session:
+        movers = await get_stock_day_movers(session, boardid="TQBR")
+
+    if not movers:
+        await message.answer("Не удалось получить данные по акциям TQBR.")
+        return
+
+    gainers = sorted(movers, key=lambda x: x["pct"], reverse=True)[:10]
+    losers = sorted([m for m in movers if m["pct"] < 0], key=lambda x: x["pct"])[:5]
+
+    lines = [
+        f"Топ акций за текущую сессию MOEX (TQBR)",
+        f"Период: {open_label}–{asof_label} МСК",
+        "",
+        "📈 Топ-10 роста:",
+    ]
+    for i, m in enumerate(gainers, 1):
+        lines.append(
+            f"{i}. {m['secid']} ({m['shortname']}) — {m['pct']:+.2f}% "
+            f"({money(m['open'])} → {money(m['last'])})"
+        )
+
+    lines.extend(["", "📉 Топ-5 падения:"])
+    if not losers:
+        lines.append("За текущую сессию падения не обнаружены.")
+    else:
+        for i, m in enumerate(losers, 1):
+            lines.append(
+                f"{i}. {m['secid']} ({m['shortname']}) — {m['pct']:+.2f}% "
+                f"({money(m['open'])} → {money(m['last'])})"
+            )
+
+    await message.answer("\n".join(lines))
 
 async def make_clear_portfolio_kb():
     kb = InlineKeyboardBuilder()
@@ -1653,6 +1695,7 @@ async def main():
     dp.message.register(cmd_start, Command("start"), StateFilter("*"))
     dp.message.register(cmd_add_trade, Command("add_trade"), StateFilter("*"))
     dp.message.register(cmd_portfolio, Command("portfolio"), StateFilter("*"))
+    dp.message.register(cmd_top_movers, Command("top_movers"), StateFilter("*"))
     dp.message.register(cmd_clear_portfolio, Command("clear_portfolio"), StateFilter("*"))
     dp.message.register(cmd_asset_lookup, Command("asset_lookup"), StateFilter("*"))
     dp.message.register(cmd_import_broker_xml, Command("import_broker_xml"), StateFilter("*"))
