@@ -48,7 +48,6 @@ from moex_iss import (
     search_metals,
     search_securities,
 )
-from moex_logos import get_moex_logo_url
 
 MSK_TZ = ZoneInfo("Europe/Moscow")
 MOEX_OPEN_HOUR = 10
@@ -340,11 +339,8 @@ async def build_asset_dynamics_text(chosen: dict, asset_type: str) -> str:
 
     async with aiohttp.ClientSession() as session:
         current = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
-        logo_url = get_moex_logo_url(secid) if asset_type == ASSET_TYPE_STOCK else None
         lines = [f"{name} ({secid})"]
         lines.append(f"Текущая цена: {money(current)} RUB" if current is not None else "Текущая цена: нет данных")
-        if logo_url:
-            lines.append(f"Иконка: {logo_url}")
         lines.extend(["", "Динамика:"])
         for label, days in periods:
             history = await get_history_prices_by_asset_type(
@@ -469,14 +465,12 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
         asset_name = html.escape(asset_name_raw)
         ticker_safe = html.escape(ticker)
         unit = "гр" if (pos.get("asset_type") == ASSET_TYPE_METAL) else "акции"
-        logo_url = get_moex_logo_url(ticker) if (pos.get("asset_type") == ASSET_TYPE_STOCK) else None
         total_cost = float(pos.get("total_cost") or 0.0)
 
         if last is None:
             unknown_prices += 1
-            logo_part = f' - <a href="{html.escape(logo_url)}">иконка</a>' if logo_url else ""
             lines.append(
-                f"{asset_name} - {ticker_safe} - {qty:g} {unit}{logo_part} - Общая стоимость актива: нет данных - P&L: нет данных"
+                f"{asset_name} - {ticker_safe} - {qty:g} {unit} - Общая стоимость актива: нет данных - P&L: нет данных"
             )
             continue
 
@@ -491,9 +485,8 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
             pnl_tail = f"{emoji} {money_signed(pnl)} RUB"
         else:
             pnl_tail = f"{emoji} {pnl_pct:+.2f}% {money_signed(pnl)} RUB"
-        logo_part = f' - <a href="{html.escape(logo_url)}">иконка</a>' if logo_url else ""
         lines.append(
-            f"{asset_name} - {ticker_safe} - {qty:g} {unit}{logo_part} - Общая стоимость актива: <b>{money(value)}</b> RUB - P&L {pnl_tail}"
+            f"{asset_name} - {ticker_safe} - {qty:g} {unit} - Общая стоимость актива: <b>{money(value)}</b> RUB - P&L {pnl_tail}"
         )
 
     total_pnl = total_value_known - total_cost_known
