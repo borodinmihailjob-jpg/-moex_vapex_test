@@ -502,13 +502,12 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
         asset_name = html.escape(asset_name_raw)
         ticker_safe = html.escape(ticker)
         unit = "гр" if (pos.get("asset_type") == ASSET_TYPE_METAL) else "акции"
-        asset_emoji = "🥇" if (pos.get("asset_type") == ASSET_TYPE_METAL) else "📈"
         total_cost = float(pos.get("total_cost") or 0.0)
 
         if last is None:
             unknown_prices += 1
             lines.append(
-                f"• {asset_emoji} {asset_name} - {ticker_safe} - {qty:g} {unit} - Общая стоимость актива: нет данных - P&L: нет данных"
+                f"• {asset_name} - {ticker_safe} - {qty:g} {unit} - Общая стоимость актива: нет данных - P&L: нет данных"
             )
             continue
 
@@ -524,7 +523,7 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
         else:
             pnl_tail = f"{emoji} {pnl_pct:+.2f}% {money_signed(pnl)} RUB"
         lines.append(
-            f"• {asset_emoji} {asset_name} - {ticker_safe} - {qty:g} {unit} - Общая стоимость актива: <b>{money(value)}</b> RUB - P&L {pnl_tail}"
+            f"• {asset_name} - {ticker_safe} - {qty:g} {unit} - Общая стоимость актива: <b>{money(value)}</b> RUB - P&L {pnl_tail}"
         )
 
     total_pnl = total_value_known - total_cost_known
@@ -536,7 +535,7 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
         total_pnl_text = f"{total_emoji} {total_pnl_pct:+.2f}% <b>{money_signed(total_pnl)} RUB</b>"
     footer = (
         f"💰 Итоговая стоимость активов по всем тикерам: <b>{money(total_value_known)}</b> RUB\n"
-        f"📊 P&L: {total_pnl_text}"
+        f"P&L: {total_pnl_text}"
     )
     if unknown_prices:
         footer += f"\nНет рыночной цены для {unknown_prices} инструментов, они не включены в итог."

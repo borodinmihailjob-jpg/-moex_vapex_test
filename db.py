@@ -123,6 +123,23 @@ def _norm_boardid(boardid: str | None) -> str:
     return (boardid or "").strip()
 
 
+def _pick_canonical_metal(rows: list[asyncpg.Record]) -> asyncpg.Record:
+    # Priority:
+    # 1) has ISIN
+    # 2) empty boardid
+    # 3) user-friendly shortname
+    # 4) lowest id
+    return sorted(
+        rows,
+        key=lambda r: (
+            0 if (r["isin"] or "").strip() else 1,
+            0 if (r["boardid"] or "").strip() == "" else 1,
+            0 if (r["shortname"] or "").strip().lower() in {"золото", "серебро", "платина", "палладий"} else 1,
+            int(r["id"]),
+        ),
+    )[0]
+
+
 async def _get_pool(db_dsn: str) -> asyncpg.Pool:
     async with _pools_lock:
         pool = _pools.get(db_dsn)
@@ -319,6 +336,61 @@ async def _rebuild_positions(conn: asyncpg.Connection) -> None:
     )
 
 
+async def _deduplicate_metal_instruments(conn: asyncpg.Connection) -> None:
+    rows = await conn.fetch(
+        """
+        SELECT id, secid, isin, boardid, shortname
+        FROM instruments
+        WHERE asset_type = 'metal'
+        ORDER BY secid, id
+        """
+    )
+    by_secid: dict[str, list[asyncpg.Record]] = {}
+    for row in rows:
+        secid = str(row["secid"])
+        by_secid.setdefault(secid, []).append(row)
+
+    merged_any = False
+    for secid, items in by_secid.items():
+        if len(items) <= 1:
+            continue
+        merged_any = True
+        canonical = _pick_canonical_metal(items)
+        canonical_id = int(canonical["id"])
+        dup_ids = [int(r["id"]) for r in items if int(r["id"]) != canonical_id]
+
+        await conn.execute(
+            """
+            UPDATE instruments i
+            SET isin = COALESCE(NULLIF(i.isin, ''), $2),
+                shortname = COALESCE(NULLIF(i.shortname, ''), $3),
+                boardid = ''
+            WHERE i.id = $1
+            """,
+            canonical_id,
+            (canonical["isin"] or None),
+            (canonical["shortname"] or None),
+        )
+
+        for dup_id in dup_ids:
+            await conn.execute("UPDATE trades SET instrument_id = $1 WHERE instrument_id = $2", canonical_id, dup_id)
+            await conn.execute("DELETE FROM price_cache WHERE instrument_id = $1", dup_id)
+            await conn.execute("DELETE FROM price_alert_state WHERE instrument_id = $1", dup_id)
+            await conn.execute("DELETE FROM user_positions WHERE instrument_id = $1", dup_id)
+            await conn.execute("DELETE FROM instruments WHERE id = $1", dup_id)
+
+        logger.info(
+            "Merged duplicate metal instruments secid=%s canonical_id=%s removed=%s",
+            secid,
+            canonical_id,
+            dup_ids,
+        )
+
+    if merged_any:
+        await conn.execute("DELETE FROM price_cache")
+        await conn.execute("TRUNCATE TABLE price_alert_state")
+
+
 async def init_db(db_path: str):
     try:
         pool = await _get_pool(db_path)
@@ -330,6 +402,7 @@ async def init_db(db_path: str):
                 for sql in POST_MIGRATION_INDEX_SQL:
                     await conn.execute(sql)
                 await _backfill_user_links(conn)
+                await _deduplicate_metal_instruments(conn)
                 await _rebuild_positions(conn)
         logger.info("Database initialized (PostgreSQL)")
     except Exception:
@@ -347,7 +420,7 @@ async def upsert_instrument(
 ):
     try:
         pool = await _get_pool(db_path)
-        norm_board = _norm_boardid(boardid)
+        norm_board = "" if asset_type == "metal" else _norm_boardid(boardid)
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
