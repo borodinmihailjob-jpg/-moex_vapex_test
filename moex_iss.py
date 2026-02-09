@@ -540,6 +540,124 @@ async def get_stock_movers_by_date(
     return out
 
 
+async def get_stock_snapshot(
+    session: aiohttp.ClientSession,
+    secid: str,
+    boardid: str = "TQBR",
+) -> dict | None:
+    path = f"/engines/stock/markets/shares/boards/{boardid}/securities/{secid}.json"
+    params = {
+        "iss.meta": "off",
+        "securities.columns": "SECID,SHORTNAME,NAME",
+        "marketdata.columns": "SECID,OPEN,LAST,BID,OFFER,VOLTODAY,VALTODAY",
+    }
+    data, delayed = await get_json_with_fallback_source(session, path, params=params)
+    sec = data.get("securities", {})
+    md = data.get("marketdata", {})
+    sec_cols = sec.get("columns", [])
+    sec_rows = sec.get("data", [])
+    md_cols = md.get("columns", [])
+    md_rows = md.get("data", [])
+    if not md_rows and not delayed:
+        mark_delayed_data_used()
+        data = await iss_get_json(session, path, params=params)
+        sec = data.get("securities", {})
+        md = data.get("marketdata", {})
+        sec_cols = sec.get("columns", [])
+        sec_rows = sec.get("data", [])
+        md_cols = md.get("columns", [])
+        md_rows = md.get("data", [])
+    if not md_rows:
+        return None
+
+    md_idx = {str(c).upper(): i for i, c in enumerate(md_cols)}
+    sec_idx = {str(c).upper(): i for i, c in enumerate(sec_cols)}
+    row = md_rows[0]
+    sec_row = sec_rows[0] if sec_rows else []
+
+    def pick_float(i: int | None) -> float | None:
+        if i is None or i >= len(row):
+            return None
+        v = row[i]
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except Exception:
+            return None
+
+    shortname = None
+    si = sec_idx.get("SHORTNAME")
+    if si is not None and si < len(sec_row):
+        shortname = str(sec_row[si] or "").strip() or None
+    if not shortname:
+        ni = sec_idx.get("NAME")
+        if ni is not None and ni < len(sec_row):
+            shortname = str(sec_row[ni] or "").strip() or None
+
+    return {
+        "secid": secid,
+        "boardid": boardid,
+        "shortname": shortname or secid,
+        "open": pick_float(md_idx.get("OPEN")),
+        "last": pick_float(md_idx.get("LAST")),
+        "bid": pick_float(md_idx.get("BID")),
+        "offer": pick_float(md_idx.get("OFFER")),
+        "vol_today": pick_float(md_idx.get("VOLTODAY")),
+        "val_today": pick_float(md_idx.get("VALTODAY")),
+    }
+
+
+async def get_stock_avg_daily_volume(
+    session: aiohttp.ClientSession,
+    secid: str,
+    boardid: str = "TQBR",
+    days: int = 20,
+) -> float | None:
+    path = f"/history/engines/stock/markets/shares/boards/{boardid}/securities/{secid}.json"
+    till = date.today()
+    from_dt = till.fromordinal(till.toordinal() - max(5, int(days * 2)))
+    params = {
+        "iss.meta": "off",
+        "from": from_dt.isoformat(),
+        "till": till.isoformat(),
+        "history.columns": "TRADEDATE,VOLUME",
+    }
+    data, delayed = await get_json_with_fallback_source(session, path, params=params)
+    hist = data.get("history", {})
+    cols = hist.get("columns", [])
+    rows = hist.get("data", [])
+    if not rows and not delayed:
+        mark_delayed_data_used()
+        data = await iss_get_json(session, path, params=params)
+        hist = data.get("history", {})
+        cols = hist.get("columns", [])
+        rows = hist.get("data", [])
+    if not rows:
+        return None
+    idx = {str(c).upper(): i for i, c in enumerate(cols)}
+    vol_i = idx.get("VOLUME")
+    if vol_i is None:
+        return None
+    values: list[float] = []
+    for r in rows:
+        if vol_i >= len(r):
+            continue
+        v = r[vol_i]
+        if v is None:
+            continue
+        try:
+            f = float(v)
+            if f >= 0:
+                values.append(f)
+        except Exception:
+            continue
+    if not values:
+        return None
+    take = values[-days:] if len(values) > days else values
+    return sum(take) / len(take)
+
+
 async def _load_board_shortnames(session: aiohttp.ClientSession, boardid: str) -> dict[str, str]:
     path = f"/engines/stock/markets/shares/boards/{boardid}/securities.json"
     params = {

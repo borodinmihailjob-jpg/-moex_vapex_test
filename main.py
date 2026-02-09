@@ -46,6 +46,11 @@ from db import (
     get_price_cache_map,
     get_active_app_text,
     list_active_app_texts,
+    get_user_risk_profile,
+    set_user_risk_profile,
+    add_watchlist_item,
+    remove_watchlist_item,
+    list_watchlist_items,
 )
 from moex_iss import (
     ASSET_TYPE_METAL,
@@ -53,6 +58,8 @@ from moex_iss import (
     DELAYED_WARNING_TEXT,
     delayed_data_used,
     get_stock_movers_by_date,
+    get_stock_snapshot,
+    get_stock_avg_daily_volume,
     get_history_prices_by_asset_type,
     get_last_price_by_asset_type,
     reset_data_source_flags,
@@ -78,6 +85,12 @@ BTN_ASSET_LOOKUP = "Поиск цены"
 BTN_PORTFOLIO_MAP = "Карта портфеля"
 TRADE_SIDE_BUY = "buy"
 TRADE_SIDE_SELL = "sell"
+INVEST_DISCLAIMER = (
+    "Данная информация не является индивидуальной инвестиционной рекомендацией, и финансовые инструменты "
+    "либо операции, упомянутые в ней, могут не соответствовать Вашему инвестиционному профилю и инвестиционным "
+    "целям (ожиданиям). Определение соответствия финансового инструмента либо операции Вашим интересам, "
+    "инвестиционным целям, инвестиционному горизонту и уровню допустимого риска является Вашей задачей."
+)
 
 def setup_logging() -> None:
     project_root = Path(__file__).resolve().parent
@@ -151,6 +164,15 @@ def rub_amount(x: float | None) -> str:
         return "н/д"
 
 
+def qty_int(x: float | None) -> str:
+    if x is None:
+        return "н/д"
+    try:
+        return f"{int(round(float(x))):,}".replace(",", " ")
+    except Exception:
+        return "н/д"
+
+
 def _ru_weekday_short(d: date) -> str:
     names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
     return names[d.weekday()]
@@ -214,6 +236,49 @@ def build_top_movers_text(movers: list[dict], selected_date: date) -> str:
                 f"Объём торгов за день: {rub_amount(m.get('val_today'))} RUB"
             )
     return "\n".join(lines)
+
+
+PROFILE_TARGETS: dict[str, dict[str, float]] = {
+    "conservative": {"stock": 0.45, "metal": 0.55},
+    "balanced": {"stock": 0.70, "metal": 0.30},
+    "aggressive": {"stock": 0.90, "metal": 0.10},
+}
+
+SECTOR_MAP: dict[str, str] = {
+    "SBER": "Финансы",
+    "VTBR": "Финансы",
+    "T": "Технологии",
+    "YDEX": "Технологии",
+    "GAZP": "Энергетика",
+    "LKOH": "Энергетика",
+    "ROSN": "Энергетика",
+    "SNGS": "Энергетика",
+    "NVTK": "Энергетика",
+    "GMKN": "Металлы и добыча",
+    "RUAL": "Металлы и добыча",
+    "CHMF": "Металлы и добыча",
+    "NLMK": "Металлы и добыча",
+    "POLY": "Металлы и добыча",
+    "ALRS": "Металлы и добыча",
+    "MAGN": "Металлы и добыча",
+    "PLZL": "Металлы и добыча",
+    "MTSS": "Телеком",
+    "RTKM": "Телеком",
+    "MOEX": "Финансы",
+}
+
+
+def _sec_sector(secid: str) -> str:
+    return SECTOR_MAP.get(str(secid or "").strip().upper(), "Прочее")
+
+
+def _spread_pct(bid: float | None, offer: float | None) -> float | None:
+    if bid is None or offer is None:
+        return None
+    mid = (bid + offer) / 2.0
+    if mid <= 0:
+        return None
+    return (offer - bid) / mid * 100.0
 
 async def safe_edit_text(message: Message | None, text: str, reply_markup=None) -> None:
     if message is None:
@@ -455,6 +520,10 @@ def append_delayed_warning(text: str) -> str:
     if delayed_data_used():
         return f"{text}\n{DELAYED_WARNING_TEXT}"
     return text
+
+
+def with_disclaimer(text: str) -> str:
+    return f"{text}\n\n{INVEST_DISCLAIMER}"
 
 
 def _load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
@@ -950,6 +1019,13 @@ async def cmd_start(message: Message):
         "/portfolio_map — карта портфеля (акции и металлы)\n"
         "/asset_lookup — текущая цена и динамика за неделю/месяц/6 мес/год\n\n"
         "/top_movers — топ роста/падения акций за текущую сессию\n\n"
+        "🧭 Ребаланс и сигналы (MVP)\n"
+        "/set_profile — установить профиль: conservative|balanced|aggressive\n"
+        "/rebalance_plan — план ребалансировки портфеля\n"
+        "/watchlist_add — добавить тикер в watchlist\n"
+        "/watchlist_remove — удалить тикер из watchlist\n"
+        "/watchlist — показать текущий watchlist\n"
+        "/market_digest — digest по watchlist (premarket/open/close)\n\n"
         "/clear_portfolio — удалить все сделки и очистить портфель\n\n"
         "📥 Импорт\n"
         "/import_broker_xml — загрузить XML брокерской выписки и импортировать сделки\n\n"
@@ -1015,6 +1091,214 @@ async def on_top_movers_date_pick(call: CallbackQuery):
         reply_markup=await make_top_movers_dates_kb(selected=selected),
     )
     await call.answer()
+
+
+async def cmd_set_profile(message: Message):
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        await message.answer("Не удалось определить пользователя.")
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) != 2:
+        await message.answer(
+            with_disclaimer(
+                "Использование: /set_profile <conservative|balanced|aggressive>\n"
+                "Пример: /set_profile balanced"
+            )
+        )
+        return
+    profile = parts[1].strip().lower()
+    if profile not in PROFILE_TARGETS:
+        await message.answer(with_disclaimer("Профиль должен быть: conservative, balanced или aggressive."))
+        return
+    await set_user_risk_profile(DB_DSN, user_id, profile)
+    targets = PROFILE_TARGETS[profile]
+    await message.answer(
+        with_disclaimer(
+            f"Профиль установлен: {profile}\n"
+            f"Целевые веса: акции {targets['stock']*100:.0f}%, металлы {targets['metal']*100:.0f}%."
+        )
+    )
+
+
+async def cmd_rebalance_plan(message: Message):
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        await message.answer("Не удалось определить пользователя.")
+        return
+    positions = await get_user_positions(DB_DSN, user_id)
+    if not positions:
+        await message.answer(with_disclaimer("Портфель пуст. Добавьте сделки через /add_trade."))
+        return
+
+    reset_data_source_flags()
+    prices = await _load_prices_for_positions(positions)
+    stock_value = 0.0
+    metal_value = 0.0
+    for pos in positions:
+        last = prices.get(int(pos["id"]))
+        if last is None:
+            continue
+        value = float(pos.get("total_qty") or 0.0) * float(last)
+        if value <= 0:
+            continue
+        if (pos.get("asset_type") or ASSET_TYPE_STOCK) == ASSET_TYPE_METAL:
+            metal_value += value
+        else:
+            stock_value += value
+    total = stock_value + metal_value
+    if total <= 0:
+        await message.answer(with_disclaimer("Недостаточно рыночных данных для построения ребалансировки."))
+        return
+
+    profile = await get_user_risk_profile(DB_DSN, user_id)
+    target = PROFILE_TARGETS.get(profile, PROFILE_TARGETS["balanced"])
+    cur_stock = stock_value / total
+    cur_metal = metal_value / total
+    tgt_stock = target["stock"]
+    tgt_metal = target["metal"]
+    d_stock = cur_stock - tgt_stock
+    d_metal = cur_metal - tgt_metal
+    threshold = 0.02
+    stock_action = "в норме"
+    if d_stock < -threshold:
+        stock_action = f"докупить на {money(abs(d_stock) * total)} RUB"
+    elif d_stock > threshold:
+        stock_action = f"сократить на {money(abs(d_stock) * total)} RUB"
+    metal_action = "в норме"
+    if d_metal < -threshold:
+        metal_action = f"докупить на {money(abs(d_metal) * total)} RUB"
+    elif d_metal > threshold:
+        metal_action = f"сократить на {money(abs(d_metal) * total)} RUB"
+
+    text = (
+        f"План ребалансировки (профиль: {profile})\n"
+        f"Текущая стоимость портфеля: {money(total)} RUB\n\n"
+        f"Акции: текущий вес {cur_stock*100:.2f}%, целевой {tgt_stock*100:.2f}%, отклонение {d_stock*100:+.2f}%\n"
+        f"Рекомендация: {stock_action}\n\n"
+        f"Металлы: текущий вес {cur_metal*100:.2f}%, целевой {tgt_metal*100:.2f}%, отклонение {d_metal*100:+.2f}%\n"
+        f"Рекомендация: {metal_action}\n\n"
+        "Порог действия: 2% отклонения от целевых весов."
+    )
+    text = append_delayed_warning(text)
+    await message.answer(with_disclaimer(text))
+
+
+async def cmd_watchlist_add(message: Message):
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        await message.answer("Не удалось определить пользователя.")
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) < 2:
+        await message.answer(with_disclaimer("Использование: /watchlist_add <тикер>, например /watchlist_add SBER"))
+        return
+    secid = parts[1].strip().upper()
+    await add_watchlist_item(DB_DSN, user_id, secid=secid, boardid="TQBR", asset_type=ASSET_TYPE_STOCK)
+    await message.answer(with_disclaimer(f"Инструмент {secid} добавлен в watchlist."))
+
+
+async def cmd_watchlist_remove(message: Message):
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        await message.answer("Не удалось определить пользователя.")
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) < 2:
+        await message.answer(with_disclaimer("Использование: /watchlist_remove <тикер>, например /watchlist_remove SBER"))
+        return
+    secid = parts[1].strip().upper()
+    deleted = await remove_watchlist_item(DB_DSN, user_id, secid=secid, boardid="TQBR", asset_type=ASSET_TYPE_STOCK)
+    if deleted:
+        await message.answer(with_disclaimer(f"Инструмент {secid} удален из watchlist."))
+    else:
+        await message.answer(with_disclaimer(f"Инструмент {secid} не найден в watchlist."))
+
+
+async def cmd_watchlist(message: Message):
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        await message.answer("Не удалось определить пользователя.")
+        return
+    rows = await list_watchlist_items(DB_DSN, user_id)
+    if not rows:
+        await message.answer(with_disclaimer("Watchlist пуст. Добавьте тикер через /watchlist_add SBER"))
+        return
+    lines = ["Ваш watchlist:"]
+    for i, r in enumerate(rows, 1):
+        lines.append(f"{i}. {r['secid']} ({r['boardid']})")
+    await message.answer(with_disclaimer("\n".join(lines)))
+
+
+async def cmd_market_digest(message: Message):
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        await message.answer("Не удалось определить пользователя.")
+        return
+    parts = (message.text or "").strip().split()
+    mode = parts[1].strip().lower() if len(parts) > 1 else "close"
+    if mode not in {"premarket", "open", "close"}:
+        await message.answer(with_disclaimer("Использование: /market_digest [premarket|open|close]"))
+        return
+
+    watch = await list_watchlist_items(DB_DSN, user_id)
+    if not watch:
+        await message.answer(with_disclaimer("Watchlist пуст. Добавьте тикер через /watchlist_add SBER"))
+        return
+
+    reset_data_source_flags()
+    leaders_by_sector: dict[str, dict] = {}
+    anomalies: list[str] = []
+    spreads: list[str] = []
+    snapshots: list[dict] = []
+
+    async with aiohttp.ClientSession() as session:
+        for row in watch[:40]:
+            secid = str(row.get("secid") or "").strip().upper()
+            if not secid:
+                continue
+            snap = await get_stock_snapshot(session, secid, boardid=str(row.get("boardid") or "TQBR"))
+            if not snap:
+                continue
+            snapshots.append(snap)
+            open_px = snap.get("open")
+            last_px = snap.get("last")
+            pct = None
+            if open_px and last_px and open_px > 0:
+                pct = (last_px - open_px) / open_px * 100.0
+            sector = _sec_sector(secid)
+            if pct is not None:
+                best = leaders_by_sector.get(sector)
+                if best is None or pct > float(best.get("pct") or -10**9):
+                    leaders_by_sector[sector] = {"secid": secid, "name": snap.get("shortname") or secid, "pct": pct}
+
+            vol = snap.get("vol_today")
+            if vol is not None:
+                avg_vol = await get_stock_avg_daily_volume(session, secid, boardid=str(row.get("boardid") or "TQBR"), days=20)
+                if avg_vol and avg_vol > 0 and vol >= avg_vol * 2.0:
+                    anomalies.append(f"{secid}: объём {qty_int(vol)} шт (~x{vol/avg_vol:.2f} к среднему 20д)")
+
+            spread = _spread_pct(snap.get("bid"), snap.get("offer"))
+            if spread is not None and spread >= 0.35:
+                spreads.append(f"{secid}: спред {spread:.2f}%")
+
+    lines = [f"MOEX digest ({mode})", f"Watchlist: {len(watch)} инструментов", ""]
+    lines.append("Лидеры по секторам:")
+    if not leaders_by_sector:
+        lines.append("нет данных")
+    else:
+        for sector in sorted(leaders_by_sector.keys()):
+            item = leaders_by_sector[sector]
+            lines.append(f"• {sector}: {item['secid']} ({item['name']}) {item['pct']:+.2f}%")
+
+    lines.extend(["", "Аномальные объёмы:"])
+    lines.extend([f"• {x}" for x in anomalies[:10]] or ["нет сигналов"])
+
+    lines.extend(["", "Расширение спреда:"])
+    lines.extend([f"• {x}" for x in spreads[:10]] or ["нет сигналов"])
+
+    text = append_delayed_warning("\n".join(lines))
+    await message.answer(with_disclaimer(text))
 
 async def make_clear_portfolio_kb():
     kb = InlineKeyboardBuilder()
@@ -2024,6 +2308,12 @@ async def main():
     dp.message.register(cmd_asset_lookup, Command("asset_lookup"), StateFilter("*"))
     dp.message.register(cmd_import_broker_xml, Command("import_broker_xml"), StateFilter("*"))
     dp.message.register(cmd_why_invest, Command("why_invest"), StateFilter("*"))
+    dp.message.register(cmd_set_profile, Command("set_profile"), StateFilter("*"))
+    dp.message.register(cmd_rebalance_plan, Command("rebalance_plan"), StateFilter("*"))
+    dp.message.register(cmd_watchlist_add, Command("watchlist_add"), StateFilter("*"))
+    dp.message.register(cmd_watchlist_remove, Command("watchlist_remove"), StateFilter("*"))
+    dp.message.register(cmd_watchlist, Command("watchlist"), StateFilter("*"))
+    dp.message.register(cmd_market_digest, Command("market_digest"), StateFilter("*"))
     dp.message.register(cmd_set_interval, Command("set_interval"), StateFilter("*"))
     dp.message.register(cmd_interval_off, Command("interval_off"), StateFilter("*"))
     dp.message.register(cmd_set_drop_alert, Command("set_drop_alert"), StateFilter("*"))
