@@ -408,15 +408,17 @@ def _blend(c1: tuple[int, int, int], c2: tuple[int, int, int], t: float) -> tupl
 
 
 def _tile_color_by_pnl_pct(pnl_pct: float | None) -> tuple[int, int, int]:
-    neutral = (58, 66, 78)
-    green = (40, 167, 69)
-    red = (220, 53, 69)
+    # More saturated palette for clearer heatmap perception.
+    neutral = (45, 57, 70)
+    green = (0, 200, 83)
+    red = (255, 23, 68)
     if pnl_pct is None:
         return neutral
-    norm = max(-12.0, min(12.0, float(pnl_pct))) / 12.0
+    norm = max(-8.0, min(8.0, float(pnl_pct))) / 8.0
+    strength = abs(norm) ** 0.65
     if norm >= 0:
-        return _blend(neutral, green, norm)
-    return _blend(neutral, red, abs(norm))
+        return _blend(neutral, green, strength)
+    return _blend(neutral, red, strength)
 
 
 def _text_color_for_bg(bg: tuple[int, int, int]) -> tuple[int, int, int]:
@@ -467,25 +469,30 @@ def _fit_line(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, m
 
 
 def build_portfolio_map_png(tiles: list[dict]) -> bytes:
-    width = 1600
-    height = 900
-    pad = 10
-    gap = 3
-    bg = (245, 245, 248)
+    width = 2800
+    height = 1700
+    pad = 16
+    gap = 4
+    bg = (242, 244, 247)
     image = Image.new("RGB", (width, height), color=bg)
     draw = ImageDraw.Draw(image)
 
-    title_font = _load_font(42, bold=True)
-    small_title_font = _load_font(24, bold=True)
-    secid_font = _load_font(26, bold=True)
-    name_font = _load_font(18, bold=False)
-    value_font = _load_font(34, bold=True)
-    stat_font = _load_font(22, bold=True)
+    title_font = _load_font(66, bold=True)
+    small_title_font = _load_font(34, bold=True)
+    secid_font = _load_font(42, bold=True)
+    name_font = _load_font(29, bold=False)
+    value_font = _load_font(42, bold=True)
+    stat_font = _load_font(30, bold=True)
 
     total_value = sum(float(t["value"]) for t in tiles)
-    header_h = 86
-    draw.text((pad, 10), "Карта портфеля (акции)", fill=(35, 35, 35), font=title_font)
-    draw.text((pad, 58), f"Инструментов: {len(tiles)}   Общая стоимость: {money(total_value)} RUB", fill=(90, 90, 90), font=small_title_font)
+    header_h = 145
+    draw.text((pad, 12), "Карта портфеля", fill=(32, 36, 40), font=title_font)
+    draw.text(
+        (pad, 86),
+        f"Инструментов: {len(tiles)}   Общая стоимость: {money(total_value)} RUB",
+        fill=(82, 90, 98),
+        font=small_title_font,
+    )
 
     chart_x = pad
     chart_y = header_h
@@ -497,14 +504,17 @@ def build_portfolio_map_png(tiles: list[dict]) -> bytes:
 
     for tile, rect in placements:
         x1, y1, x2, y2 = rect
-        if x2 - x1 < 8 or y2 - y1 < 8:
-            continue
-        x1 += gap
-        y1 += gap
-        x2 -= gap
-        y2 -= gap
+        w0 = x2 - x1
+        h0 = y2 - y1
+        # For tiny tiles keep almost full area so they stay visible.
+        local_gap = gap if min(w0, h0) >= 20 else 1
+        x1 += local_gap
+        y1 += local_gap
+        x2 -= local_gap
+        y2 -= local_gap
         if x2 <= x1 or y2 <= y1:
-            continue
+            x2 = max(x2, x1 + 1)
+            y2 = max(y2, y1 + 1)
 
         bg_color = _tile_color_by_pnl_pct(tile.get("pnl_pct"))
         fg_color = _text_color_for_bg(bg_color)
@@ -512,25 +522,33 @@ def build_portfolio_map_png(tiles: list[dict]) -> bytes:
 
         inner_w = x2 - x1
         inner_h = y2 - y1
+        # Smallest positions are rendered as pure colored squares (no labels).
+        if inner_w < 70 or inner_h < 46:
+            continue
         px = x1 + 10
         py = y1 + 8
 
-        if inner_w >= 130 and inner_h >= 54:
+        if inner_w >= 180 and inner_h >= 70:
             secid = _fit_line(draw, str(tile["secid"]), secid_font, inner_w - 20)
             draw.text((px, py), secid, fill=fg_color, font=secid_font)
-            py += 30
-        if inner_w >= 150 and inner_h >= 82:
+            py += 45
+        if inner_w >= 220 and inner_h >= 110:
             shortname = _fit_line(draw, str(tile.get("shortname") or ""), name_font, inner_w - 20)
             if shortname:
                 draw.text((px, py), shortname, fill=fg_color, font=name_font)
-                py += 24
+                py += 34
 
-        if inner_w >= 170 and inner_h >= 125:
+        if inner_w >= 240 and inner_h >= 150:
             val = f"{money(float(tile['value']))} RUB"
-            draw.text((px, max(py + 6, y1 + inner_h - 66)), _fit_line(draw, val, value_font, inner_w - 20), fill=fg_color, font=value_font)
+            draw.text(
+                (px, max(py + 6, y1 + inner_h - 72)),
+                _fit_line(draw, val, value_font, inner_w - 20),
+                fill=fg_color,
+                font=value_font,
+            )
 
         pnl_pct = tile.get("pnl_pct")
-        if inner_w >= 130 and inner_h >= 92:
+        if inner_w >= 190 and inner_h >= 92:
             if pnl_pct is None:
                 stat = "P&L: н/д"
             else:
@@ -538,7 +556,7 @@ def build_portfolio_map_png(tiles: list[dict]) -> bytes:
             draw.text((x1 + inner_w - 12 - draw.textlength(stat, font=stat_font), y1 + 10), stat, fill=fg_color, font=stat_font)
 
     buf = io.BytesIO()
-    image.save(buf, format="PNG", optimize=True)
+    image.save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -856,7 +874,7 @@ async def cmd_start(message: Message):
         "💼 Портфель\n"
         "/add_trade — добавить сделку (покупка/продажа)\n"
         "/portfolio — текущая стоимость портфеля и P&L\n"
-        "/portfolio_map — карта портфеля по акциям\n"
+        "/portfolio_map — карта портфеля (акции и металлы)\n"
         "/asset_lookup — текущая цена и динамика за неделю/месяц/6 мес/год\n\n"
         "/top_movers — топ роста/падения акций за текущую сессию\n\n"
         "/clear_portfolio — удалить все сделки и очистить портфель\n\n"
@@ -1234,16 +1252,15 @@ async def cmd_portfolio_map(message: Message):
         return
 
     positions = await get_user_positions(DB_DSN, user_id)
-    stock_positions = [p for p in positions if (p.get("asset_type") or ASSET_TYPE_STOCK) == ASSET_TYPE_STOCK]
-    if not stock_positions:
-        await message.answer("В портфеле нет акций для построения карты.")
+    if not positions:
+        await message.answer("Портфель пуст. Добавьте сделки через /add_trade.")
         return
 
     reset_data_source_flags()
-    prices = await _load_prices_for_positions(stock_positions)
+    prices = await _load_prices_for_positions(positions)
 
     tiles: list[dict] = []
-    for pos in stock_positions:
+    for pos in positions:
         qty = float(pos.get("total_qty") or 0.0)
         if qty <= 1e-12:
             continue
@@ -1267,14 +1284,14 @@ async def cmd_portfolio_map(message: Message):
         )
 
     if not tiles:
-        await message.answer("Нет рыночных данных по акциям для построения карты.")
+        await message.answer("Нет рыночных данных по инструментам для построения карты.")
         return
 
     image_bytes = build_portfolio_map_png(tiles)
-    caption = f"Карта портфеля по акциям ({len(tiles)} инструментов)"
+    caption = f"Карта портфеля ({len(tiles)} инструментов: акции и металлы)"
     caption = append_delayed_warning(caption)
-    await message.answer_photo(
-        photo=BufferedInputFile(image_bytes, filename="portfolio_map.png"),
+    await message.answer_document(
+        document=BufferedInputFile(image_bytes, filename="portfolio_map.png"),
         caption=caption,
     )
 
