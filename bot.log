@@ -1,0 +1,49 @@
+2026-02-08 11:08:19,150 INFO bot: Logging to /Users/mihailborodin/Documents/moex_portfolio_bot/bot.log
+2026-02-08 11:08:19,150 INFO root: Root logging initialized; writing to /Users/mihailborodin/Documents/moex_portfolio_bot/bot.log
+2026-02-08 11:08:19,152 ERROR db: Failed to initialize database
+Traceback (most recent call last):
+  File "/Users/mihailborodin/Documents/moex_portfolio_bot/db.py", line 83, in init_db
+    pool = await _get_pool(db_path)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mihailborodin/Documents/moex_portfolio_bot/db.py", line 68, in _get_pool
+    pool = await asyncpg.create_pool(dsn=db_dsn, min_size=1, max_size=8)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mihailborodin/Documents/moex_portfolio_bot/.venv/lib/python3.13/site-packages/asyncpg/pool.py", line 439, in _async__init__
+    await self._initialize()
+  File "/Users/mihailborodin/Documents/moex_portfolio_bot/.venv/lib/python3.13/site-packages/asyncpg/pool.py", line 466, in _initialize
+    await first_ch.connect()
+  File "/Users/mihailborodin/Documents/moex_portfolio_bot/.venv/lib/python3.13/site-packages/asyncpg/pool.py", line 153, in connect
+    self._con = await self._pool._get_new_connection()
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mihailborodin/Documents/moex_portfolio_bot/.venv/lib/python3.13/site-packages/asyncpg/pool.py", line 538, in _get_new_connection
+    con = await self._connect(
+          ^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/Users/mihailborodin/Documents/moex_portfolio_bot/.venv/lib/python3.13/site-packages/asyncpg/connection.py", line 2443, in connect
+    return await connect_utils._connect(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<22 lines>...
+    )
+    ^
+  File "/Users/mihailborodin/Documents/moex_portfolio_bot/.venv/lib/python3.13/site-packages/asyncpg/connect_utils.py", line 1209, in _connect
+    addrs, params, config = _parse_connect_arguments(**kwargs)
+                            ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "/Users/mihailborodin/Documents/moex_portfolio_bot/.venv/lib/python3.13/site-packages/asyncpg/connect_utils.py", line 893, in _parse_connect_arguments
+    addrs, params = _parse_connect_dsn_and_args(
+                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        dsn=dsn, host=host, port=port, user=user,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+        krbsrvname=krbsrvname, gsslib=gsslib,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        service=service, servicefile=servicefile)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mihailborodin/Documents/moex_portfolio_bot/.venv/lib/python3.13/site-packages/asyncpg/connect_utils.py", line 318, in _parse_connect_dsn_and_args
+    raise exceptions.ClientConfigurationError(
+        'invalid DSN: scheme is expected to be either '
+        '"postgresql" or "postgres", got {!r}'.format(parsed.scheme))
+asyncpg.exceptions._base.ClientConfigurationError: invalid DSN: scheme is expected to be either "postgresql" or "postgres", got ''
+2026-02-08 11:09:12,209 INFO bot: Logging to /Users/mihailborodin/Documents/moex_portfolio_bot/bot.log
+2026-02-08 11:09:12,210 INFO root: Root logging initialized; writing to /Users/mihailborodin/Documents/moex_portfolio_bot/bot.log
