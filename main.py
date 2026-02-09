@@ -35,6 +35,9 @@ from db import (
     update_close_sent_date,
     get_price_alert_state,
     set_price_alert_state,
+    list_active_position_instruments,
+    upsert_price_cache,
+    get_price_cache_map,
 )
 from moex_iss import (
     ASSET_TYPE_METAL,
@@ -279,10 +282,60 @@ def pnl_label(pnl_amount: float, pnl_percent: float | None) -> str:
 def pnl_emoji(pnl_amount: float) -> str:
     return "📈" if pnl_amount >= 0 else "📉"
 
-async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[dict]]:
-    positions = await get_user_positions(DB_DSN, user_id)
-    if not positions:
-        return ("Портфель пуст.", None, [])
+def _cache_age_seconds(updated_at: datetime | None, now_utc: datetime) -> float | None:
+    if updated_at is None:
+        return None
+    dt = updated_at
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0.0, (now_utc - dt.astimezone(timezone.utc)).total_seconds())
+
+async def refresh_price_cache_once() -> None:
+    instruments = await list_active_position_instruments(DB_DSN)
+    if not instruments:
+        return
+
+    async with aiohttp.ClientSession() as session:
+        async def load_price(row: dict):
+            try:
+                last = await get_last_price_by_asset_type(
+                    session,
+                    row["secid"],
+                    row.get("boardid"),
+                    row.get("asset_type") or ASSET_TYPE_STOCK,
+                )
+                return row, last
+            except Exception:
+                logger.exception("Failed to refresh price cache secid=%s boardid=%s", row.get("secid"), row.get("boardid"))
+                return row, None
+
+        priced = await asyncio.gather(*(load_price(row) for row in instruments))
+
+    now_utc = datetime.now(timezone.utc)
+    for row, last in priced:
+        if last is None:
+            continue
+        await upsert_price_cache(DB_DSN, int(row["instrument_id"]), float(last), now_utc)
+
+async def _load_prices_for_positions(positions: list[dict]) -> dict[int, float | None]:
+    now_utc = datetime.now(timezone.utc)
+    instrument_ids = [int(pos["id"]) for pos in positions]
+    cache = await get_price_cache_map(DB_DSN, instrument_ids)
+
+    prices: dict[int, float | None] = {}
+    missing_positions: list[dict] = []
+    for pos in positions:
+        iid = int(pos["id"])
+        rec = cache.get(iid)
+        if rec:
+            age = _cache_age_seconds(rec.get("updated_at"), now_utc)
+            if age is not None and age <= 120:
+                prices[iid] = float(rec["last_price"])
+                continue
+        missing_positions.append(pos)
+
+    if not missing_positions:
+        return prices
 
     async with aiohttp.ClientSession() as session:
         async def load_price(pos: dict):
@@ -298,14 +351,28 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
                 logger.exception("Failed to load price secid=%s boardid=%s", pos["secid"], pos.get("boardid"))
                 return pos, None
 
-        priced = await asyncio.gather(*(load_price(pos) for pos in positions))
+        loaded = await asyncio.gather(*(load_price(pos) for pos in missing_positions))
+
+    for pos, last in loaded:
+        iid = int(pos["id"])
+        prices[iid] = last
+        if last is not None:
+            await upsert_price_cache(DB_DSN, iid, float(last), now_utc)
+    return prices
+
+async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[dict]]:
+    positions = await get_user_positions(DB_DSN, user_id)
+    if not positions:
+        return ("Портфель пуст.", None, [])
+    prices = await _load_prices_for_positions(positions)
 
     total_value_known = 0.0
     total_cost_known = 0.0
     unknown_prices = 0
     lines = []
 
-    for pos, last in priced:
+    for pos in positions:
+        last = prices.get(int(pos["id"]))
         qty = pos["total_qty"]
         ticker = str(pos["secid"]).strip()
         asset_name_raw = (pos.get("shortname") or ticker).strip()
@@ -595,6 +662,7 @@ async def notifications_worker(bot: Bot):
     while True:
         now_utc = datetime.now(timezone.utc)
         try:
+            await refresh_price_cache_once()
             users = await list_users_with_alerts(DB_DSN)
             for uid in users:
                 try:

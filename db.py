@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 import asyncpg
@@ -7,6 +8,20 @@ import asyncpg
 logger = logging.getLogger(__name__)
 
 CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS users (
+  id BIGSERIAL PRIMARY KEY,
+  telegram_user_id BIGINT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS portfolios (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL DEFAULT 'Основной',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS instruments (
   id BIGSERIAL PRIMARY KEY,
   secid TEXT NOT NULL,
@@ -22,6 +37,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_instruments_secid_board_asset
 CREATE TABLE IF NOT EXISTS trades (
   id BIGSERIAL PRIMARY KEY,
   user_id BIGINT NOT NULL,
+  user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+  portfolio_id BIGINT REFERENCES portfolios(id) ON DELETE CASCADE,
   instrument_id BIGINT NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
   trade_date TEXT NOT NULL,
   qty DOUBLE PRECISION NOT NULL,
@@ -31,9 +48,33 @@ CREATE TABLE IF NOT EXISTS trades (
 
 CREATE INDEX IF NOT EXISTS ix_trades_user_instrument
   ON trades (user_id, instrument_id);
+CREATE INDEX IF NOT EXISTS ix_trades_user_ref_instrument
+  ON trades (user_ref_id, instrument_id);
+CREATE INDEX IF NOT EXISTS ix_trades_portfolio_instrument
+  ON trades (portfolio_id, instrument_id);
+
+CREATE TABLE IF NOT EXISTS user_positions (
+  portfolio_id BIGINT NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+  instrument_id BIGINT NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+  total_qty DOUBLE PRECISION NOT NULL DEFAULT 0,
+  total_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+  avg_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (portfolio_id, instrument_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_user_positions_portfolio
+  ON user_positions (portfolio_id);
+
+CREATE TABLE IF NOT EXISTS price_cache (
+  instrument_id BIGINT PRIMARY KEY REFERENCES instruments(id) ON DELETE CASCADE,
+  last_price DOUBLE PRECISION NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS user_alert_settings (
   user_id BIGINT PRIMARY KEY,
+  user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
   periodic_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   periodic_interval_min INTEGER NOT NULL DEFAULT 60,
   periodic_last_sent_at TEXT,
@@ -44,14 +85,28 @@ CREATE TABLE IF NOT EXISTS user_alert_settings (
   close_last_sent_date TEXT
 );
 
+CREATE INDEX IF NOT EXISTS ix_user_alert_settings_user_ref
+  ON user_alert_settings (user_ref_id);
+
 CREATE TABLE IF NOT EXISTS price_alert_state (
   user_id BIGINT NOT NULL,
+  user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
   instrument_id BIGINT NOT NULL,
   was_below BOOLEAN NOT NULL DEFAULT FALSE,
   last_alert_at TEXT,
   PRIMARY KEY (user_id, instrument_id)
 );
+
+CREATE INDEX IF NOT EXISTS ix_price_alert_state_user_ref_instrument
+  ON price_alert_state (user_ref_id, instrument_id);
 """
+
+MIGRATION_SQL = [
+    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS user_ref_id BIGINT",
+    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS portfolio_id BIGINT",
+    "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS user_ref_id BIGINT",
+    "ALTER TABLE price_alert_state ADD COLUMN IF NOT EXISTS user_ref_id BIGINT",
+]
 
 _pools: dict[str, asyncpg.Pool] = {}
 _pools_lock = asyncio.Lock()
@@ -78,11 +133,158 @@ async def close_pools() -> None:
         await p.close()
 
 
+async def _ensure_user_context(conn: asyncpg.Connection, telegram_user_id: int) -> tuple[int, int]:
+    user_row = await conn.fetchrow(
+        """
+        INSERT INTO users (telegram_user_id)
+        VALUES ($1)
+        ON CONFLICT (telegram_user_id) DO UPDATE
+        SET telegram_user_id = EXCLUDED.telegram_user_id
+        RETURNING id
+        """,
+        int(telegram_user_id),
+    )
+    user_ref_id = int(user_row["id"])
+    portfolio_row = await conn.fetchrow(
+        """
+        INSERT INTO portfolios (user_id, name)
+        VALUES ($1, 'Основной')
+        ON CONFLICT (user_id, name) DO UPDATE
+        SET name = EXCLUDED.name
+        RETURNING id
+        """,
+        user_ref_id,
+    )
+    portfolio_id = int(portfolio_row["id"])
+    return user_ref_id, portfolio_id
+
+
+async def _get_user_context(conn: asyncpg.Connection, telegram_user_id: int) -> tuple[int | None, int | None]:
+    row = await conn.fetchrow(
+        """
+        SELECT u.id AS user_ref_id, p.id AS portfolio_id
+        FROM users u
+        LEFT JOIN portfolios p ON p.user_id = u.id AND p.name = 'Основной'
+        WHERE u.telegram_user_id = $1
+        LIMIT 1
+        """,
+        int(telegram_user_id),
+    )
+    if not row:
+        return None, None
+    return (
+        int(row["user_ref_id"]) if row["user_ref_id"] is not None else None,
+        int(row["portfolio_id"]) if row["portfolio_id"] is not None else None,
+    )
+
+
+async def _backfill_user_links(conn: asyncpg.Connection) -> None:
+    await conn.execute(
+        """
+        INSERT INTO users (telegram_user_id)
+        SELECT DISTINCT user_id FROM trades
+        WHERE user_id IS NOT NULL
+        ON CONFLICT (telegram_user_id) DO NOTHING
+        """
+    )
+    await conn.execute(
+        """
+        INSERT INTO users (telegram_user_id)
+        SELECT DISTINCT user_id FROM user_alert_settings
+        WHERE user_id IS NOT NULL
+        ON CONFLICT (telegram_user_id) DO NOTHING
+        """
+    )
+    await conn.execute(
+        """
+        INSERT INTO users (telegram_user_id)
+        SELECT DISTINCT user_id FROM price_alert_state
+        WHERE user_id IS NOT NULL
+        ON CONFLICT (telegram_user_id) DO NOTHING
+        """
+    )
+    await conn.execute(
+        """
+        INSERT INTO portfolios (user_id, name)
+        SELECT u.id, 'Основной'
+        FROM users u
+        LEFT JOIN portfolios p ON p.user_id = u.id AND p.name = 'Основной'
+        WHERE p.id IS NULL
+        """
+    )
+    await conn.execute(
+        """
+        UPDATE trades t
+        SET user_ref_id = u.id
+        FROM users u
+        WHERE t.user_ref_id IS NULL
+          AND u.telegram_user_id = t.user_id
+        """
+    )
+    await conn.execute(
+        """
+        UPDATE trades t
+        SET portfolio_id = p.id
+        FROM portfolios p
+        WHERE t.portfolio_id IS NULL
+          AND t.user_ref_id = p.user_id
+          AND p.name = 'Основной'
+        """
+    )
+    await conn.execute(
+        """
+        UPDATE user_alert_settings s
+        SET user_ref_id = u.id
+        FROM users u
+        WHERE s.user_ref_id IS NULL
+          AND u.telegram_user_id = s.user_id
+        """
+    )
+    await conn.execute(
+        """
+        UPDATE price_alert_state s
+        SET user_ref_id = u.id
+        FROM users u
+        WHERE s.user_ref_id IS NULL
+          AND u.telegram_user_id = s.user_id
+        """
+    )
+
+
+async def _rebuild_positions(conn: asyncpg.Connection) -> None:
+    await conn.execute("TRUNCATE TABLE user_positions")
+    await conn.execute(
+        """
+        INSERT INTO user_positions (portfolio_id, instrument_id, total_qty, total_cost, avg_price, updated_at)
+        SELECT
+          t.portfolio_id,
+          t.instrument_id,
+          COALESCE(SUM(t.qty), 0) AS total_qty,
+          COALESCE(SUM(t.qty * t.price + t.commission), 0) AS total_cost,
+          CASE
+            WHEN ABS(COALESCE(SUM(t.qty), 0)) > 1e-12
+            THEN COALESCE(SUM(t.qty * t.price + t.commission), 0) / COALESCE(SUM(t.qty), 0)
+            ELSE 0
+          END AS avg_price,
+          NOW()
+        FROM trades t
+        WHERE t.portfolio_id IS NOT NULL
+        GROUP BY t.portfolio_id, t.instrument_id
+        HAVING ABS(COALESCE(SUM(t.qty), 0)) > 1e-12
+        """
+    )
+
+
 async def init_db(db_path: str):
     try:
         pool = await _get_pool(db_path)
         async with pool.acquire() as conn:
-            await conn.execute(CREATE_SQL)
+            async with conn.transaction():
+                await conn.execute(CREATE_SQL)
+                for sql in MIGRATION_SQL:
+                    await conn.execute(sql)
+                await _backfill_user_links(conn)
+                await _rebuild_positions(conn)
         logger.info("Database initialized (PostgreSQL)")
     except Exception:
         logger.exception("Failed to initialize database")
@@ -126,19 +328,54 @@ async def upsert_instrument(
 async def add_trade(db_path: str, user_id: int, instrument_id: int, trade_date: str, qty: float, price: float, commission: float):
     try:
         pool = await _get_pool(db_path)
+        qty_f = float(qty)
+        cost_f = qty_f * float(price) + float(commission)
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO trades (user_id, instrument_id, trade_date, qty, price, commission)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                """,
-                int(user_id),
-                int(instrument_id),
-                trade_date,
-                float(qty),
-                float(price),
-                float(commission),
-            )
+            async with conn.transaction():
+                user_ref_id, portfolio_id = await _ensure_user_context(conn, int(user_id))
+                await conn.execute(
+                    """
+                    INSERT INTO trades (user_id, user_ref_id, portfolio_id, instrument_id, trade_date, qty, price, commission)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    """,
+                    int(user_id),
+                    user_ref_id,
+                    portfolio_id,
+                    int(instrument_id),
+                    trade_date,
+                    qty_f,
+                    float(price),
+                    float(commission),
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO user_positions (portfolio_id, instrument_id, total_qty, total_cost, avg_price, updated_at)
+                    VALUES ($1, $2, $3, $4, 0, NOW())
+                    ON CONFLICT (portfolio_id, instrument_id) DO UPDATE
+                    SET total_qty = user_positions.total_qty + EXCLUDED.total_qty,
+                        total_cost = user_positions.total_cost + EXCLUDED.total_cost,
+                        avg_price = CASE
+                            WHEN ABS(user_positions.total_qty + EXCLUDED.total_qty) > 1e-12
+                            THEN (user_positions.total_cost + EXCLUDED.total_cost) / (user_positions.total_qty + EXCLUDED.total_qty)
+                            ELSE 0
+                        END,
+                        updated_at = NOW()
+                    """,
+                    portfolio_id,
+                    int(instrument_id),
+                    qty_f,
+                    cost_f,
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM user_positions
+                    WHERE portfolio_id = $1
+                      AND instrument_id = $2
+                      AND ABS(total_qty) <= 1e-12
+                    """,
+                    portfolio_id,
+                    int(instrument_id),
+                )
         logger.info("Trade inserted: user=%s instrument=%s qty=%s price=%s", user_id, instrument_id, qty, price)
     except Exception:
         logger.exception("Failed add_trade user=%s instrument=%s", user_id, instrument_id)
@@ -152,21 +389,21 @@ async def get_position_agg(db_path: str, user_id: int, instrument_id: int):
     try:
         pool = await _get_pool(db_path)
         async with pool.acquire() as conn:
+            _, portfolio_id = await _get_user_context(conn, int(user_id))
+            if portfolio_id is None:
+                return 0.0, 0.0, 0.0
             row = await conn.fetchrow(
                 """
-                SELECT
-                  COALESCE(SUM(qty),0) AS total_qty,
-                  COALESCE(SUM(qty*price + commission),0) AS total_cost
-                FROM trades
-                WHERE user_id=$1 AND instrument_id=$2
+                SELECT total_qty, total_cost, avg_price
+                FROM user_positions
+                WHERE portfolio_id = $1 AND instrument_id = $2
                 """,
-                int(user_id),
+                portfolio_id,
                 int(instrument_id),
             )
-            total_qty = float(row["total_qty"])
-            total_cost = float(row["total_cost"])
-            avg_price = (total_cost / total_qty) if total_qty else 0.0
-            return total_qty, total_cost, float(avg_price)
+            if not row:
+                return 0.0, 0.0, 0.0
+            return float(row["total_qty"]), float(row["total_cost"]), float(row["avg_price"])
     except Exception:
         logger.exception("Failed get_position_agg user=%s instrument=%s", user_id, instrument_id)
         raise
@@ -207,6 +444,9 @@ async def get_user_positions(db_path: str, user_id: int):
     try:
         pool = await _get_pool(db_path)
         async with pool.acquire() as conn:
+            _, portfolio_id = await _get_user_context(conn, int(user_id))
+            if portfolio_id is None:
+                return []
             rows = await conn.fetch(
                 """
                 SELECT
@@ -216,39 +456,112 @@ async def get_user_positions(db_path: str, user_id: int):
                   i.boardid,
                   i.shortname,
                   COALESCE(i.asset_type, 'stock') AS asset_type,
-                  COALESCE(SUM(t.qty), 0) AS total_qty,
-                  COALESCE(SUM(t.qty * t.price + t.commission), 0) AS total_cost
-                FROM trades t
-                JOIN instruments i ON i.id = t.instrument_id
-                WHERE t.user_id = $1
-                GROUP BY i.id, i.secid, i.isin, i.boardid, i.shortname, COALESCE(i.asset_type, 'stock')
-                HAVING ABS(COALESCE(SUM(t.qty), 0)) > 1e-12
+                  up.total_qty,
+                  up.total_cost,
+                  up.avg_price
+                FROM user_positions up
+                JOIN instruments i ON i.id = up.instrument_id
+                WHERE up.portfolio_id = $1
+                  AND ABS(up.total_qty) > 1e-12
                 ORDER BY i.secid
                 """,
-                int(user_id),
+                portfolio_id,
             )
-
-        out = []
-        for row in rows:
-            total_qty = float(row["total_qty"])
-            total_cost = float(row["total_cost"])
-            avg_price = (total_cost / total_qty) if total_qty else 0.0
-            out.append(
-                {
-                    "id": int(row["id"]),
-                    "secid": row["secid"],
-                    "isin": row["isin"],
-                    "boardid": row["boardid"],
-                    "shortname": row["shortname"],
-                    "asset_type": row["asset_type"],
-                    "total_qty": total_qty,
-                    "total_cost": total_cost,
-                    "avg_price": float(avg_price),
-                }
-            )
-        return out
+        return [
+            {
+                "id": int(row["id"]),
+                "secid": row["secid"],
+                "isin": row["isin"],
+                "boardid": row["boardid"],
+                "shortname": row["shortname"],
+                "asset_type": row["asset_type"],
+                "total_qty": float(row["total_qty"]),
+                "total_cost": float(row["total_cost"]),
+                "avg_price": float(row["avg_price"]),
+            }
+            for row in rows
+        ]
     except Exception:
         logger.exception("Failed get_user_positions user=%s", user_id)
+        raise
+
+
+async def list_active_position_instruments(db_path: str) -> list[dict[str, Any]]:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT
+                  i.id AS instrument_id,
+                  i.secid,
+                  i.boardid,
+                  COALESCE(i.asset_type, 'stock') AS asset_type
+                FROM user_positions up
+                JOIN instruments i ON i.id = up.instrument_id
+                WHERE ABS(up.total_qty) > 1e-12
+                ORDER BY i.id
+                """
+            )
+        return [
+            {
+                "instrument_id": int(r["instrument_id"]),
+                "secid": r["secid"],
+                "boardid": r["boardid"],
+                "asset_type": r["asset_type"],
+            }
+            for r in rows
+        ]
+    except Exception:
+        logger.exception("Failed list_active_position_instruments")
+        raise
+
+
+async def upsert_price_cache(db_path: str, instrument_id: int, last_price: float, updated_at: datetime | None = None) -> None:
+    try:
+        pool = await _get_pool(db_path)
+        ts = updated_at or datetime.now(timezone.utc)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO price_cache (instrument_id, last_price, updated_at)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (instrument_id) DO UPDATE
+                SET last_price = EXCLUDED.last_price,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                int(instrument_id),
+                float(last_price),
+                ts,
+            )
+    except Exception:
+        logger.exception("Failed upsert_price_cache instrument=%s", instrument_id)
+        raise
+
+
+async def get_price_cache_map(db_path: str, instrument_ids: list[int]) -> dict[int, dict[str, Any]]:
+    if not instrument_ids:
+        return {}
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT instrument_id, last_price, updated_at
+                FROM price_cache
+                WHERE instrument_id = ANY($1::bigint[])
+                """,
+                [int(x) for x in instrument_ids],
+            )
+        return {
+            int(r["instrument_id"]): {
+                "last_price": float(r["last_price"]),
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        }
+    except Exception:
+        logger.exception("Failed get_price_cache_map for %s instruments", len(instrument_ids))
         raise
 
 
@@ -256,14 +569,17 @@ async def ensure_user_alert_settings(db_path: str, user_id: int):
     try:
         pool = await _get_pool(db_path)
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO user_alert_settings (user_id)
-                VALUES ($1)
-                ON CONFLICT(user_id) DO NOTHING
-                """,
-                int(user_id),
-            )
+            async with conn.transaction():
+                user_ref_id, _ = await _ensure_user_context(conn, int(user_id))
+                await conn.execute(
+                    """
+                    INSERT INTO user_alert_settings (user_id, user_ref_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT(user_id) DO UPDATE SET user_ref_id = EXCLUDED.user_ref_id
+                    """,
+                    int(user_id),
+                    user_ref_id,
+                )
     except Exception:
         logger.exception("Failed ensure_user_alert_settings user=%s", user_id)
         raise
@@ -463,15 +779,18 @@ async def set_price_alert_state(db_path: str, user_id: int, instrument_id: int, 
     try:
         pool = await _get_pool(db_path)
         async with pool.acquire() as conn:
+            user_ref_id, _ = await _get_user_context(conn, int(user_id))
             await conn.execute(
                 """
-                INSERT INTO price_alert_state (user_id, instrument_id, was_below, last_alert_at)
-                VALUES ($1, $2, $3, $4)
+                INSERT INTO price_alert_state (user_id, user_ref_id, instrument_id, was_below, last_alert_at)
+                VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT(user_id, instrument_id) DO UPDATE SET
+                  user_ref_id=EXCLUDED.user_ref_id,
                   was_below=EXCLUDED.was_below,
                   last_alert_at=EXCLUDED.last_alert_at
                 """,
                 int(user_id),
+                user_ref_id,
                 int(instrument_id),
                 bool(was_below),
                 alert_ts,
