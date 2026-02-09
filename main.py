@@ -21,6 +21,7 @@ from aiogram.fsm.context import FSMContext
 
 from db import (
     acquire_single_instance_lock,
+    release_single_instance_lock,
     clear_user_portfolio,
     init_db,
     upsert_instrument,
