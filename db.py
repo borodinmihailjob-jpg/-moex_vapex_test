@@ -124,6 +124,7 @@ POST_MIGRATION_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS ix_user_alert_settings_user_ref ON user_alert_settings (user_ref_id)",
     "CREATE INDEX IF NOT EXISTS ix_price_alert_state_user_ref_instrument ON price_alert_state (user_ref_id, instrument_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_app_texts_text_code ON app_texts (text_code)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_app_texts_text_code_norm ON app_texts ((lower(btrim(text_code)))) WHERE text_code IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS ix_app_texts_button_name_active ON app_texts (button_name, active)",
 ]
 
@@ -405,6 +406,33 @@ async def _deduplicate_metal_instruments(conn: asyncpg.Connection) -> None:
         await conn.execute("TRUNCATE TABLE price_alert_state")
 
 
+async def _deduplicate_app_texts(conn: asyncpg.Connection) -> None:
+    await conn.execute(
+        """
+        UPDATE app_texts
+        SET text_code = lower(btrim(text_code))
+        WHERE text_code IS NOT NULL
+        """
+    )
+    deleted = await conn.fetch(
+        """
+        WITH ranked AS (
+          SELECT id,
+                 ROW_NUMBER() OVER (PARTITION BY lower(btrim(text_code)) ORDER BY id) AS rn
+          FROM app_texts
+          WHERE text_code IS NOT NULL
+        )
+        DELETE FROM app_texts a
+        USING ranked r
+        WHERE a.id = r.id
+          AND r.rn > 1
+        RETURNING a.id
+        """
+    )
+    if deleted:
+        logger.info("Deduplicated app_texts: removed_rows=%s", len(deleted))
+
+
 async def init_db(db_path: str):
     try:
         pool = await _get_pool(db_path)
@@ -413,6 +441,7 @@ async def init_db(db_path: str):
                 await conn.execute(CREATE_SQL)
                 for sql in MIGRATION_SQL:
                     await conn.execute(sql)
+                await _deduplicate_app_texts(conn)
                 for sql in POST_MIGRATION_INDEX_SQL:
                     await conn.execute(sql)
                 await _backfill_user_links(conn)
@@ -729,20 +758,48 @@ async def ensure_app_text(
     button_name: str | None = None,
 ) -> None:
     try:
+        code = str(text_code).strip().lower()
+        if not code:
+            raise ValueError("text_code must not be empty")
+        btn = str(button_name).strip() if button_name else None
         pool = await _get_pool(db_path)
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO app_texts (text_code, button_name, value, active)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (text_code) DO UPDATE
-                SET button_name = COALESCE(app_texts.button_name, EXCLUDED.button_name)
-                """,
-                str(text_code).strip(),
-                (str(button_name).strip() if button_name else None),
-                str(value),
-                bool(active),
-            )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    SELECT id
+                    FROM app_texts
+                    WHERE lower(btrim(text_code)) = $1
+                    ORDER BY id
+                    LIMIT 1
+                    FOR UPDATE
+                    """,
+                    code,
+                )
+                if row:
+                    await conn.execute(
+                        """
+                        UPDATE app_texts
+                        SET text_code = $2,
+                            button_name = COALESCE(button_name, $3),
+                            active = COALESCE(active, TRUE)
+                        WHERE id = $1
+                        """,
+                        int(row["id"]),
+                        code,
+                        btn,
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        INSERT INTO app_texts (text_code, button_name, value, active)
+                        VALUES ($1, $2, $3, $4)
+                        """,
+                        code,
+                        btn,
+                        str(value),
+                        bool(active),
+                    )
     except Exception:
         logger.exception("Failed ensure_app_text text_code=%s", text_code)
         raise
