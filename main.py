@@ -47,6 +47,7 @@ from moex_iss import (
     search_metals,
     search_securities,
 )
+from moex_logos import get_moex_logo_url
 
 MSK_TZ = ZoneInfo("Europe/Moscow")
 MOEX_OPEN_HOUR = 10
@@ -338,12 +339,12 @@ async def build_asset_dynamics_text(chosen: dict, asset_type: str) -> str:
 
     async with aiohttp.ClientSession() as session:
         current = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
-        lines = [
-            f"{name} ({secid})",
-            f"Текущая цена: {money(current)} RUB" if current is not None else "Текущая цена: нет данных",
-            "",
-            "Динамика:",
-        ]
+        logo_url = get_moex_logo_url(secid) if asset_type == ASSET_TYPE_STOCK else None
+        lines = [f"{name} ({secid})"]
+        lines.append(f"Текущая цена: {money(current)} RUB" if current is not None else "Текущая цена: нет данных")
+        if logo_url:
+            lines.append(f"Иконка: {logo_url}")
+        lines.extend(["", "Динамика:"])
         for label, days in periods:
             history = await get_history_prices_by_asset_type(
                 session,
@@ -467,11 +468,15 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
         asset_name = html.escape(asset_name_raw)
         ticker_safe = html.escape(ticker)
         unit = "гр" if (pos.get("asset_type") == ASSET_TYPE_METAL) else "акции"
+        logo_url = get_moex_logo_url(ticker) if (pos.get("asset_type") == ASSET_TYPE_STOCK) else None
         total_cost = float(pos.get("total_cost") or 0.0)
 
         if last is None:
             unknown_prices += 1
-            lines.append(f"{asset_name} - {ticker_safe} - {qty:g} {unit} - Общая стоимость актива: нет данных - P&L: нет данных")
+            logo_part = f' - <a href="{html.escape(logo_url)}">иконка</a>' if logo_url else ""
+            lines.append(
+                f"{asset_name} - {ticker_safe} - {qty:g} {unit}{logo_part} - Общая стоимость актива: нет данных - P&L: нет данных"
+            )
             continue
 
         value = qty * last
@@ -485,8 +490,9 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
             pnl_tail = f"{emoji} {money_signed(pnl)} RUB"
         else:
             pnl_tail = f"{emoji} {pnl_pct:+.2f}% {money_signed(pnl)} RUB"
+        logo_part = f' - <a href="{html.escape(logo_url)}">иконка</a>' if logo_url else ""
         lines.append(
-            f"{asset_name} - {ticker_safe} - {qty:g} {unit} - Общая стоимость актива: <b>{money(value)}</b> RUB - P&L {pnl_tail}"
+            f"{asset_name} - {ticker_safe} - {qty:g} {unit}{logo_part} - Общая стоимость актива: <b>{money(value)}</b> RUB - P&L {pnl_tail}"
         )
 
     total_pnl = total_value_known - total_cost_known
@@ -509,19 +515,26 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
 async def cmd_start(message: Message):
     logger.info("User %s started bot", message.from_user.id if message.from_user else None)
     await message.answer(
-        "Привет! Это MVP портфельного бота.\n\n"
+        "Привет! Я помогу вести твой портфель акций и металлов на MOEX.\n\n"
+        "Что можно сделать сразу:\n"
+        "• Нажми «Добавить сделку», чтобы занести покупку\n"
+        "• Нажми «Стоимость портфеля», чтобы увидеть текущую оценку и P&L\n"
+        "• Нажми «Поиск цены», чтобы посмотреть динамику инструмента\n\n"
         "Команды:\n"
+        "📌 Портфель\n"
         "/add_trade — добавить сделку (дата → актив → инструмент → количество → цена)\n"
-        "/portfolio — показать текущую стоимость портфеля\n"
-        "/asset_lookup — текущая цена и динамика инструмента\n"
-        "/why_invest — зачем инвестировать (пример и сравнение)\n"
-        "/set_interval <минуты> — периодические уведомления по портфелю\n"
+        "/portfolio — текущая стоимость портфеля и P&L\n"
+        "/asset_lookup — текущая цена и динамика за неделю/месяц/6 мес/год\n\n"
+        "🔔 Уведомления\n"
+        "/set_interval <минуты> — периодические уведомления\n"
         "/interval_off — выключить периодические уведомления\n"
         "/set_drop_alert <процент> — алерт при сильном падении цены\n"
         "/drop_alert_off — выключить алерт падения\n"
-        "/market_reports_on — отчет на открытии и закрытии биржи\n"
+        "/market_reports_on — отчеты на открытии и закрытии биржи\n"
         "/market_reports_off — выключить отчеты открытия/закрытия\n"
-        "/alerts_status — показать текущие настройки уведомлений\n",
+        "/alerts_status — показать текущие настройки уведомлений\n\n"
+        "📚 Полезное\n"
+        "/why_invest — зачем инвестировать (пример и сравнение)\n",
         reply_markup=make_main_menu_kb(),
     )
 
