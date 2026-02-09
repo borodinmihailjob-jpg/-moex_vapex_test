@@ -1,5 +1,6 @@
 import aiohttp
 import logging
+from datetime import date
 
 BASE = "https://iss.moex.com/iss"
 logger = logging.getLogger(__name__)
@@ -134,6 +135,80 @@ async def get_last_price_by_asset_type(
     if asset_type == ASSET_TYPE_METAL:
         return await get_last_price_metal(session, secid, boardid)
     return await get_last_price_stock_shares(session, secid, boardid)
+
+def _history_path_by_asset_type(secid: str, boardid: str | None, asset_type: str) -> str:
+    if asset_type == ASSET_TYPE_METAL:
+        if boardid:
+            return f"/history/engines/currency/markets/selt/boards/{boardid}/securities/{secid}.json"
+        return f"/history/engines/currency/markets/selt/securities/{secid}.json"
+    if boardid:
+        return f"/history/engines/stock/markets/shares/boards/{boardid}/securities/{secid}.json"
+    return f"/history/engines/stock/markets/shares/securities/{secid}.json"
+
+async def get_history_prices_by_asset_type(
+    session: aiohttp.ClientSession,
+    secid: str,
+    boardid: str | None,
+    asset_type: str,
+    from_date: date,
+    till_date: date,
+) -> list[tuple[date, float]]:
+    """
+    Возвращает список (trade_date, close_price) за период [from_date, till_date].
+    Для цены берется приоритет: CLOSE -> LEGALCLOSEPRICE -> WAPRICE.
+    """
+    path = _history_path_by_asset_type(secid, boardid, asset_type)
+    start = 0
+    out: list[tuple[date, float]] = []
+
+    while True:
+        params = {
+            "iss.meta": "off",
+            "from": from_date.isoformat(),
+            "till": till_date.isoformat(),
+            "start": start,
+            "history.columns": "TRADEDATE,CLOSE,LEGALCLOSEPRICE,WAPRICE",
+        }
+        data = await iss_get_json(session, path, params=params)
+        hist = data.get("history", {})
+        cols = hist.get("columns", [])
+        rows = hist.get("data", [])
+        if not rows:
+            break
+
+        idx = {str(c).upper(): i for i, c in enumerate(cols)}
+        dt_i = idx.get("TRADEDATE")
+        close_i = idx.get("CLOSE")
+        legal_i = idx.get("LEGALCLOSEPRICE")
+        wap_i = idx.get("WAPRICE")
+        if dt_i is None:
+            break
+
+        for row in rows:
+            dt_raw = row[dt_i]
+            if not dt_raw:
+                continue
+            px = None
+            if close_i is not None and close_i < len(row):
+                px = row[close_i]
+            if px is None and legal_i is not None and legal_i < len(row):
+                px = row[legal_i]
+            if px is None and wap_i is not None and wap_i < len(row):
+                px = row[wap_i]
+            if px is None:
+                continue
+            try:
+                trade_day = date.fromisoformat(str(dt_raw))
+                out.append((trade_day, float(px)))
+            except Exception:
+                continue
+
+        if len(rows) < 100:
+            break
+        start += len(rows)
+
+    out.sort(key=lambda x: x[0])
+    return out
 
 def _parse_securities_rows(data: dict) -> list[dict]:
     sec = data.get("securities", {})

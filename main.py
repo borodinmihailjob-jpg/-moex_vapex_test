@@ -4,7 +4,7 @@ import asyncio
 import html
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date
 from zoneinfo import ZoneInfo
 import aiohttp
 from aiohttp import web
@@ -42,6 +42,7 @@ from db import (
 from moex_iss import (
     ASSET_TYPE_METAL,
     ASSET_TYPE_STOCK,
+    get_history_prices_by_asset_type,
     get_last_price_by_asset_type,
     search_metals,
     search_securities,
@@ -57,6 +58,7 @@ BTN_ADD_TRADE = "Добавить сделку"
 BTN_PORTFOLIO = "Стоимость портфеля"
 BTN_ALERTS = "Настройки уведомлений"
 BTN_WHY_INVEST = "Зачем инвестировать"
+BTN_ASSET_LOOKUP = "Поиск цены"
 
 WHY_INVEST_TEXT = (
     "Зачем инвестировать? Чтобы деньги работали быстрее инфляции, и результат зависел не от "
@@ -128,6 +130,11 @@ class AddTradeFlow(StatesGroup):
     waiting_edit_step = State()
     waiting_more = State()
 
+class AssetLookupFlow(StatesGroup):
+    waiting_asset_type = State()
+    waiting_query = State()
+    waiting_pick = State()
+
 def money(x: float) -> str:
     return f"{x:,.2f}".replace(",", " ")
 
@@ -164,6 +171,32 @@ async def make_asset_type_kb():
     kb.adjust(1)
     return kb.as_markup()
 
+async def make_lookup_candidates_kb(cands: list[dict]):
+    kb = InlineKeyboardBuilder()
+    for i, c in enumerate(cands):
+        secid = (c.get("secid") or "").strip()
+        boardid = (c.get("boardid") or "").strip()
+        display_name = (c.get("shortname") or c.get("name") or "").strip()
+        if display_name and boardid:
+            title = f"{secid} - {display_name} ({boardid})"
+        elif display_name:
+            title = f"{secid} - {display_name}"
+        elif boardid:
+            title = f"{secid} ({boardid})"
+        else:
+            title = secid
+        kb.button(text=title[:64], callback_data=f"lpick:{i}")
+    kb.button(text="⬅️ Назад", callback_data="lback:query")
+    kb.adjust(1)
+    return kb.as_markup()
+
+async def make_lookup_asset_type_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📈 Акции", callback_data=f"latype:{ASSET_TYPE_STOCK}")
+    kb.button(text="🥇 Металл", callback_data=f"latype:{ASSET_TYPE_METAL}")
+    kb.adjust(1)
+    return kb.as_markup()
+
 async def make_date_mode_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="Сегодня", callback_data="date:today")
@@ -174,6 +207,11 @@ async def make_date_mode_kb():
 async def make_search_back_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Назад", callback_data="back:asset_type")
+    return kb.as_markup()
+
+async def make_lookup_search_back_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="lback:asset_type")
     return kb.as_markup()
 
 async def make_qty_back_kb():
@@ -207,7 +245,8 @@ def make_main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_ADD_TRADE), KeyboardButton(text=BTN_PORTFOLIO)],
-            [KeyboardButton(text=BTN_ALERTS), KeyboardButton(text=BTN_WHY_INVEST)],
+            [KeyboardButton(text=BTN_ALERTS), KeyboardButton(text=BTN_ASSET_LOOKUP)],
+            [KeyboardButton(text=BTN_WHY_INVEST)],
         ],
         resize_keyboard=True,
     )
@@ -281,6 +320,55 @@ def pnl_label(pnl_amount: float, pnl_percent: float | None) -> str:
 
 def pnl_emoji(pnl_amount: float) -> str:
     return "📈" if pnl_amount >= 0 else "📉"
+
+def fmt_pct(pct: float) -> str:
+    return f"{pct:+.2f}%"
+
+async def build_asset_dynamics_text(chosen: dict, asset_type: str) -> str:
+    secid = chosen.get("secid") or "UNKNOWN"
+    boardid = chosen.get("boardid")
+    name = (chosen.get("shortname") or chosen.get("name") or secid).strip()
+    today = date.today()
+    periods = [
+        ("За неделю", 7),
+        ("За месяц", 30),
+        ("За 6 месяцев", 182),
+        ("За год", 365),
+    ]
+
+    async with aiohttp.ClientSession() as session:
+        current = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
+        lines = [
+            f"{name} ({secid})",
+            f"Текущая цена: {money(current)} RUB" if current is not None else "Текущая цена: нет данных",
+            "",
+            "Динамика:",
+        ]
+        for label, days in periods:
+            history = await get_history_prices_by_asset_type(
+                session,
+                secid=secid,
+                boardid=boardid,
+                asset_type=asset_type,
+                from_date=today - timedelta(days=days),
+                till_date=today,
+            )
+            if not history:
+                lines.append(f"{label}: нет данных")
+                continue
+
+            base_price = history[0][1]
+            end_price = current if current is not None else history[-1][1]
+            if base_price <= 0:
+                lines.append(f"{label}: нет данных")
+                continue
+            delta = end_price - base_price
+            pct = (delta / base_price) * 100.0
+            emoji = "📈" if delta >= 0 else "📉"
+            lines.append(
+                f"{label}: {emoji} {fmt_pct(pct)} ({money_signed(delta)} RUB)"
+            )
+    return "\n".join(lines)
 
 def _cache_age_seconds(updated_at: datetime | None, now_utc: datetime) -> float | None:
     if updated_at is None:
@@ -425,6 +513,7 @@ async def cmd_start(message: Message):
         "Команды:\n"
         "/add_trade — добавить сделку (дата → актив → инструмент → количество → цена)\n"
         "/portfolio — показать текущую стоимость портфеля\n"
+        "/asset_lookup — текущая цена и динамика инструмента\n"
         "/why_invest — зачем инвестировать (пример и сравнение)\n"
         "/set_interval <минуты> — периодические уведомления по портфелю\n"
         "/interval_off — выключить периодические уведомления\n"
@@ -538,6 +627,88 @@ async def on_menu_alerts_status(message: Message):
 
 async def cmd_why_invest(message: Message):
     await message.answer(WHY_INVEST_TEXT)
+
+async def on_menu_asset_lookup(message: Message, state: FSMContext):
+    await cmd_asset_lookup(message, state)
+
+async def cmd_asset_lookup(message: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(AssetLookupFlow.waiting_asset_type)
+    await message.answer("Выбери тип инструмента:", reply_markup=await make_lookup_asset_type_kb())
+
+async def on_lookup_asset_type_pick(call: CallbackQuery, state: FSMContext):
+    asset_type = call.data.split(":", 1)[1]
+    if asset_type not in {ASSET_TYPE_STOCK, ASSET_TYPE_METAL}:
+        await call.answer("Неизвестный тип инструмента", show_alert=True)
+        return
+    await state.update_data(asset_type=asset_type, cands=None)
+    await state.set_state(AssetLookupFlow.waiting_query)
+    if asset_type == ASSET_TYPE_METAL:
+        text = "Введи тикер или название металла (например: GLDRUB_TOM):"
+    else:
+        text = "Введи тикер, ISIN или название компании:"
+    await call.message.edit_text(text, reply_markup=await make_lookup_search_back_kb())
+    await call.answer()
+
+async def on_lookup_back_to_asset_type(call: CallbackQuery, state: FSMContext):
+    await state.update_data(cands=None)
+    await state.set_state(AssetLookupFlow.waiting_asset_type)
+    await call.message.edit_text("Выбери тип инструмента:", reply_markup=await make_lookup_asset_type_kb())
+    await call.answer()
+
+async def on_lookup_back_to_query(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    asset_type = data.get("asset_type")
+    if asset_type not in {ASSET_TYPE_STOCK, ASSET_TYPE_METAL}:
+        await state.set_state(AssetLookupFlow.waiting_asset_type)
+        await call.message.edit_text("Выбери тип инструмента:", reply_markup=await make_lookup_asset_type_kb())
+        await call.answer()
+        return
+    await state.update_data(cands=None)
+    await state.set_state(AssetLookupFlow.waiting_query)
+    if asset_type == ASSET_TYPE_METAL:
+        text = "Введи тикер или название металла (например: GLDRUB_TOM):"
+    else:
+        text = "Введи тикер, ISIN или название компании:"
+    await call.message.edit_text(text, reply_markup=await make_lookup_search_back_kb())
+    await call.answer()
+
+async def on_lookup_query(message: Message, state: FSMContext):
+    q = (message.text or "").strip()
+    if not q:
+        await message.answer("Введи запрос текстом.")
+        return
+    data = await state.get_data()
+    asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
+    async with aiohttp.ClientSession() as session:
+        if asset_type == ASSET_TYPE_METAL:
+            cands = await search_metals(session, q)
+        else:
+            cands = await search_securities(session, q)
+    if not cands:
+        await message.answer("Ничего не найдено. Попробуй другой запрос или нажми «Назад».", reply_markup=await make_lookup_search_back_kb())
+        return
+    await state.update_data(cands=cands)
+    await state.set_state(AssetLookupFlow.waiting_pick)
+    await message.answer("Выбери инструмент:", reply_markup=await make_lookup_candidates_kb(cands))
+
+async def on_lookup_pick(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    cands = data.get("cands") or []
+    try:
+        idx = int(call.data.split(":")[1])
+    except Exception:
+        await call.answer("Некорректный выбор", show_alert=True)
+        return
+    if idx < 0 or idx >= len(cands):
+        await call.answer("Инструмент не найден", show_alert=True)
+        return
+    chosen = cands[idx]
+    asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
+    text = await build_asset_dynamics_text(chosen, asset_type)
+    await call.message.edit_text(text)
+    await state.clear()
+    await call.answer()
 
 async def cmd_portfolio(message: Message):
     user_id = message.from_user.id if message.from_user else None
@@ -1082,6 +1253,7 @@ async def main():
     dp.message.register(cmd_start, Command("start"), StateFilter("*"))
     dp.message.register(cmd_add_trade, Command("add_trade"), StateFilter("*"))
     dp.message.register(cmd_portfolio, Command("portfolio"), StateFilter("*"))
+    dp.message.register(cmd_asset_lookup, Command("asset_lookup"), StateFilter("*"))
     dp.message.register(cmd_why_invest, Command("why_invest"), StateFilter("*"))
     dp.message.register(cmd_set_interval, Command("set_interval"), StateFilter("*"))
     dp.message.register(cmd_interval_off, Command("interval_off"), StateFilter("*"))
@@ -1093,7 +1265,15 @@ async def main():
     dp.message.register(on_menu_add_trade, StateFilter("*"), F.text == BTN_ADD_TRADE)
     dp.message.register(on_menu_portfolio, StateFilter("*"), F.text == BTN_PORTFOLIO)
     dp.message.register(on_menu_alerts_status, StateFilter("*"), F.text == BTN_ALERTS)
+    dp.message.register(on_menu_asset_lookup, StateFilter("*"), F.text == BTN_ASSET_LOOKUP)
     dp.message.register(cmd_why_invest, StateFilter("*"), F.text == BTN_WHY_INVEST)
+
+    dp.callback_query.register(on_lookup_asset_type_pick, AssetLookupFlow.waiting_asset_type, F.data.startswith("latype:"))
+    dp.callback_query.register(on_lookup_back_to_asset_type, AssetLookupFlow.waiting_query, F.data == "lback:asset_type")
+    dp.callback_query.register(on_lookup_back_to_asset_type, AssetLookupFlow.waiting_pick, F.data == "lback:asset_type")
+    dp.callback_query.register(on_lookup_back_to_query, AssetLookupFlow.waiting_pick, F.data == "lback:query")
+    dp.message.register(on_lookup_query, AssetLookupFlow.waiting_query)
+    dp.callback_query.register(on_lookup_pick, AssetLookupFlow.waiting_pick, F.data.startswith("lpick:"))
 
     dp.callback_query.register(on_asset_type_pick, AddTradeFlow.waiting_asset_type, F.data.startswith("atype:"))
     dp.callback_query.register(on_date_mode_pick, AddTradeFlow.waiting_date_mode, F.data.startswith("date:"))
