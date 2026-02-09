@@ -81,7 +81,9 @@ CREATE TABLE IF NOT EXISTS user_alert_settings (
   drop_percent DOUBLE PRECISION NOT NULL DEFAULT 10,
   open_close_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   open_last_sent_date TEXT,
-  close_last_sent_date TEXT
+  close_last_sent_date TEXT,
+  day_open_value DOUBLE PRECISION,
+  day_open_value_date TEXT
 );
 
 
@@ -132,6 +134,8 @@ MIGRATION_SQL = [
     "ALTER TABLE app_texts ADD COLUMN IF NOT EXISTS button_name TEXT",
     "ALTER TABLE app_texts ADD COLUMN IF NOT EXISTS value TEXT",
     "ALTER TABLE app_texts ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
+    "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS day_open_value DOUBLE PRECISION",
+    "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS day_open_value_date TEXT",
     "CREATE TABLE IF NOT EXISTS user_strategy_profiles (user_id BIGINT PRIMARY KEY, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, risk_profile TEXT NOT NULL DEFAULT 'balanced', updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS user_watchlist (user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, secid TEXT NOT NULL, boardid TEXT NOT NULL DEFAULT 'TQBR', asset_type TEXT NOT NULL DEFAULT 'stock', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (user_id, secid, boardid, asset_type))",
 ]
@@ -951,7 +955,9 @@ async def set_open_close_alert(db_path: str, user_id: int, enabled: bool):
                 UPDATE user_alert_settings
                 SET open_close_enabled=$1,
                     open_last_sent_date=NULL,
-                    close_last_sent_date=NULL
+                    close_last_sent_date=NULL,
+                    day_open_value=NULL,
+                    day_open_value_date=NULL
                 WHERE user_id=$2
                 """,
                 bool(enabled),
@@ -978,7 +984,9 @@ async def get_user_alert_settings(db_path: str, user_id: int):
                   drop_percent,
                   open_close_enabled,
                   open_last_sent_date,
-                  close_last_sent_date
+                  close_last_sent_date,
+                  day_open_value,
+                  day_open_value_date
                 FROM user_alert_settings
                 WHERE user_id=$1
                 """,
@@ -994,6 +1002,8 @@ async def get_user_alert_settings(db_path: str, user_id: int):
             "open_close_enabled": bool(row["open_close_enabled"]),
             "open_last_sent_date": row["open_last_sent_date"],
             "close_last_sent_date": row["close_last_sent_date"],
+            "day_open_value": (float(row["day_open_value"]) if row["day_open_value"] is not None else None),
+            "day_open_value_date": row["day_open_value_date"],
         }
     except Exception:
         logger.exception("Failed get_user_alert_settings user=%s", user_id)
@@ -1056,6 +1066,26 @@ async def update_close_sent_date(db_path: str, user_id: int, date_iso: str):
             )
     except Exception:
         logger.exception("Failed update_close_sent_date user=%s", user_id)
+        raise
+
+
+async def update_day_open_value(db_path: str, user_id: int, date_iso: str, open_value: float | None) -> None:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE user_alert_settings
+                SET day_open_value=$1,
+                    day_open_value_date=$2
+                WHERE user_id=$3
+                """,
+                (float(open_value) if open_value is not None else None),
+                date_iso,
+                int(user_id),
+            )
+    except Exception:
+        logger.exception("Failed update_day_open_value user=%s", user_id)
         raise
 
 

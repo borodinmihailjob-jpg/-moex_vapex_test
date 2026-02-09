@@ -39,6 +39,7 @@ from db import (
     update_periodic_last_sent_at,
     update_open_sent_date,
     update_close_sent_date,
+    update_day_open_value,
     get_price_alert_state,
     set_price_alert_state,
     list_active_position_instruments,
@@ -68,11 +69,17 @@ from moex_iss import (
 )
 from broker_report_xml import parse_broker_report_xml
 
+load_dotenv()
+
+
+def _env(name: str) -> str:
+    return (os.getenv(name) or "").strip()
+
 MSK_TZ = ZoneInfo("Europe/Moscow")
-MOEX_OPEN_HOUR = 10
-MOEX_OPEN_MINUTE = 0
-MOEX_CLOSE_HOUR = 18
-MOEX_CLOSE_MINUTE = 50
+MOEX_OPEN_HOUR = int(_env("MOEX_OPEN_HOUR") or "10")
+MOEX_OPEN_MINUTE = int(_env("MOEX_OPEN_MINUTE") or "0")
+MOEX_CLOSE_HOUR = int(_env("MOEX_CLOSE_HOUR") or "23")
+MOEX_CLOSE_MINUTE = int(_env("MOEX_CLOSE_MINUTE") or "50")
 MOEX_EVENT_WINDOW_MIN = 5
 MAX_BROKER_XML_SIZE_BYTES = 5 * 1024 * 1024
 PRICE_FETCH_CONCURRENCY = 20
@@ -119,10 +126,6 @@ def setup_logging() -> None:
 
 setup_logging()
 logger = logging.getLogger(__name__)
-
-load_dotenv()
-def _env(name: str) -> str:
-    return (os.getenv(name) or "").strip()
 
 BOT_TOKEN = _env("BOT_TOKEN") or _env("TELEGRAM_BOT_TOKEN")
 DB_DSN = _env("DATABASE_URL") or _env("DB_DSN") or _env("DB_PATH")
@@ -1026,6 +1029,9 @@ async def cmd_start(message: Message):
         "/watchlist_remove — удалить тикер из watchlist\n"
         "/watchlist — показать текущий watchlist\n"
         "/market_digest — digest по watchlist (premarket/open/close)\n\n"
+        "🔔 Отчеты дня\n"
+        "/trading_day_on — включить отчет торгового дня (открытие/закрытие)\n"
+        "/trading_day_off — выключить отчет торгового дня\n\n"
         "/clear_portfolio — удалить все сделки и очистить портфель\n\n"
         "📥 Импорт\n"
         "/import_broker_xml — загрузить XML брокерской выписки и импортировать сделки\n\n"
@@ -1419,6 +1425,27 @@ async def cmd_market_reports_off(message: Message):
     await set_open_close_alert(DB_DSN, user_id, False)
     await message.answer("Отчеты на открытии и закрытии биржи выключены.")
 
+
+async def cmd_trading_day_on(message: Message):
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        await message.answer("Не удалось определить пользователя.")
+        return
+    await set_open_close_alert(DB_DSN, user_id, True)
+    await message.answer(
+        "Дневной отчет включен.\n"
+        "Я пришлю баланс портфеля на открытии и на закрытии торгов, а также результат за торговый день."
+    )
+
+
+async def cmd_trading_day_off(message: Message):
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        await message.answer("Не удалось определить пользователя.")
+        return
+    await set_open_close_alert(DB_DSN, user_id, False)
+    await message.answer("Дневной отчет выключен.")
+
 async def cmd_alerts_status(message: Message):
     user_id = message.from_user.id if message.from_user else None
     if not user_id:
@@ -1725,15 +1752,41 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
                 open_min_of_day <= now_min_of_day < open_min_of_day + MOEX_EVENT_WINDOW_MIN
                 and settings.get("open_last_sent_date") != today
             ):
-                text, _, _ = await build_portfolio_snapshot(user_id)
-                await bot.send_message(user_id, f"Открытие биржи (МСК):\n\n{text}", parse_mode="HTML")
+                text, open_value, _ = await build_portfolio_snapshot(user_id)
+                await bot.send_message(
+                    user_id,
+                    (
+                        f"Открытие торгов (МСК):\n"
+                        f"Баланс портфеля на открытии: <b>{money(open_value or 0.0)}</b> RUB\n\n"
+                        f"{text}"
+                    ),
+                    parse_mode="HTML",
+                )
                 await update_open_sent_date(DB_DSN, user_id, today)
+                await update_day_open_value(DB_DSN, user_id, today, open_value)
             if (
                 close_min_of_day <= now_min_of_day < close_min_of_day + MOEX_EVENT_WINDOW_MIN
                 and settings.get("close_last_sent_date") != today
             ):
-                text, _, _ = await build_portfolio_snapshot(user_id)
-                await bot.send_message(user_id, f"Закрытие биржи (МСК):\n\n{text}", parse_mode="HTML")
+                text, close_value, _ = await build_portfolio_snapshot(user_id)
+                open_value = settings.get("day_open_value")
+                open_date = settings.get("day_open_value_date")
+                if open_value is not None and open_date == today and close_value is not None:
+                    day_pnl = close_value - float(open_value)
+                    day_pnl_text = money_signed(day_pnl)
+                    close_header = (
+                        f"Закрытие торгов (МСК):\n"
+                        f"Баланс на открытии: <b>{money(float(open_value))}</b> RUB\n"
+                        f"Баланс на закрытии: <b>{money(close_value)}</b> RUB\n"
+                        f"Результат за торговый день: <b>{day_pnl_text}</b> RUB\n\n"
+                    )
+                else:
+                    close_header = (
+                        f"Закрытие торгов (МСК):\n"
+                        f"Баланс портфеля на закрытии: <b>{money(close_value or 0.0)}</b> RUB\n"
+                        "Результат за торговый день: нет данных (не найден снимок открытия).\n\n"
+                    )
+                await bot.send_message(user_id, close_header + text, parse_mode="HTML")
                 await update_close_sent_date(DB_DSN, user_id, today)
 
 async def notifications_worker(bot: Bot):
@@ -2318,6 +2371,8 @@ async def main():
     dp.message.register(cmd_interval_off, Command("interval_off"), StateFilter("*"))
     dp.message.register(cmd_set_drop_alert, Command("set_drop_alert"), StateFilter("*"))
     dp.message.register(cmd_drop_alert_off, Command("drop_alert_off"), StateFilter("*"))
+    dp.message.register(cmd_trading_day_on, Command("trading_day_on"), StateFilter("*"))
+    dp.message.register(cmd_trading_day_off, Command("trading_day_off"), StateFilter("*"))
     dp.message.register(cmd_market_reports_on, Command("market_reports_on"), StateFilter("*"))
     dp.message.register(cmd_market_reports_off, Command("market_reports_off"), StateFilter("*"))
     dp.message.register(cmd_alerts_status, Command("alerts_status"), StateFilter("*"))
