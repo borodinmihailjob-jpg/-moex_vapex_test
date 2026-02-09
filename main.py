@@ -100,6 +100,13 @@ class AddTradeFlow(StatesGroup):
 def money(x: float) -> str:
     return f"{x:,.2f}".replace(",", " ")
 
+def money_signed(x: float) -> str:
+    if x > 0:
+        return f"+{money(x)}"
+    if x < 0:
+        return f"-{money(abs(x))}"
+    return money(0.0)
+
 async def make_candidates_kb(cands: list[dict]):
     kb = InlineKeyboardBuilder()
     for i, c in enumerate(cands):
@@ -206,6 +213,100 @@ def build_trade_preview(data: dict) -> str:
         f"Цена за единицу: {money(price)} RUB\n"
         f"Сумма: {money(total)} RUB\n"
     )
+
+def board_mode_ru(boardid: str | None, asset_type: str) -> str:
+    b = (boardid or "").strip().upper()
+    stock_modes = {
+        "TQBR": "Основной режим торгов акциями (Т+)",
+        "TQTF": "Режим торгов ETF (Т+)",
+        "TQTD": "Режим торгов депозитарными расписками (Т+)",
+        "TQIF": "Режим торгов паями БПИФ/ПИФ (Т+)",
+    }
+    metal_modes = {
+        "CETS": "Валютный рынок (сделки с драгоценными металлами)",
+        "TOM": "Поставка TOM (расчеты завтра)",
+    }
+
+    if asset_type == ASSET_TYPE_METAL:
+        if b in metal_modes:
+            return metal_modes[b]
+        return f"Режим торгов металлами ({b or 'не указан'})"
+
+    if b in stock_modes:
+        return stock_modes[b]
+    return f"Режим торгов ({b or 'не указан'})"
+
+def pnl_label(pnl_amount: float, pnl_percent: float | None) -> str:
+    if pnl_amount > 0:
+        emoji = "📈"
+    elif pnl_amount < 0:
+        emoji = "📉"
+    else:
+        emoji = "➖"
+
+    if pnl_percent is None:
+        return f"{emoji} P&L: {money_signed(pnl_amount)} RUB"
+    return f"{emoji} P&L: {pnl_percent:+.2f}% ({money_signed(pnl_amount)} RUB)"
+
+async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[dict]]:
+    positions = await get_user_positions(DB_DSN, user_id)
+    if not positions:
+        return ("Портфель пуст.", None, [])
+
+    async with aiohttp.ClientSession() as session:
+        async def load_price(pos: dict):
+            try:
+                last = await get_last_price_by_asset_type(
+                    session,
+                    pos["secid"],
+                    pos.get("boardid"),
+                    pos.get("asset_type") or ASSET_TYPE_STOCK,
+                )
+                return pos, last
+            except Exception:
+                logger.exception("Failed to load price secid=%s boardid=%s", pos["secid"], pos.get("boardid"))
+                return pos, None
+
+        priced = await asyncio.gather(*(load_price(pos) for pos in positions))
+
+    total_value_known = 0.0
+    total_cost_known = 0.0
+    unknown_prices = 0
+    lines = []
+
+    for pos, last in priced:
+        qty = pos["total_qty"]
+        ticker = pos["secid"]
+        asset_name = (pos.get("shortname") or ticker).strip()
+        unit = "гр" if (pos.get("asset_type") == ASSET_TYPE_METAL) else "шт"
+        total_cost = float(pos.get("total_cost") or 0.0)
+
+        if last is None:
+            unknown_prices += 1
+            lines.append(f"{asset_name} ({ticker}) - {qty:g} {unit} - стоимость актива: нет данных")
+            continue
+
+        value = qty * last
+        pnl = value - total_cost
+        pnl_pct = (pnl / total_cost * 100.0) if abs(total_cost) > 1e-12 else None
+
+        total_value_known += value
+        total_cost_known += total_cost
+        lines.append(
+            f"{asset_name} ({ticker}) - {qty:g} {unit} - стоимость актива: {money(value)} RUB ({pnl_label(pnl, pnl_pct)})"
+        )
+
+    total_pnl = total_value_known - total_cost_known
+    total_pnl_pct = (total_pnl / total_cost_known * 100.0) if abs(total_cost_known) > 1e-12 else None
+    footer = (
+        f"Итоговая стоимость активов по всем тикерам: {money(total_value_known)} RUB "
+        f"({pnl_label(total_pnl, total_pnl_pct)})"
+    )
+    if unknown_prices:
+        footer += f"\nНет рыночной цены для {unknown_prices} инструментов, они не включены в итог."
+
+    text = "Портфель:\n" + "\n".join(lines) + "\n\n" + footer
+    return (text, total_value_known, positions)
 
 async def cmd_start(message: Message):
     logger.info("User %s started bot", message.from_user.id if message.from_user else None)
@@ -330,65 +431,21 @@ async def cmd_portfolio(message: Message):
         await message.answer("Не удалось определить пользователя.")
         return
 
-    positions = await get_user_positions(DB_DSN, user_id)
+    text, _, positions = await build_portfolio_report(user_id)
     if not positions:
         await message.answer("Портфель пуст. Добавьте сделки через /add_trade.")
         return
-
-    async with aiohttp.ClientSession() as session:
-        async def load_price(pos: dict):
-            try:
-                last = await get_last_price_by_asset_type(
-                    session,
-                    pos["secid"],
-                    pos.get("boardid"),
-                    pos.get("asset_type") or ASSET_TYPE_STOCK,
-                )
-                return pos, last
-            except Exception:
-                logger.exception("Failed to load price secid=%s boardid=%s", pos["secid"], pos.get("boardid"))
-                return pos, None
-
-        priced = await asyncio.gather(*(load_price(pos) for pos in positions))
-
-    total_value_known = 0.0
-    unknown_prices = 0
-    lines = []
-
-    for pos, last in priced:
-        qty = pos["total_qty"]
-        company = pos.get("shortname") or "Без названия"
-        ticker = pos["secid"]
-        unit = "гр" if (pos.get("asset_type") == ASSET_TYPE_METAL) else "шт"
-
-        if last is None:
-            unknown_prices += 1
-            lines.append(
-                f"{company} ({ticker}) — {qty:g} {unit} — стоимость актива: нет данных"
-            )
-            continue
-
-        value = qty * last
-        total_value_known += value
-        lines.append(
-            f"{company} ({ticker}) — {qty:g} {unit} — стоимость актива: {money(value)} RUB"
-        )
-
-    header = "Портфель:"
-    footer = f"Итоговая стоимость активов по всем тикерам: {money(total_value_known)} RUB"
-
-    if unknown_prices:
-        footer += f"\nНет рыночной цены для {unknown_prices} инструментов, они не включены в итог."
-
-    text = header + "\n" + "\n".join(lines) + "\n\n" + footer
     if len(text) <= 3500:
         await message.answer(text)
         return
 
+    lines = text.splitlines()
+    header = lines[0] if lines else "Портфель:"
+    body_lines = lines[1:] if len(lines) > 1 else []
     await message.answer(header)
     chunk = []
     chunk_len = 0
-    for line in lines:
+    for line in body_lines:
         line_len = len(line) + 1
         if chunk_len + line_len > 3500 and chunk:
             await message.answer("\n".join(chunk))
@@ -398,49 +455,9 @@ async def cmd_portfolio(message: Message):
         chunk_len += line_len
     if chunk:
         await message.answer("\n".join(chunk))
-    await message.answer(footer)
 
 async def build_portfolio_snapshot(user_id: int) -> tuple[str, float | None, list[dict]]:
-    positions = await get_user_positions(DB_DSN, user_id)
-    if not positions:
-        return ("Портфель пуст.", None, [])
-
-    async with aiohttp.ClientSession() as session:
-        async def load_price(pos: dict):
-            try:
-                last = await get_last_price_by_asset_type(
-                    session,
-                    pos["secid"],
-                    pos.get("boardid"),
-                    pos.get("asset_type") or ASSET_TYPE_STOCK,
-                )
-                return pos, last
-            except Exception:
-                logger.exception("Failed to load price secid=%s boardid=%s", pos["secid"], pos.get("boardid"))
-                return pos, None
-
-        priced = await asyncio.gather(*(load_price(pos) for pos in positions))
-
-    total_value_known = 0.0
-    unknown_prices = 0
-    lines = []
-    for pos, last in priced:
-        qty = pos["total_qty"]
-        company = pos.get("shortname") or "Без названия"
-        ticker = pos["secid"]
-        unit = "гр" if (pos.get("asset_type") == ASSET_TYPE_METAL) else "шт"
-        if last is None:
-            unknown_prices += 1
-            lines.append(f"{company} ({ticker}) — {qty:g} {unit} — цена: нет данных")
-            continue
-        value = qty * last
-        total_value_known += value
-        lines.append(f"{company} ({ticker}) — {qty:g} {unit} — стоимость: {money(value)} RUB")
-
-    text = "Портфель:\n" + "\n".join(lines) + f"\n\nИтоговая стоимость: {money(total_value_known)} RUB"
-    if unknown_prices:
-        text += f"\nНет рыночной цены для {unknown_prices} инструментов, они не включены в итог."
-    return (text, total_value_known, positions)
+    return await build_portfolio_report(user_id)
 
 def _parse_iso_utc(value: str | None) -> datetime | None:
     if not value:
@@ -722,13 +739,17 @@ async def on_pick(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
     qty_prompt = "Введи количество граммов металла (например 5.5):" if asset_type == ASSET_TYPE_METAL else "Введи количество акций (например 10):"
+    display_name = (chosen.get("shortname") or chosen.get("name") or "Не указано").strip()
+    isin = chosen.get("isin") or "Не указано"
+    board_ru = board_mode_ru(chosen.get("boardid"), asset_type)
+    ticker = chosen.get("secid") or "Не указано"
 
     await call.message.edit_text(
         f"Выбрано:\n"
-        f"SECID: {chosen['secid']}\n"
-        f"ISIN: {chosen.get('isin')}\n"
-        f"BOARD: {chosen.get('boardid')}\n"
-        f"NAME: {chosen.get('shortname')}\n\n"
+        f"Наименование: {display_name}\n"
+        f"ISIN: {isin}\n"
+        f"Режим торгов: {board_ru}\n"
+        f"Тикер: {ticker}\n\n"
         f"{qty_prompt}",
         reply_markup=await make_qty_back_kb(),
     )
@@ -825,8 +846,8 @@ async def on_confirm_save(call: CallbackQuery, state: FSMContext):
         f"{instr['secid']} ({instr.get('shortname') or ''})\n"
         f"Дата сделки: {trade_date}\n"
         f"Всего в позиции: {total_qty:g} {qty_unit}\n"
-        f"Вложено (с комиссиями): {money(total_cost)} RUB\n"
-        f"Средняя цена (с комиссиями): {money(avg_price)} RUB\n\n"
+        f"Вложено: {money(total_cost)} RUB\n"
+        f"Средняя цена: {money(avg_price)} RUB\n\n"
         f"{text_price}\n\n"
         "Добавим новую сделку или закончим ввод?",
         reply_markup=kb.as_markup()
