@@ -142,11 +142,11 @@ def money_signed(x: float) -> str:
         return f"-{money(abs(x))}"
     return money(0.0)
 
-def qty_int(x: float | None) -> str:
+def rub_amount(x: float | None) -> str:
     if x is None:
         return "н/д"
     try:
-        return f"{int(round(float(x))):,}".replace(",", " ")
+        return money(float(x))
     except Exception:
         return "н/д"
 
@@ -197,7 +197,7 @@ def build_top_movers_text(movers: list[dict], selected_date: date) -> str:
         lines.append(
             f"{i}. {m['secid']} ({m['shortname']}) — {m['pct']:+.2f}% "
             f"({money(m['open'])} → {money(m['last'])}) | "
-            f"Объём за день: {qty_int(m.get('vol_today'))}"
+            f"Объём торгов за день: {rub_amount(m.get('val_today'))} RUB"
         )
 
     lines.extend(["", "📉 Топ-5 падения:"])
@@ -208,7 +208,7 @@ def build_top_movers_text(movers: list[dict], selected_date: date) -> str:
             lines.append(
                 f"{i}. {m['secid']} ({m['shortname']}) — {m['pct']:+.2f}% "
                 f"({money(m['open'])} → {money(m['last'])}) | "
-                f"Объём за день: {qty_int(m.get('vol_today'))}"
+                f"Объём торгов за день: {rub_amount(m.get('val_today'))} RUB"
             )
     return "\n".join(lines)
 
@@ -978,10 +978,20 @@ async def cmd_set_interval(message: Message):
 
 
 async def cmd_top_movers(message: Message):
-    await message.answer(
-        "Выбери дату для топа роста/падения:",
-        reply_markup=await make_top_movers_dates_kb(selected=datetime.now(MSK_TZ).date()),
-    )
+    selected = datetime.now(MSK_TZ).date()
+    reset_data_source_flags()
+    async with aiohttp.ClientSession() as session:
+        movers = await get_stock_movers_by_date(session, selected, boardid="TQBR")
+
+    if not movers:
+        await message.answer(
+            "Не удалось получить данные по акциям TQBR.",
+            reply_markup=await make_top_movers_dates_kb(selected=selected),
+        )
+        return
+
+    text = append_delayed_warning(build_top_movers_text(movers, selected))
+    await message.answer(text, reply_markup=await make_top_movers_dates_kb(selected=selected))
 
 
 async def on_top_movers_date_pick(call: CallbackQuery):
