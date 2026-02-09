@@ -20,6 +20,7 @@ from aiogram.fsm.context import FSMContext
 
 from db import (
     acquire_single_instance_lock,
+    clear_user_portfolio,
     init_db,
     upsert_instrument,
     add_trade,
@@ -63,6 +64,8 @@ BTN_PORTFOLIO = "Стоимость портфеля"
 BTN_ALERTS = "Настройки уведомлений"
 BTN_WHY_INVEST = "Зачем инвестировать"
 BTN_ASSET_LOOKUP = "Поиск цены"
+TRADE_SIDE_BUY = "buy"
+TRADE_SIDE_SELL = "sell"
 
 WHY_INVEST_TEXT = (
     "Зачем инвестировать? Чтобы деньги работали быстрее инфляции, и результат зависел не от "
@@ -125,6 +128,7 @@ DB_DSN = _env("DATABASE_URL") or _env("DB_DSN") or _env("DB_PATH")
 class AddTradeFlow(StatesGroup):
     waiting_date_mode = State()
     waiting_date_manual = State()
+    waiting_side = State()
     waiting_asset_type = State()
     waiting_query = State()
     waiting_pick = State()
@@ -172,6 +176,14 @@ async def make_asset_type_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="📈 Акции", callback_data=f"atype:{ASSET_TYPE_STOCK}")
     kb.button(text="🥇 Металл", callback_data=f"atype:{ASSET_TYPE_METAL}")
+    kb.button(text="⬅️ Назад", callback_data="back:side")
+    kb.adjust(1)
+    return kb.as_markup()
+
+async def make_trade_side_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🟢 Покупка", callback_data=f"side:{TRADE_SIDE_BUY}")
+    kb.button(text="🔴 Продажа", callback_data=f"side:{TRADE_SIDE_SELL}")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -238,6 +250,7 @@ async def make_confirm_kb():
 async def make_edit_step_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="Дата", callback_data="edit:date")
+    kb.button(text="Покупка/продажа", callback_data="edit:side")
     kb.button(text="Тип актива", callback_data="edit:asset_type")
     kb.button(text="Инструмент", callback_data="edit:instrument")
     kb.button(text="Количество", callback_data="edit:qty")
@@ -274,13 +287,16 @@ def parse_ddmmyyyy(value: str) -> str | None:
 def build_trade_preview(data: dict) -> str:
     chosen = data["chosen"]
     asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
+    trade_side = data.get("trade_side") or TRADE_SIDE_BUY
+    side_label = "Покупка" if trade_side == TRADE_SIDE_BUY else "Продажа"
     qty_unit = "гр" if asset_type == ASSET_TYPE_METAL else "шт"
-    qty = data["qty"]
+    qty = abs(float(data["qty"]))
     price = data["price"]
     total = qty * price
     return (
         "Проверь сделку:\n\n"
         f"Дата: {data['trade_date']}\n"
+        f"Операция: {side_label}\n"
         f"Тип актива: {'Металл' if asset_type == ASSET_TYPE_METAL else 'Акции'}\n"
         f"Инструмент: {chosen['secid']} ({chosen.get('shortname') or ''})\n"
         f"Количество: {qty:g} {qty_unit}\n"
@@ -611,6 +627,7 @@ async def cmd_start(message: Message):
         "/add_trade — добавить сделку (дата → актив → инструмент → количество → цена)\n"
         "/portfolio — текущая стоимость портфеля и P&L\n"
         "/asset_lookup — текущая цена и динамика за неделю/месяц/6 мес/год\n\n"
+        "/clear_portfolio — удалить все сделки и очистить портфель\n\n"
         "📥 Импорт\n"
         "/import_broker_xml — загрузить XML брокерской выписки и импортировать сделки\n\n"
         "🔔 Уведомления\n"
@@ -646,6 +663,33 @@ async def cmd_set_interval(message: Message):
 
     await set_periodic_alert(DB_DSN, user_id, True, interval)
     await message.answer(f"Готово. Периодические уведомления включены: каждые {interval} мин.")
+
+async def make_clear_portfolio_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑️ Да, очистить", callback_data="pfclear:yes")
+    kb.button(text="Отмена", callback_data="pfclear:no")
+    kb.adjust(1)
+    return kb.as_markup()
+
+async def cmd_clear_portfolio(message: Message):
+    await message.answer(
+        "Это удалит все ваши сделки и обнулит портфель. Действие необратимо.\n"
+        "Подтвердить очистку?",
+        reply_markup=await make_clear_portfolio_kb(),
+    )
+
+async def on_clear_portfolio_confirm(call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else None
+    if not user_id:
+        await call.answer("Не удалось определить пользователя", show_alert=True)
+        return
+    deleted = await clear_user_portfolio(DB_DSN, user_id)
+    await call.message.edit_text(f"Портфель очищен. Удалено сделок: {deleted}.")
+    await call.answer()
+
+async def on_clear_portfolio_cancel(call: CallbackQuery):
+    await call.message.edit_text("Очистка портфеля отменена.")
+    await call.answer()
 
 
 async def cmd_import_broker_xml(message: Message):
@@ -1018,10 +1062,10 @@ async def on_date_mode_pick(call: CallbackQuery, state: FSMContext):
     if mode == "today":
         d = today_ddmmyyyy()
         await state.update_data(trade_date=d)
-        await state.set_state(AddTradeFlow.waiting_asset_type)
+        await state.set_state(AddTradeFlow.waiting_side)
         await call.message.edit_text(
-            f"Дата сделки: {d}\n\nЧто добавляем?",
-            reply_markup=await make_asset_type_kb(),
+            f"Дата сделки: {d}\n\nВыбери тип сделки:",
+            reply_markup=await make_trade_side_kb(),
         )
     elif mode == "manual":
         await state.set_state(AddTradeFlow.waiting_date_manual)
@@ -1037,8 +1081,25 @@ async def on_date_manual(message: Message, state: FSMContext):
         await message.answer("Формат даты: dd.mm.yyyy. Пример: 08.02.2026")
         return
     await state.update_data(trade_date=d)
+    await state.set_state(AddTradeFlow.waiting_side)
+    await message.answer(f"Дата сделки: {d}\n\nВыбери тип сделки:", reply_markup=await make_trade_side_kb())
+
+async def on_trade_side_pick(call: CallbackQuery, state: FSMContext):
+    trade_side = call.data.split(":", 1)[1]
+    if trade_side not in {TRADE_SIDE_BUY, TRADE_SIDE_SELL}:
+        await call.answer("Неизвестный тип сделки", show_alert=True)
+        return
+    await state.update_data(trade_side=trade_side, asset_type=None, cands=None, chosen=None, qty=None, price=None)
     await state.set_state(AddTradeFlow.waiting_asset_type)
-    await message.answer(f"Дата сделки: {d}\n\nЧто добавляем?", reply_markup=await make_asset_type_kb())
+    side_label = "Покупка" if trade_side == TRADE_SIDE_BUY else "Продажа"
+    await call.message.edit_text(f"Тип сделки: {side_label}\n\nЧто добавляем?", reply_markup=await make_asset_type_kb())
+    await call.answer()
+
+async def on_back_to_side(call: CallbackQuery, state: FSMContext):
+    await state.update_data(asset_type=None, cands=None, chosen=None, qty=None, price=None)
+    await state.set_state(AddTradeFlow.waiting_side)
+    await call.message.edit_text("Выбери тип сделки:", reply_markup=await make_trade_side_kb())
+    await call.answer()
 
 async def on_asset_type_pick(call: CallbackQuery, state: FSMContext):
     asset_type = call.data.split(":", 1)[1]
@@ -1046,17 +1107,33 @@ async def on_asset_type_pick(call: CallbackQuery, state: FSMContext):
         await call.answer("Неизвестный тип инструмента", show_alert=True)
         return
 
+    data = await state.get_data()
+    trade_side = data.get("trade_side")
+    if trade_side not in {TRADE_SIDE_BUY, TRADE_SIDE_SELL}:
+        await state.set_state(AddTradeFlow.waiting_side)
+        await call.message.edit_text("Сначала выбери тип сделки:", reply_markup=await make_trade_side_kb())
+        await call.answer()
+        return
+
+    side_label = "Покупка" if trade_side == TRADE_SIDE_BUY else "Продажа"
     await state.update_data(asset_type=asset_type, cands=None, chosen=None, qty=None, price=None)
     await state.set_state(AddTradeFlow.waiting_query)
     if asset_type == ASSET_TYPE_METAL:
-        prompt = "Выбрано: Металл\n\nВведи тикер или название металла (например: GLDRUB_TOM):"
+        prompt = f"Выбрано: {side_label}, Металл\n\nВведи тикер или название металла (например: GLDRUB_TOM):"
     else:
-        prompt = "Выбрано: Акции\n\nВведи тикер, ISIN или название компании (например: SBER, RU0009029540, Сбербанк):"
+        prompt = f"Выбрано: {side_label}, Акции\n\nВведи тикер, ISIN или название компании (например: SBER, RU0009029540, Сбербанк):"
 
     await call.message.edit_text(prompt, reply_markup=await make_search_back_kb())
     await call.answer()
 
 async def on_back_to_asset_type(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    trade_side = data.get("trade_side")
+    if trade_side not in {TRADE_SIDE_BUY, TRADE_SIDE_SELL}:
+        await state.set_state(AddTradeFlow.waiting_side)
+        await call.message.edit_text("Сначала выбери тип сделки:", reply_markup=await make_trade_side_kb())
+        await call.answer()
+        return
     await state.update_data(cands=None, chosen=None)
     await state.set_state(AddTradeFlow.waiting_asset_type)
     await call.message.edit_text("Что добавляем?", reply_markup=await make_asset_type_kb())
@@ -1189,7 +1266,10 @@ async def on_qty(message: Message, state: FSMContext):
     except Exception:
         await message.answer("Введите число > 0, например 10")
         return
-    await state.update_data(qty=qty, price=None)
+    data = await state.get_data()
+    trade_side = data.get("trade_side") or TRADE_SIDE_BUY
+    signed_qty = -qty if trade_side == TRADE_SIDE_SELL else qty
+    await state.update_data(qty=signed_qty, price=None)
     await state.set_state(AddTradeFlow.waiting_price)
     await message.answer("Введи стоимость одной единицы:", reply_markup=await make_price_back_kb())
 
@@ -1217,6 +1297,7 @@ async def on_confirm_save(call: CallbackQuery, state: FSMContext):
     asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
     trade_date = data["trade_date"]
     qty = data["qty"]
+    trade_side = data.get("trade_side") or TRADE_SIDE_BUY
     price = data["price"]
     commission = 0.0
     instrument_id = await upsert_instrument(
@@ -1271,6 +1352,8 @@ async def on_confirm_save(call: CallbackQuery, state: FSMContext):
         "Сделка сохранена ✅\n\n"
         f"{instr['secid']} ({instr.get('shortname') or ''})\n"
         f"Дата сделки: {trade_date}\n"
+        f"Операция: {'Покупка' if trade_side == TRADE_SIDE_BUY else 'Продажа'}\n"
+        f"Количество в сделке: {abs(float(qty)):g} {qty_unit}\n"
         f"Всего в позиции: {total_qty:g} {qty_unit}\n"
         f"Вложено: {money(total_cost)} RUB\n"
         f"Средняя цена: {money(avg_price)} RUB\n\n"
@@ -1295,9 +1378,13 @@ async def on_edit_step(call: CallbackQuery, state: FSMContext):
     chosen = data.get("chosen")
 
     if step == "date":
-        await state.update_data(trade_date=None, asset_type=None, cands=None, chosen=None, qty=None, price=None)
+        await state.update_data(trade_date=None, trade_side=None, asset_type=None, cands=None, chosen=None, qty=None, price=None)
         await state.set_state(AddTradeFlow.waiting_date_mode)
         await call.message.edit_text("Выбери дату сделки:", reply_markup=await make_date_mode_kb())
+    elif step == "side":
+        await state.update_data(trade_side=None, asset_type=None, cands=None, chosen=None, qty=None, price=None)
+        await state.set_state(AddTradeFlow.waiting_side)
+        await call.message.edit_text("Выбери тип сделки:", reply_markup=await make_trade_side_kb())
     elif step == "asset_type":
         await state.update_data(asset_type=None, cands=None, chosen=None, qty=None, price=None)
         await state.set_state(AddTradeFlow.waiting_asset_type)
@@ -1402,6 +1489,7 @@ async def main():
     dp.message.register(cmd_start, Command("start"), StateFilter("*"))
     dp.message.register(cmd_add_trade, Command("add_trade"), StateFilter("*"))
     dp.message.register(cmd_portfolio, Command("portfolio"), StateFilter("*"))
+    dp.message.register(cmd_clear_portfolio, Command("clear_portfolio"), StateFilter("*"))
     dp.message.register(cmd_asset_lookup, Command("asset_lookup"), StateFilter("*"))
     dp.message.register(cmd_import_broker_xml, Command("import_broker_xml"), StateFilter("*"))
     dp.message.register(cmd_why_invest, Command("why_invest"), StateFilter("*"))
@@ -1426,8 +1514,10 @@ async def main():
     dp.message.register(on_lookup_query, AssetLookupFlow.waiting_query)
     dp.callback_query.register(on_lookup_pick, AssetLookupFlow.waiting_pick, F.data.startswith("lpick:"))
 
+    dp.callback_query.register(on_trade_side_pick, AddTradeFlow.waiting_side, F.data.startswith("side:"))
     dp.callback_query.register(on_asset_type_pick, AddTradeFlow.waiting_asset_type, F.data.startswith("atype:"))
     dp.callback_query.register(on_date_mode_pick, AddTradeFlow.waiting_date_mode, F.data.startswith("date:"))
+    dp.callback_query.register(on_back_to_side, AddTradeFlow.waiting_asset_type, F.data == "back:side")
     dp.callback_query.register(on_back_to_asset_type, AddTradeFlow.waiting_query, F.data == "back:asset_type")
     dp.callback_query.register(on_back_to_asset_type, AddTradeFlow.waiting_pick, F.data == "back:asset_type")
     dp.callback_query.register(on_back_to_query, AddTradeFlow.waiting_pick, F.data == "back:query")
@@ -1441,6 +1531,8 @@ async def main():
     dp.callback_query.register(on_confirm_save, AddTradeFlow.waiting_confirm, F.data == "confirm:save")
     dp.callback_query.register(on_confirm_edit, AddTradeFlow.waiting_confirm, F.data == "confirm:edit")
     dp.callback_query.register(on_edit_step, AddTradeFlow.waiting_edit_step, F.data.startswith("edit:"))
+    dp.callback_query.register(on_clear_portfolio_confirm, StateFilter("*"), F.data == "pfclear:yes")
+    dp.callback_query.register(on_clear_portfolio_cancel, StateFilter("*"), F.data == "pfclear:no")
 
     dp.callback_query.register(on_new_trade, AddTradeFlow.waiting_more, F.data == "new_trade")
     dp.callback_query.register(on_done, AddTradeFlow.waiting_more, F.data == "done")
@@ -1464,4 +1556,3 @@ if __name__ == "__main__":
     except Exception:
         logger.exception("Bot crashed")
         raise
-    release_single_instance_lock,

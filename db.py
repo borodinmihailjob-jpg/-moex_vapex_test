@@ -594,6 +594,48 @@ async def list_active_position_instruments(db_path: str) -> list[dict[str, Any]]
         raise
 
 
+async def clear_user_portfolio(db_path: str, user_id: int) -> int:
+    """
+    Deletes all trades and aggregated positions for user's default portfolio.
+    Returns count of deleted trades.
+    """
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                user_ref_id, portfolio_id = await _get_user_context(conn, int(user_id))
+                if user_ref_id is None or portfolio_id is None:
+                    return 0
+                deleted_rows = await conn.fetch(
+                    """
+                    DELETE FROM trades
+                    WHERE user_id = $1
+                      AND portfolio_id = $2
+                    RETURNING id
+                    """,
+                    int(user_id),
+                    portfolio_id,
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM user_positions
+                    WHERE portfolio_id = $1
+                    """,
+                    portfolio_id,
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM price_alert_state
+                    WHERE user_id = $1
+                    """,
+                    int(user_id),
+                )
+                return len(deleted_rows)
+    except Exception:
+        logger.exception("Failed clear_user_portfolio user=%s", user_id)
+        raise
+
+
 async def upsert_price_cache(db_path: str, instrument_id: int, last_price: float, updated_at: datetime | None = None) -> None:
     try:
         pool = await _get_pool(db_path)
