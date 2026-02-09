@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import html
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
@@ -52,6 +53,30 @@ MOEX_EVENT_WINDOW_MIN = 5
 BTN_ADD_TRADE = "Добавить сделку"
 BTN_PORTFOLIO = "Стоимость портфеля"
 BTN_ALERTS = "Настройки уведомлений"
+BTN_WHY_INVEST = "Зачем инвестировать"
+
+WHY_INVEST_TEXT = (
+    "Зачем инвестировать? Чтобы деньги работали быстрее инфляции, и результат зависел не от "
+    "«угадайки», а от дисциплины.\n\n"
+    "📌 Пример на данных 22 лет (март 2003 → февраль 2025)\n"
+    "Инструмент: индекс Мосбиржи полной доходности MCFTRR (дивиденды учтены, налоги на дивиденды тоже).\n"
+    "Взносы: старт 2000 ₽/мес в 2003, каждый год рост на инфляцию → к 2025 около 12000 ₽/мес. "
+    "Всего внесено около 1,54 млн ₽.\n\n"
+    "База сравнения:\n"
+    "• Средняя инфляция ~8,5%/год. Чтобы «просто сохранить покупательную способность», "
+    "нужно было иметь ≈3,227 млн ₽ к концу периода.\n"
+    "• Если все это время держать на вкладе (переоткрытие раз в 3 месяца): итог ≈3,971 млн ₽ (~9,5% годовых).\n\n"
+    "Три инвестора (все с одинаковыми взносами):\n"
+    "1. Худший тайминг («покупал на хаях» 8 раз: 2006, 2008, 2011, 2015, 2017, 2020, 2021, 2024) "
+    "→ ≈3,5 млн ₽ (9,2% годовых). Даже так — выше инфляции, но хуже вклада.\n"
+    "2. «Идеальный таймер» (ловил падения ≥30% и покупал «в самый низ», 5 входов: 2008, 2011, 2020, 2022, 2024) "
+    "→ ≈5,8 млн ₽ (лучший, но так почти никто не умеет стабильно).\n"
+    "3. Регулярные покупки каждый месяц («как зарплата → в портфель») → ≈5,16 млн ₽. "
+    "Это сильно выше вклада и всего на ~12,5% хуже «идеального тайминга».\n\n"
+    "✅ Вывод для обычного человека:\n"
+    "Лучшее, что реально повторить — покупать регулярно и долго. «Угадать дно» почти невозможно, "
+    "а дисциплина дает результат: 5,16 млн ₽ vs 3,97 млн ₽ на вкладе на одном и том же горизонте."
+)
 
 def setup_logging() -> None:
     project_root = Path(__file__).resolve().parent
@@ -176,7 +201,7 @@ def make_main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_ADD_TRADE), KeyboardButton(text=BTN_PORTFOLIO)],
-            [KeyboardButton(text=BTN_ALERTS)],
+            [KeyboardButton(text=BTN_ALERTS), KeyboardButton(text=BTN_WHY_INVEST)],
         ],
         resize_keyboard=True,
     )
@@ -248,6 +273,9 @@ def pnl_label(pnl_amount: float, pnl_percent: float | None) -> str:
         return f"{emoji} P&L: {money_signed(pnl_amount)} RUB"
     return f"{emoji} P&L: {pnl_percent:+.2f}% ({money_signed(pnl_amount)} RUB)"
 
+def pnl_emoji(pnl_amount: float) -> str:
+    return "📈" if pnl_amount >= 0 else "📉"
+
 async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[dict]]:
     positions = await get_user_positions(DB_DSN, user_id)
     if not positions:
@@ -276,14 +304,16 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
 
     for pos, last in priced:
         qty = pos["total_qty"]
-        ticker = pos["secid"]
-        asset_name = (pos.get("shortname") or ticker).strip()
-        unit = "гр" if (pos.get("asset_type") == ASSET_TYPE_METAL) else "шт"
+        ticker = str(pos["secid"]).strip()
+        asset_name_raw = (pos.get("shortname") or ticker).strip()
+        asset_name = html.escape(asset_name_raw)
+        ticker_safe = html.escape(ticker)
+        unit = "гр" if (pos.get("asset_type") == ASSET_TYPE_METAL) else "акции"
         total_cost = float(pos.get("total_cost") or 0.0)
 
         if last is None:
             unknown_prices += 1
-            lines.append(f"{asset_name} ({ticker}) - {qty:g} {unit} - стоимость актива: нет данных")
+            lines.append(f"{asset_name} - {ticker_safe} - {qty:g} {unit} - Общая стоимость актива: нет данных - P&L: нет данных")
             continue
 
         value = qty * last
@@ -292,15 +322,25 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
 
         total_value_known += value
         total_cost_known += total_cost
+        emoji = pnl_emoji(pnl)
+        if pnl_pct is None:
+            pnl_tail = f"{emoji} {money_signed(pnl)} RUB"
+        else:
+            pnl_tail = f"{emoji} {pnl_pct:+.2f}% {money_signed(pnl)} RUB"
         lines.append(
-            f"{asset_name} ({ticker}) - {qty:g} {unit} - стоимость актива: {money(value)} RUB ({pnl_label(pnl, pnl_pct)})"
+            f"{asset_name} - {ticker_safe} - {qty:g} {unit} - Общая стоимость актива: <b>{money(value)}</b> RUB - P&L {pnl_tail}"
         )
 
     total_pnl = total_value_known - total_cost_known
     total_pnl_pct = (total_pnl / total_cost_known * 100.0) if abs(total_cost_known) > 1e-12 else None
+    total_emoji = pnl_emoji(total_pnl)
+    if total_pnl_pct is None:
+        total_pnl_text = f"{total_emoji} <b>{money_signed(total_pnl)} RUB</b>"
+    else:
+        total_pnl_text = f"{total_emoji} {total_pnl_pct:+.2f}% <b>{money_signed(total_pnl)} RUB</b>"
     footer = (
-        f"Итоговая стоимость активов по всем тикерам: {money(total_value_known)} RUB "
-        f"({pnl_label(total_pnl, total_pnl_pct)})"
+        f"Итоговая стоимость активов по всем тикерам: <b>{money(total_value_known)}</b> RUB\n"
+        f"P&L: {total_pnl_text}"
     )
     if unknown_prices:
         footer += f"\nНет рыночной цены для {unknown_prices} инструментов, они не включены в итог."
@@ -315,6 +355,7 @@ async def cmd_start(message: Message):
         "Команды:\n"
         "/add_trade — добавить сделку (дата → актив → инструмент → количество → цена)\n"
         "/portfolio — показать текущую стоимость портфеля\n"
+        "/why_invest — зачем инвестировать (пример и сравнение)\n"
         "/set_interval <минуты> — периодические уведомления по портфелю\n"
         "/interval_off — выключить периодические уведомления\n"
         "/set_drop_alert <процент> — алерт при сильном падении цены\n"
@@ -425,6 +466,9 @@ async def on_menu_portfolio(message: Message):
 async def on_menu_alerts_status(message: Message):
     await cmd_alerts_status(message)
 
+async def cmd_why_invest(message: Message):
+    await message.answer(WHY_INVEST_TEXT)
+
 async def cmd_portfolio(message: Message):
     user_id = message.from_user.id if message.from_user else None
     if not user_id:
@@ -436,25 +480,25 @@ async def cmd_portfolio(message: Message):
         await message.answer("Портфель пуст. Добавьте сделки через /add_trade.")
         return
     if len(text) <= 3500:
-        await message.answer(text)
+        await message.answer(text, parse_mode="HTML")
         return
 
     lines = text.splitlines()
     header = lines[0] if lines else "Портфель:"
     body_lines = lines[1:] if len(lines) > 1 else []
-    await message.answer(header)
+    await message.answer(header, parse_mode="HTML")
     chunk = []
     chunk_len = 0
     for line in body_lines:
         line_len = len(line) + 1
         if chunk_len + line_len > 3500 and chunk:
-            await message.answer("\n".join(chunk))
+            await message.answer("\n".join(chunk), parse_mode="HTML")
             chunk = []
             chunk_len = 0
         chunk.append(line)
         chunk_len += line_len
     if chunk:
-        await message.answer("\n".join(chunk))
+        await message.answer("\n".join(chunk), parse_mode="HTML")
 
 async def build_portfolio_snapshot(user_id: int) -> tuple[str, float | None, list[dict]]:
     return await build_portfolio_report(user_id)
@@ -483,7 +527,7 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
         due = (last is None) or ((now_utc - last).total_seconds() >= settings["periodic_interval_min"] * 60)
         if due:
             text, _, _ = await build_portfolio_snapshot(user_id)
-            await bot.send_message(user_id, f"Периодический отчет:\n\n{text}")
+            await bot.send_message(user_id, f"Периодический отчет:\n\n{text}", parse_mode="HTML")
             await update_periodic_last_sent_at(DB_DSN, user_id, now_utc.isoformat())
 
     if settings["drop_alert_enabled"]:
@@ -533,14 +577,14 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
                 and settings.get("open_last_sent_date") != today
             ):
                 text, _, _ = await build_portfolio_snapshot(user_id)
-                await bot.send_message(user_id, f"Открытие биржи (МСК):\n\n{text}")
+                await bot.send_message(user_id, f"Открытие биржи (МСК):\n\n{text}", parse_mode="HTML")
                 await update_open_sent_date(DB_DSN, user_id, today)
             if (
                 close_min_of_day <= now_min_of_day < close_min_of_day + MOEX_EVENT_WINDOW_MIN
                 and settings.get("close_last_sent_date") != today
             ):
                 text, _, _ = await build_portfolio_snapshot(user_id)
-                await bot.send_message(user_id, f"Закрытие биржи (МСК):\n\n{text}")
+                await bot.send_message(user_id, f"Закрытие биржи (МСК):\n\n{text}", parse_mode="HTML")
                 await update_close_sent_date(DB_DSN, user_id, today)
 
 async def notifications_worker(bot: Bot):
@@ -964,6 +1008,7 @@ async def main():
     dp.message.register(cmd_start, Command("start"), StateFilter("*"))
     dp.message.register(cmd_add_trade, Command("add_trade"), StateFilter("*"))
     dp.message.register(cmd_portfolio, Command("portfolio"), StateFilter("*"))
+    dp.message.register(cmd_why_invest, Command("why_invest"), StateFilter("*"))
     dp.message.register(cmd_set_interval, Command("set_interval"), StateFilter("*"))
     dp.message.register(cmd_interval_off, Command("interval_off"), StateFilter("*"))
     dp.message.register(cmd_set_drop_alert, Command("set_drop_alert"), StateFilter("*"))
@@ -974,6 +1019,7 @@ async def main():
     dp.message.register(on_menu_add_trade, StateFilter("*"), F.text == BTN_ADD_TRADE)
     dp.message.register(on_menu_portfolio, StateFilter("*"), F.text == BTN_PORTFOLIO)
     dp.message.register(on_menu_alerts_status, StateFilter("*"), F.text == BTN_ALERTS)
+    dp.message.register(cmd_why_invest, StateFilter("*"), F.text == BTN_WHY_INVEST)
 
     dp.callback_query.register(on_asset_type_pick, AddTradeFlow.waiting_asset_type, F.data.startswith("atype:"))
     dp.callback_query.register(on_date_mode_pick, AddTradeFlow.waiting_date_mode, F.data.startswith("date:"))
