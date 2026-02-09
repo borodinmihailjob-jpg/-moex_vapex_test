@@ -142,6 +142,14 @@ def money_signed(x: float) -> str:
         return f"-{money(abs(x))}"
     return money(0.0)
 
+def qty_int(x: float | None) -> str:
+    if x is None:
+        return "н/д"
+    try:
+        return f"{int(round(float(x))):,}".replace(",", " ")
+    except Exception:
+        return "н/д"
+
 async def safe_edit_text(message: Message | None, text: str, reply_markup=None) -> None:
     if message is None:
         return
@@ -932,7 +940,8 @@ async def cmd_top_movers(message: Message):
     for i, m in enumerate(gainers, 1):
         lines.append(
             f"{i}. {m['secid']} ({m['shortname']}) — {m['pct']:+.2f}% "
-            f"({money(m['open'])} → {money(m['last'])})"
+            f"({money(m['open'])} → {money(m['last'])}) | "
+            f"Объём за день: {qty_int(m.get('vol_today'))}"
         )
 
     lines.extend(["", "📉 Топ-5 падения:"])
@@ -942,7 +951,8 @@ async def cmd_top_movers(message: Message):
         for i, m in enumerate(losers, 1):
             lines.append(
                 f"{i}. {m['secid']} ({m['shortname']}) — {m['pct']:+.2f}% "
-                f"({money(m['open'])} → {money(m['last'])})"
+                f"({money(m['open'])} → {money(m['last'])}) | "
+                f"Объём за день: {qty_int(m.get('vol_today'))}"
             )
 
     await message.answer(append_delayed_warning("\n".join(lines)))

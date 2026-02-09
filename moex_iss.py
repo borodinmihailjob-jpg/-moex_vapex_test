@@ -294,7 +294,7 @@ async def get_stock_day_movers(session: aiohttp.ClientSession, boardid: str = "T
     params = {
         "iss.meta": "off",
         "securities.columns": "SECID,SHORTNAME",
-        "marketdata.columns": "SECID,OPEN,LAST",
+        "marketdata.columns": "SECID,OPEN,LAST,VOLTODAY,VALTODAY",
     }
     data, delayed = await get_json_with_fallback_source(session, path, params=params)
     sec = data.get("securities", {})
@@ -323,6 +323,8 @@ async def get_stock_day_movers(session: aiohttp.ClientSession, boardid: str = "T
     md_secid_i = md_idx.get("SECID")
     open_i = md_idx.get("OPEN")
     last_i = md_idx.get("LAST")
+    vol_i = md_idx.get("VOLTODAY")
+    val_i = md_idx.get("VALTODAY")
     if md_secid_i is None or open_i is None or last_i is None:
         return out
 
@@ -351,6 +353,22 @@ async def get_stock_day_movers(session: aiohttp.ClientSession, boardid: str = "T
             last_f = float(last_px)
         except Exception:
             continue
+        vol_today = None
+        if vol_i is not None and vol_i < len(row):
+            raw_vol = row[vol_i]
+            if raw_vol is not None:
+                try:
+                    vol_today = float(raw_vol)
+                except Exception:
+                    vol_today = None
+        val_today = None
+        if val_i is not None and val_i < len(row):
+            raw_val = row[val_i]
+            if raw_val is not None:
+                try:
+                    val_today = float(raw_val)
+                except Exception:
+                    val_today = None
         if open_f <= 0:
             continue
         pct = (last_f - open_f) / open_f * 100.0
@@ -361,6 +379,8 @@ async def get_stock_day_movers(session: aiohttp.ClientSession, boardid: str = "T
                 "open": open_f,
                 "last": last_f,
                 "pct": pct,
+                "vol_today": vol_today,
+                "val_today": val_today,
             }
         )
 
