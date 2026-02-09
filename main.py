@@ -107,8 +107,11 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DB_DSN = (os.getenv("DATABASE_URL") or os.getenv("DB_PATH") or "").strip()
+def _env(name: str) -> str:
+    return (os.getenv(name) or "").strip()
+
+BOT_TOKEN = _env("BOT_TOKEN") or _env("TELEGRAM_BOT_TOKEN")
+DB_DSN = _env("DATABASE_URL") or _env("DB_DSN") or _env("DB_PATH")
 
 class AddTradeFlow(StatesGroup):
     waiting_date_mode = State()
@@ -989,7 +992,10 @@ async def on_done(call: CallbackQuery, state: FSMContext):
 
 async def main():
     if not BOT_TOKEN:
-        raise RuntimeError("Не найден BOT_TOKEN в .env")
+        raise RuntimeError(
+            "Не найден токен бота в переменных окружения. "
+            "Ожидается BOT_TOKEN или TELEGRAM_BOT_TOKEN (Render -> Environment)."
+        )
     if not DB_DSN:
         raise RuntimeError("Не найден DATABASE_URL (PostgreSQL DSN) в .env")
     if not (DB_DSN.startswith("postgresql://") or DB_DSN.startswith("postgres://")):
