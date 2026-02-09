@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS price_alert_state (
 CREATE TABLE IF NOT EXISTS app_texts (
   id BIGSERIAL PRIMARY KEY,
   text_code TEXT NOT NULL UNIQUE,
+  button_name TEXT,
   value TEXT NOT NULL,
   active BOOLEAN NOT NULL DEFAULT TRUE
 );
@@ -111,6 +112,7 @@ MIGRATION_SQL = [
     "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS user_ref_id BIGINT",
     "ALTER TABLE price_alert_state ADD COLUMN IF NOT EXISTS user_ref_id BIGINT",
     "ALTER TABLE app_texts ADD COLUMN IF NOT EXISTS text_code TEXT",
+    "ALTER TABLE app_texts ADD COLUMN IF NOT EXISTS button_name TEXT",
     "ALTER TABLE app_texts ADD COLUMN IF NOT EXISTS value TEXT",
     "ALTER TABLE app_texts ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
 ]
@@ -122,6 +124,7 @@ POST_MIGRATION_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS ix_user_alert_settings_user_ref ON user_alert_settings (user_ref_id)",
     "CREATE INDEX IF NOT EXISTS ix_price_alert_state_user_ref_instrument ON price_alert_state (user_ref_id, instrument_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_app_texts_text_code ON app_texts (text_code)",
+    "CREATE INDEX IF NOT EXISTS ix_app_texts_button_name_active ON app_texts (button_name, active)",
 ]
 
 _pools: dict[str, asyncpg.Pool] = {}
@@ -718,17 +721,25 @@ async def clear_user_portfolio(db_path: str, user_id: int) -> int:
         raise
 
 
-async def ensure_app_text(db_path: str, text_code: str, value: str, active: bool = True) -> None:
+async def ensure_app_text(
+    db_path: str,
+    text_code: str,
+    value: str,
+    active: bool = True,
+    button_name: str | None = None,
+) -> None:
     try:
         pool = await _get_pool(db_path)
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO app_texts (text_code, value, active)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (text_code) DO NOTHING
+                INSERT INTO app_texts (text_code, button_name, value, active)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (text_code) DO UPDATE
+                SET button_name = COALESCE(app_texts.button_name, EXCLUDED.button_name)
                 """,
                 str(text_code).strip(),
+                (str(button_name).strip() if button_name else None),
                 str(value),
                 bool(active),
             )
@@ -756,6 +767,26 @@ async def get_active_app_text(db_path: str, text_code: str) -> str | None:
             return str(row["value"])
     except Exception:
         logger.exception("Failed get_active_app_text text_code=%s", text_code)
+        raise
+
+
+async def list_active_app_texts_by_button_name(db_path: str, button_name: str) -> list[dict[str, str]]:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT text_code
+                FROM app_texts
+                WHERE button_name = $1
+                  AND active = TRUE
+                ORDER BY id
+                """,
+                str(button_name).strip(),
+            )
+        return [{"text_code": str(r["text_code"])} for r in rows]
+    except Exception:
+        logger.exception("Failed list_active_app_texts_by_button_name button_name=%s", button_name)
         raise
 
 

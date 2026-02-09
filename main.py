@@ -44,6 +44,7 @@ from db import (
     upsert_price_cache,
     get_price_cache_map,
     get_active_app_text,
+    list_active_app_texts_by_button_name,
 )
 from moex_iss import (
     ASSET_TYPE_METAL,
@@ -172,6 +173,24 @@ async def safe_edit_text(message: Message | None, text: str, reply_markup=None) 
             await message.answer(text, reply_markup=reply_markup)
         except Exception:
             logger.exception("Failed fallback answer after edit_text network error")
+
+
+def _article_button_text(text_code: str) -> str:
+    raw = str(text_code or "").strip()
+    if not raw:
+        return "Статья"
+    label = raw.replace("_", " ").replace("-", " ").strip().title()
+    return label[:64]
+
+
+async def make_articles_kb(button_name: str):
+    items = await list_active_app_texts_by_button_name(DB_DSN, button_name)
+    kb = InlineKeyboardBuilder()
+    for item in items:
+        text_code = item["text_code"]
+        kb.button(text=_article_button_text(text_code), callback_data=f"article:{text_code}")
+    kb.adjust(1)
+    return kb.as_markup(), items
 
 async def make_candidates_kb(cands: list[dict]):
     kb = InlineKeyboardBuilder()
@@ -859,11 +878,38 @@ async def on_menu_alerts_status(message: Message):
 
 async def cmd_why_invest(message: Message):
     try:
-        text = await get_active_app_text(DB_DSN, "why_invest")
+        markup, items = await make_articles_kb(BTN_WHY_INVEST)
     except Exception:
-        logger.exception("Failed loading why_invest text from app_texts")
+        logger.exception("Failed loading article list for button_name=%s", BTN_WHY_INVEST)
+        markup, items = None, []
+
+    if not items:
+        try:
+            text = await get_active_app_text(DB_DSN, "why_invest")
+        except Exception:
+            logger.exception("Failed loading fallback why_invest text from app_texts")
+            text = None
+        await message.answer(text or WHY_INVEST_TEXT)
+        return
+
+    await message.answer("Выбери интересующую статью:", reply_markup=markup)
+
+
+async def on_article_pick(call: CallbackQuery):
+    text_code = (call.data or "").split(":", 1)[1] if ":" in (call.data or "") else ""
+    if not text_code:
+        await call.answer("Некорректный выбор", show_alert=True)
+        return
+    try:
+        text = await get_active_app_text(DB_DSN, text_code)
+    except Exception:
+        logger.exception("Failed loading article text_code=%s", text_code)
         text = None
-    await message.answer(text or WHY_INVEST_TEXT)
+    if not text:
+        await call.answer("Статья недоступна", show_alert=True)
+        return
+    await safe_edit_text(call.message, text)
+    await call.answer()
 
 async def on_menu_asset_lookup(message: Message, state: FSMContext):
     await cmd_asset_lookup(message, state)
@@ -1608,7 +1654,7 @@ async def main():
         )
 
     await init_db(DB_DSN)
-    await ensure_app_text(DB_DSN, "why_invest", WHY_INVEST_TEXT, True)
+    await ensure_app_text(DB_DSN, "why_invest", WHY_INVEST_TEXT, True, BTN_WHY_INVEST)
 
     lock_name = "moex_portfolio_bot_polling"
     while True:
@@ -1651,6 +1697,7 @@ async def main():
     dp.callback_query.register(on_lookup_back_to_query, AssetLookupFlow.waiting_pick, F.data == "lback:query")
     dp.message.register(on_lookup_query, AssetLookupFlow.waiting_query)
     dp.callback_query.register(on_lookup_pick, AssetLookupFlow.waiting_pick, F.data.startswith("lpick:"))
+    dp.callback_query.register(on_article_pick, StateFilter("*"), F.data.startswith("article:"))
 
     dp.callback_query.register(on_trade_side_pick, AddTradeFlow.waiting_side, F.data.startswith("side:"))
     dp.callback_query.register(on_asset_type_pick, AddTradeFlow.waiting_asset_type, F.data.startswith("atype:"))
