@@ -156,20 +156,23 @@ def _ru_weekday_short(d: date) -> str:
     return names[d.weekday()]
 
 
-def _top_movers_date_options(base_date: date) -> list[date]:
-    # 5 предыдущих дней + текущий.
-    return [base_date - timedelta(days=delta) for delta in range(5, -1, -1)]
+def _top_movers_date_options(base_date: date) -> list[tuple[str, date]]:
+    return [
+        ("Текущая", base_date),
+        ("Вчера", base_date - timedelta(days=1)),
+        ("Позавчера", base_date - timedelta(days=2)),
+    ]
 
 
 async def make_top_movers_dates_kb(selected: date | None = None):
     base = datetime.now(MSK_TZ).date()
     options = _top_movers_date_options(base)
     kb = InlineKeyboardBuilder()
-    for d in options:
+    for label, d in options:
         mark = "• " if selected and selected == d else ""
-        label = f"{mark}{_ru_weekday_short(d)} {d.strftime('%d.%m')}"
-        kb.button(text=label[:64], callback_data=f"tmdate:{d.isoformat()}")
-    kb.adjust(3, 3)
+        text = f"{mark}{label} ({_ru_weekday_short(d)} {d.strftime('%d.%m')})"
+        kb.button(text=text[:64], callback_data=f"tmdate:{d.isoformat()}")
+    kb.adjust(1)
     return kb.as_markup()
 
 
@@ -978,20 +981,10 @@ async def cmd_set_interval(message: Message):
 
 
 async def cmd_top_movers(message: Message):
-    selected = datetime.now(MSK_TZ).date()
-    reset_data_source_flags()
-    async with aiohttp.ClientSession() as session:
-        movers = await get_stock_movers_by_date(session, selected, boardid="TQBR")
-
-    if not movers:
-        await message.answer(
-            "Не удалось получить данные по акциям TQBR.",
-            reply_markup=await make_top_movers_dates_kb(selected=selected),
-        )
-        return
-
-    text = append_delayed_warning(build_top_movers_text(movers, selected))
-    await message.answer(text, reply_markup=await make_top_movers_dates_kb(selected=selected))
+    await message.answer(
+        "Выбери дату для топа роста/падения:",
+        reply_markup=await make_top_movers_dates_kb(selected=None),
+    )
 
 
 async def on_top_movers_date_pick(call: CallbackQuery):
