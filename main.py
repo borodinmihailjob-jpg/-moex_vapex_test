@@ -458,7 +458,11 @@ async def refresh_price_cache_once() -> None:
                 )
                 return row, last
             except Exception:
-                logger.exception("Failed to refresh price cache secid=%s boardid=%s", row.get("secid"), row.get("boardid"))
+                logger.warning(
+                    "Failed to refresh price cache secid=%s boardid=%s",
+                    row.get("secid"),
+                    row.get("boardid"),
+                )
                 return row, None
 
         priced = await asyncio.gather(*(load_price(row) for row in instruments))
@@ -500,7 +504,11 @@ async def _load_prices_for_positions(positions: list[dict]) -> dict[int, float |
                 )
                 return pos, last
             except Exception:
-                logger.exception("Failed to load price secid=%s boardid=%s", pos["secid"], pos.get("boardid"))
+                logger.warning(
+                    "Failed to load price secid=%s boardid=%s",
+                    pos["secid"],
+                    pos.get("boardid"),
+                )
                 return pos, None
 
         loaded = await asyncio.gather(*(load_price(pos) for pos in missing_positions))

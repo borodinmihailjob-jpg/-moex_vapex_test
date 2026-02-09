@@ -1,22 +1,60 @@
+import asyncio
 import aiohttp
 import logging
 from datetime import date
 
 BASE = "https://iss.moex.com/iss"
 logger = logging.getLogger(__name__)
+ISS_RETRIES = 3
+ISS_RETRY_DELAY_SEC = 0.6
+ISS_TIMEOUT = aiohttp.ClientTimeout(total=12, connect=4, sock_connect=4, sock_read=8)
 
 ASSET_TYPE_STOCK = "stock"
 ASSET_TYPE_METAL = "metal"
 
 async def iss_get_json(session: aiohttp.ClientSession, path: str, params: dict | None = None) -> dict:
     url = f"{BASE}{path}"
-    try:
-        async with session.get(url, params=params) as resp:
-            resp.raise_for_status()
-            return await resp.json()
-    except Exception:
-        logger.exception("ISS request failed: %s params=%s", url, params)
-        raise
+    last_exc: Exception | None = None
+    for attempt in range(1, ISS_RETRIES + 1):
+        try:
+            async with session.get(url, params=params, timeout=ISS_TIMEOUT) as resp:
+                if resp.status in {429, 500, 502, 503, 504}:
+                    if attempt < ISS_RETRIES:
+                        logger.warning(
+                            "ISS temporary HTTP status=%s url=%s attempt=%s/%s",
+                            resp.status,
+                            url,
+                            attempt,
+                            ISS_RETRIES,
+                        )
+                        await asyncio.sleep(ISS_RETRY_DELAY_SEC * attempt)
+                        continue
+                resp.raise_for_status()
+                return await resp.json()
+        except asyncio.CancelledError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last_exc = exc
+            if attempt < ISS_RETRIES:
+                logger.warning(
+                    "ISS transient error url=%s attempt=%s/%s error=%s",
+                    url,
+                    attempt,
+                    ISS_RETRIES,
+                    exc.__class__.__name__,
+                )
+                await asyncio.sleep(ISS_RETRY_DELAY_SEC * attempt)
+                continue
+            logger.error(
+                "ISS request failed after retries: %s params=%s error=%s",
+                url,
+                params,
+                exc.__class__.__name__,
+            )
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"ISS request failed unexpectedly: {url}")
 
 async def search_securities(session: aiohttp.ClientSession, query: str) -> list[dict]:
     """
