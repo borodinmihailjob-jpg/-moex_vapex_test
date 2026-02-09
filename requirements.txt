@@ -2,3 +2,4 @@ aiogram
 aiohttp
 asyncpg
 python-dotenv
+Pillow

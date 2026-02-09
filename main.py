@@ -10,11 +10,12 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from aiohttp import web
 from dotenv import load_dotenv
+from PIL import Image, ImageDraw, ImageFont
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.filters import Command, StateFilter
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -72,6 +73,7 @@ BTN_PORTFOLIO = "Стоимость портфеля"
 BTN_ALERTS = "Настройки уведомлений"
 BTN_WHY_INVEST = "Зачем инвестировать"
 BTN_ASSET_LOOKUP = "Поиск цены"
+BTN_PORTFOLIO_MAP = "Карта портфеля"
 TRADE_SIDE_BUY = "buy"
 TRADE_SIDE_SELL = "sell"
 
@@ -290,7 +292,8 @@ def make_main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_ADD_TRADE), KeyboardButton(text=BTN_PORTFOLIO)],
-            [KeyboardButton(text=BTN_ALERTS), KeyboardButton(text=BTN_ASSET_LOOKUP)],
+            [KeyboardButton(text=BTN_PORTFOLIO_MAP), KeyboardButton(text=BTN_ASSET_LOOKUP)],
+            [KeyboardButton(text=BTN_ALERTS)],
             [KeyboardButton(text=BTN_WHY_INVEST)],
         ],
         resize_keyboard=True,
@@ -377,6 +380,164 @@ def append_delayed_warning(text: str) -> str:
     if delayed_data_used():
         return f"{text}\n{DELAYED_WARNING_TEXT}"
     return text
+
+
+def _load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+    # DejaVu Sans is available on most Linux images (including Render).
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/Library/Fonts/Arial Bold.ttf" if bold else "/Library/Fonts/Arial.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _blend(c1: tuple[int, int, int], c2: tuple[int, int, int], t: float) -> tuple[int, int, int]:
+    t = max(0.0, min(1.0, t))
+    return (
+        int(c1[0] + (c2[0] - c1[0]) * t),
+        int(c1[1] + (c2[1] - c1[1]) * t),
+        int(c1[2] + (c2[2] - c1[2]) * t),
+    )
+
+
+def _tile_color_by_pnl_pct(pnl_pct: float | None) -> tuple[int, int, int]:
+    neutral = (58, 66, 78)
+    green = (40, 167, 69)
+    red = (220, 53, 69)
+    if pnl_pct is None:
+        return neutral
+    norm = max(-12.0, min(12.0, float(pnl_pct))) / 12.0
+    if norm >= 0:
+        return _blend(neutral, green, norm)
+    return _blend(neutral, red, abs(norm))
+
+
+def _text_color_for_bg(bg: tuple[int, int, int]) -> tuple[int, int, int]:
+    lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
+    return (20, 20, 20) if lum > 150 else (245, 245, 245)
+
+
+def _treemap_partition(
+    items: list[dict],
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+) -> list[tuple[dict, tuple[int, int, int, int]]]:
+    if not items or w <= 0 or h <= 0:
+        return []
+    if len(items) == 1:
+        return [(items[0], (int(x), int(y), int(x + w), int(y + h)))]
+
+    total = sum(max(1e-9, float(i["weight"])) for i in items)
+    acc = 0.0
+    split_idx = 1
+    half = total / 2.0
+    for i, item in enumerate(items, 1):
+        acc += max(1e-9, float(item["weight"]))
+        if acc >= half:
+            split_idx = i
+            break
+    left = items[:split_idx]
+    right = items[split_idx:] or items[-1:]
+    left_sum = sum(max(1e-9, float(i["weight"])) for i in left)
+    ratio = left_sum / total if total > 0 else 0.5
+
+    if w >= h:
+        left_w = w * ratio
+        return _treemap_partition(left, x, y, left_w, h) + _treemap_partition(right, x + left_w, y, w - left_w, h)
+    top_h = h * ratio
+    return _treemap_partition(left, x, y, w, top_h) + _treemap_partition(right, x, y + top_h, w, h - top_h)
+
+
+def _fit_line(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> str:
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    out = text
+    while len(out) > 1 and draw.textlength(out + "...", font=font) > max_width:
+        out = out[:-1]
+    return out + "..." if out else ""
+
+
+def build_portfolio_map_png(tiles: list[dict]) -> bytes:
+    width = 1600
+    height = 900
+    pad = 10
+    gap = 3
+    bg = (245, 245, 248)
+    image = Image.new("RGB", (width, height), color=bg)
+    draw = ImageDraw.Draw(image)
+
+    title_font = _load_font(42, bold=True)
+    small_title_font = _load_font(24, bold=True)
+    secid_font = _load_font(26, bold=True)
+    name_font = _load_font(18, bold=False)
+    value_font = _load_font(34, bold=True)
+    stat_font = _load_font(22, bold=True)
+
+    total_value = sum(float(t["value"]) for t in tiles)
+    header_h = 86
+    draw.text((pad, 10), "Карта портфеля (акции)", fill=(35, 35, 35), font=title_font)
+    draw.text((pad, 58), f"Инструментов: {len(tiles)}   Общая стоимость: {money(total_value)} RUB", fill=(90, 90, 90), font=small_title_font)
+
+    chart_x = pad
+    chart_y = header_h
+    chart_w = width - pad * 2
+    chart_h = height - header_h - pad
+
+    sorted_tiles = sorted(tiles, key=lambda x: x["weight"], reverse=True)
+    placements = _treemap_partition(sorted_tiles, chart_x, chart_y, chart_w, chart_h)
+
+    for tile, rect in placements:
+        x1, y1, x2, y2 = rect
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            continue
+        x1 += gap
+        y1 += gap
+        x2 -= gap
+        y2 -= gap
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        bg_color = _tile_color_by_pnl_pct(tile.get("pnl_pct"))
+        fg_color = _text_color_for_bg(bg_color)
+        draw.rectangle((x1, y1, x2, y2), fill=bg_color)
+
+        inner_w = x2 - x1
+        inner_h = y2 - y1
+        px = x1 + 10
+        py = y1 + 8
+
+        if inner_w >= 130 and inner_h >= 54:
+            secid = _fit_line(draw, str(tile["secid"]), secid_font, inner_w - 20)
+            draw.text((px, py), secid, fill=fg_color, font=secid_font)
+            py += 30
+        if inner_w >= 150 and inner_h >= 82:
+            shortname = _fit_line(draw, str(tile.get("shortname") or ""), name_font, inner_w - 20)
+            if shortname:
+                draw.text((px, py), shortname, fill=fg_color, font=name_font)
+                py += 24
+
+        if inner_w >= 170 and inner_h >= 125:
+            val = f"{money(float(tile['value']))} RUB"
+            draw.text((px, max(py + 6, y1 + inner_h - 66)), _fit_line(draw, val, value_font, inner_w - 20), fill=fg_color, font=value_font)
+
+        pnl_pct = tile.get("pnl_pct")
+        if inner_w >= 130 and inner_h >= 92:
+            if pnl_pct is None:
+                stat = "P&L: н/д"
+            else:
+                stat = f"P&L {pnl_pct:+.2f}%"
+            draw.text((x1 + inner_w - 12 - draw.textlength(stat, font=stat_font), y1 + 10), stat, fill=fg_color, font=stat_font)
+
+    buf = io.BytesIO()
+    image.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
 
 
 async def build_asset_dynamics_text(chosen: dict, asset_type: str) -> str:
@@ -697,6 +858,7 @@ async def cmd_start(message: Message):
         "💼 Портфель\n"
         "/add_trade — добавить сделку (покупка/продажа)\n"
         "/portfolio — текущая стоимость портфеля и P&L\n"
+        "/portfolio_map — карта портфеля по акциям\n"
         "/asset_lookup — текущая цена и динамика за неделю/месяц/6 мес/год\n\n"
         "/top_movers — топ роста/падения акций за текущую сессию\n\n"
         "/clear_portfolio — удалить все сделки и очистить портфель\n\n"
@@ -911,6 +1073,9 @@ async def on_menu_add_trade(message: Message, state: FSMContext):
 async def on_menu_portfolio(message: Message):
     await cmd_portfolio(message)
 
+async def on_menu_portfolio_map(message: Message):
+    await cmd_portfolio_map(message)
+
 async def on_menu_alerts_status(message: Message):
     await cmd_alerts_status(message)
 
@@ -1062,6 +1227,58 @@ async def cmd_portfolio(message: Message):
         chunk_len += line_len
     if chunk:
         await message.answer("\n".join(chunk), parse_mode="HTML")
+
+
+async def cmd_portfolio_map(message: Message):
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        await message.answer("Не удалось определить пользователя.")
+        return
+
+    positions = await get_user_positions(DB_DSN, user_id)
+    stock_positions = [p for p in positions if (p.get("asset_type") or ASSET_TYPE_STOCK) == ASSET_TYPE_STOCK]
+    if not stock_positions:
+        await message.answer("В портфеле нет акций для построения карты.")
+        return
+
+    reset_data_source_flags()
+    prices = await _load_prices_for_positions(stock_positions)
+
+    tiles: list[dict] = []
+    for pos in stock_positions:
+        qty = float(pos.get("total_qty") or 0.0)
+        if qty <= 1e-12:
+            continue
+        last = prices.get(int(pos["id"]))
+        if last is None:
+            continue
+        total_cost = float(pos.get("total_cost") or 0.0)
+        value = qty * float(last)
+        if value <= 0:
+            continue
+        pnl = value - total_cost
+        pnl_pct = (pnl / total_cost * 100.0) if abs(total_cost) > 1e-12 else None
+        tiles.append(
+            {
+                "secid": str(pos.get("secid") or "").strip() or "UNKNOWN",
+                "shortname": (pos.get("shortname") or "").strip(),
+                "value": value,
+                "weight": value,
+                "pnl_pct": pnl_pct,
+            }
+        )
+
+    if not tiles:
+        await message.answer("Нет рыночных данных по акциям для построения карты.")
+        return
+
+    image_bytes = build_portfolio_map_png(tiles)
+    caption = f"Карта портфеля по акциям ({len(tiles)} инструментов)"
+    caption = append_delayed_warning(caption)
+    await message.answer_photo(
+        photo=BufferedInputFile(image_bytes, filename="portfolio_map.png"),
+        caption=caption,
+    )
 
 async def build_portfolio_snapshot(user_id: int) -> tuple[str, float | None, list[dict]]:
     return await build_portfolio_report(user_id)
@@ -1717,6 +1934,7 @@ async def main():
     dp.message.register(cmd_start, Command("start"), StateFilter("*"))
     dp.message.register(cmd_add_trade, Command("add_trade"), StateFilter("*"))
     dp.message.register(cmd_portfolio, Command("portfolio"), StateFilter("*"))
+    dp.message.register(cmd_portfolio_map, Command("portfolio_map"), StateFilter("*"))
     dp.message.register(cmd_top_movers, Command("top_movers"), StateFilter("*"))
     dp.message.register(cmd_clear_portfolio, Command("clear_portfolio"), StateFilter("*"))
     dp.message.register(cmd_asset_lookup, Command("asset_lookup"), StateFilter("*"))
@@ -1731,6 +1949,7 @@ async def main():
     dp.message.register(cmd_alerts_status, Command("alerts_status"), StateFilter("*"))
     dp.message.register(on_menu_add_trade, StateFilter("*"), F.text == BTN_ADD_TRADE)
     dp.message.register(on_menu_portfolio, StateFilter("*"), F.text == BTN_PORTFOLIO)
+    dp.message.register(on_menu_portfolio_map, StateFilter("*"), F.text == BTN_PORTFOLIO_MAP)
     dp.message.register(on_menu_alerts_status, StateFilter("*"), F.text == BTN_ALERTS)
     dp.message.register(on_menu_asset_lookup, StateFilter("*"), F.text == BTN_ASSET_LOOKUP)
     dp.message.register(cmd_why_invest, StateFilter("*"), F.text == BTN_WHY_INVEST)
