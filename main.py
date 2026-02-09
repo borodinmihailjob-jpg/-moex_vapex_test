@@ -44,7 +44,7 @@ from db import (
     upsert_price_cache,
     get_price_cache_map,
     get_active_app_text,
-    list_active_app_texts_by_button_name,
+    list_active_app_texts,
 )
 from moex_iss import (
     ASSET_TYPE_METAL,
@@ -175,7 +175,10 @@ async def safe_edit_text(message: Message | None, text: str, reply_markup=None) 
             logger.exception("Failed fallback answer after edit_text network error")
 
 
-def _article_button_text(text_code: str) -> str:
+def _article_button_text(button_name: str, text_code: str) -> str:
+    raw = str(button_name or "").strip()
+    if raw:
+        return raw[:64]
     raw = str(text_code or "").strip()
     if not raw:
         return "Статья"
@@ -183,12 +186,13 @@ def _article_button_text(text_code: str) -> str:
     return label[:64]
 
 
-async def make_articles_kb(button_name: str):
-    items = await list_active_app_texts_by_button_name(DB_DSN, button_name)
+async def make_articles_kb():
+    items = await list_active_app_texts(DB_DSN)
     kb = InlineKeyboardBuilder()
     for item in items:
         text_code = item["text_code"]
-        kb.button(text=_article_button_text(text_code), callback_data=f"article:{text_code}")
+        button_name = item.get("button_name") or ""
+        kb.button(text=_article_button_text(button_name, text_code), callback_data=f"article:{text_code}")
     kb.adjust(1)
     return kb.as_markup(), items
 
@@ -878,9 +882,9 @@ async def on_menu_alerts_status(message: Message):
 
 async def cmd_why_invest(message: Message):
     try:
-        markup, items = await make_articles_kb(BTN_WHY_INVEST)
+        markup, items = await make_articles_kb()
     except Exception:
-        logger.exception("Failed loading article list for button_name=%s", BTN_WHY_INVEST)
+        logger.exception("Failed loading article list")
         markup, items = None, []
 
     if not items:

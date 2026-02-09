@@ -770,23 +770,28 @@ async def get_active_app_text(db_path: str, text_code: str) -> str | None:
         raise
 
 
-async def list_active_app_texts_by_button_name(db_path: str, button_name: str) -> list[dict[str, str]]:
+async def list_active_app_texts(db_path: str) -> list[dict[str, str]]:
     try:
         pool = await _get_pool(db_path)
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT text_code
+                SELECT text_code, button_name
                 FROM app_texts
-                WHERE button_name = $1
-                  AND active = TRUE
+                WHERE active = TRUE
+                  AND COALESCE(NULLIF(button_name, ''), '') <> ''
                 ORDER BY id
-                """,
-                str(button_name).strip(),
+                """
             )
-        return [{"text_code": str(r["text_code"])} for r in rows]
+        return [
+            {
+                "text_code": str(r["text_code"]),
+                "button_name": str(r["button_name"]),
+            }
+            for r in rows
+        ]
     except Exception:
-        logger.exception("Failed list_active_app_texts_by_button_name button_name=%s", button_name)
+        logger.exception("Failed list_active_app_texts")
         raise
 
 
