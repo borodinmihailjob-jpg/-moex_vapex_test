@@ -12,6 +12,7 @@ from aiohttp import web
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.filters import Command, StateFilter
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -152,6 +153,23 @@ def money_signed(x: float) -> str:
     if x < 0:
         return f"-{money(abs(x))}"
     return money(0.0)
+
+async def safe_edit_text(message: Message | None, text: str, reply_markup=None) -> None:
+    if message is None:
+        return
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        # Benign Telegram response when the message text is unchanged.
+        if "message is not modified" in str(exc).lower():
+            return
+        raise
+    except TelegramNetworkError:
+        logger.warning("Telegram network error during edit_text; falling back to answer()")
+        try:
+            await message.answer(text, reply_markup=reply_markup)
+        except Exception:
+            logger.exception("Failed fallback answer after edit_text network error")
 
 async def make_candidates_kb(cands: list[dict]):
     kb = InlineKeyboardBuilder()
@@ -1092,13 +1110,13 @@ async def on_trade_side_pick(call: CallbackQuery, state: FSMContext):
     await state.update_data(trade_side=trade_side, asset_type=None, cands=None, chosen=None, qty=None, price=None)
     await state.set_state(AddTradeFlow.waiting_asset_type)
     side_label = "Покупка" if trade_side == TRADE_SIDE_BUY else "Продажа"
-    await call.message.edit_text(f"Тип сделки: {side_label}\n\nЧто добавляем?", reply_markup=await make_asset_type_kb())
+    await safe_edit_text(call.message, f"Тип сделки: {side_label}\n\nЧто добавляем?", reply_markup=await make_asset_type_kb())
     await call.answer()
 
 async def on_back_to_side(call: CallbackQuery, state: FSMContext):
     await state.update_data(asset_type=None, cands=None, chosen=None, qty=None, price=None)
     await state.set_state(AddTradeFlow.waiting_side)
-    await call.message.edit_text("Выбери тип сделки:", reply_markup=await make_trade_side_kb())
+    await safe_edit_text(call.message, "Выбери тип сделки:", reply_markup=await make_trade_side_kb())
     await call.answer()
 
 async def on_asset_type_pick(call: CallbackQuery, state: FSMContext):
@@ -1111,7 +1129,7 @@ async def on_asset_type_pick(call: CallbackQuery, state: FSMContext):
     trade_side = data.get("trade_side")
     if trade_side not in {TRADE_SIDE_BUY, TRADE_SIDE_SELL}:
         await state.set_state(AddTradeFlow.waiting_side)
-        await call.message.edit_text("Сначала выбери тип сделки:", reply_markup=await make_trade_side_kb())
+        await safe_edit_text(call.message, "Сначала выбери тип сделки:", reply_markup=await make_trade_side_kb())
         await call.answer()
         return
 
@@ -1123,7 +1141,7 @@ async def on_asset_type_pick(call: CallbackQuery, state: FSMContext):
     else:
         prompt = f"Выбрано: {side_label}, Акции\n\nВведи тикер, ISIN или название компании (например: SBER, RU0009029540, Сбербанк):"
 
-    await call.message.edit_text(prompt, reply_markup=await make_search_back_kb())
+    await safe_edit_text(call.message, prompt, reply_markup=await make_search_back_kb())
     await call.answer()
 
 async def on_back_to_asset_type(call: CallbackQuery, state: FSMContext):
@@ -1131,12 +1149,12 @@ async def on_back_to_asset_type(call: CallbackQuery, state: FSMContext):
     trade_side = data.get("trade_side")
     if trade_side not in {TRADE_SIDE_BUY, TRADE_SIDE_SELL}:
         await state.set_state(AddTradeFlow.waiting_side)
-        await call.message.edit_text("Сначала выбери тип сделки:", reply_markup=await make_trade_side_kb())
+        await safe_edit_text(call.message, "Сначала выбери тип сделки:", reply_markup=await make_trade_side_kb())
         await call.answer()
         return
     await state.update_data(cands=None, chosen=None)
     await state.set_state(AddTradeFlow.waiting_asset_type)
-    await call.message.edit_text("Что добавляем?", reply_markup=await make_asset_type_kb())
+    await safe_edit_text(call.message, "Что добавляем?", reply_markup=await make_asset_type_kb())
     await call.answer()
 
 async def on_back_to_query(call: CallbackQuery, state: FSMContext):
