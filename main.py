@@ -18,6 +18,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 
 from db import (
+    acquire_single_instance_lock,
     init_db,
     upsert_instrument,
     add_trade,
@@ -1258,6 +1259,15 @@ async def main():
 
     await init_db(DB_DSN)
 
+    lock_name = "moex_portfolio_bot_polling"
+    while True:
+        locked = await acquire_single_instance_lock(DB_DSN, lock_name)
+        if locked:
+            logger.info("Acquired single-instance polling lock: %s", lock_name)
+            break
+        logger.warning("Another bot instance is polling. Waiting 15 seconds for lock: %s", lock_name)
+        await asyncio.sleep(15)
+
     bot = Bot(BOT_TOKEN)
     dp = Dispatcher()
     worker_task = asyncio.create_task(notifications_worker(bot))
@@ -1311,6 +1321,7 @@ async def main():
     try:
         await dp.start_polling(bot)
     finally:
+        await release_single_instance_lock()
         worker_task.cancel()
         try:
             await worker_task
@@ -1325,3 +1336,4 @@ if __name__ == "__main__":
     except Exception:
         logger.exception("Bot crashed")
         raise
+    release_single_instance_lock,

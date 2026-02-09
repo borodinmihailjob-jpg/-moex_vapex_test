@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -109,6 +110,8 @@ POST_MIGRATION_INDEX_SQL = [
 
 _pools: dict[str, asyncpg.Pool] = {}
 _pools_lock = asyncio.Lock()
+_single_instance_lock_conn: asyncpg.Connection | None = None
+_single_instance_lock_key: int | None = None
 
 
 def _norm_boardid(boardid: str | None) -> str:
@@ -130,6 +133,43 @@ async def close_pools() -> None:
         _pools.clear()
     for p in pools:
         await p.close()
+
+
+def _advisory_lock_key(lock_name: str) -> int:
+    digest = hashlib.sha256(lock_name.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
+
+
+async def acquire_single_instance_lock(db_dsn: str, lock_name: str) -> bool:
+    global _single_instance_lock_conn, _single_instance_lock_key
+    if _single_instance_lock_conn is not None:
+        return True
+    key = _advisory_lock_key(lock_name)
+    conn = await asyncpg.connect(dsn=db_dsn)
+    locked = await conn.fetchval("SELECT pg_try_advisory_lock($1::bigint)", key)
+    if locked:
+        _single_instance_lock_conn = conn
+        _single_instance_lock_key = key
+        return True
+    await conn.close()
+    return False
+
+
+async def release_single_instance_lock() -> None:
+    global _single_instance_lock_conn, _single_instance_lock_key
+    conn = _single_instance_lock_conn
+    key = _single_instance_lock_key
+    _single_instance_lock_conn = None
+    _single_instance_lock_key = None
+    if conn is None:
+        return
+    try:
+        if key is not None:
+            await conn.execute("SELECT pg_advisory_unlock($1::bigint)", key)
+    except Exception:
+        logger.exception("Failed to release advisory lock")
+    finally:
+        await conn.close()
 
 
 async def _ensure_user_context(conn: asyncpg.Connection, telegram_user_id: int) -> tuple[int, int]:
