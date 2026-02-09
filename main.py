@@ -2,6 +2,7 @@ import os
 import logging
 import asyncio
 import html
+import io
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta, date
@@ -48,6 +49,7 @@ from moex_iss import (
     search_metals,
     search_securities,
 )
+from broker_report_xml import parse_broker_report_xml
 
 MSK_TZ = ZoneInfo("Europe/Moscow")
 MOEX_OPEN_HOUR = 10
@@ -55,6 +57,7 @@ MOEX_OPEN_MINUTE = 0
 MOEX_CLOSE_HOUR = 18
 MOEX_CLOSE_MINUTE = 50
 MOEX_EVENT_WINDOW_MIN = 5
+MAX_BROKER_XML_SIZE_BYTES = 5 * 1024 * 1024
 BTN_ADD_TRADE = "Добавить сделку"
 BTN_PORTFOLIO = "Стоимость портфеля"
 BTN_ALERTS = "Настройки уведомлений"
@@ -506,6 +509,95 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
     text = "Портфель:\n" + "\n".join(lines) + "\n\n" + footer
     return (text, total_value_known, positions)
 
+
+def _pick_stock_candidate_by_isin(cands: list[dict], isin: str) -> dict | None:
+    isin_upper = isin.strip().upper()
+    if not isin_upper:
+        return cands[0] if cands else None
+    for c in cands:
+        if str(c.get("isin") or "").strip().upper() == isin_upper:
+            return c
+    return cands[0] if cands else None
+
+
+async def _import_broker_xml_trades(user_id: int, file_name: str, xml_bytes: bytes) -> str:
+    parsed_trades = parse_broker_report_xml(xml_bytes)
+    if not parsed_trades:
+        raise ValueError("В выписке не найдены сделки в блоке trades_finished.")
+
+    imported = 0
+    duplicates = 0
+    skipped = 0
+    unresolved_isins: set[str] = set()
+    stock_cache: dict[str, dict | None] = {}
+    source_name = (file_name or "broker_report.xml")[:255]
+
+    async with aiohttp.ClientSession() as session:
+        for t in parsed_trades:
+            secid = None
+            boardid = ""
+            shortname = (t.asset_name or "").strip() or None
+            asset_type = t.asset_type
+
+            if asset_type == ASSET_TYPE_METAL:
+                secid = t.metal_secid
+            else:
+                cached = stock_cache.get(t.isin_reg)
+                if cached is None and t.isin_reg not in stock_cache:
+                    cands = await search_securities(session, t.isin_reg)
+                    cached = _pick_stock_candidate_by_isin(cands, t.isin_reg)
+                    stock_cache[t.isin_reg] = cached
+                else:
+                    cached = stock_cache.get(t.isin_reg)
+                if cached:
+                    secid = str(cached.get("secid") or "").strip() or None
+                    boardid = str(cached.get("boardid") or "").strip()
+                    if not shortname:
+                        shortname = (cached.get("shortname") or cached.get("name") or "").strip() or None
+                else:
+                    unresolved_isins.add(t.isin_reg)
+
+            if not secid:
+                skipped += 1
+                continue
+
+            instrument_id = await upsert_instrument(
+                DB_DSN,
+                secid=secid,
+                isin=t.isin_reg,
+                boardid=boardid,
+                shortname=shortname,
+                asset_type=asset_type,
+            )
+            was_inserted = await add_trade(
+                DB_DSN,
+                user_id=user_id,
+                instrument_id=instrument_id,
+                trade_date=t.trade_date,
+                qty=t.qty,
+                price=t.price,
+                commission=t.commission,
+                external_trade_id=f"broker_xml:{t.trade_no}",
+                import_source=source_name,
+            )
+            if was_inserted:
+                imported += 1
+            else:
+                duplicates += 1
+
+    lines = [
+        f"Импорт завершен: {source_name}",
+        f"Сделок в выписке: {len(parsed_trades)}",
+        f"Добавлено: {imported}",
+        f"Пропущено как дубликаты: {duplicates}",
+        f"Пропущено (не удалось сопоставить инструмент): {skipped}",
+    ]
+    if unresolved_isins:
+        show = ", ".join(sorted(unresolved_isins)[:12])
+        tail = "" if len(unresolved_isins) <= 12 else f" и еще {len(unresolved_isins) - 12}"
+        lines.append(f"Не сопоставлены ISIN: {show}{tail}")
+    return "\n".join(lines)
+
 async def cmd_start(message: Message):
     logger.info("User %s started bot", message.from_user.id if message.from_user else None)
     await message.answer(
@@ -519,6 +611,8 @@ async def cmd_start(message: Message):
         "/add_trade — добавить сделку (дата → актив → инструмент → количество → цена)\n"
         "/portfolio — текущая стоимость портфеля и P&L\n"
         "/asset_lookup — текущая цена и динамика за неделю/месяц/6 мес/год\n\n"
+        "📥 Импорт\n"
+        "/import_broker_xml — загрузить XML брокерской выписки и импортировать сделки\n\n"
         "🔔 Уведомления\n"
         "/set_interval <минуты> — периодические уведомления\n"
         "/interval_off — выключить периодические уведомления\n"
@@ -552,6 +646,45 @@ async def cmd_set_interval(message: Message):
 
     await set_periodic_alert(DB_DSN, user_id, True, interval)
     await message.answer(f"Готово. Периодические уведомления включены: каждые {interval} мин.")
+
+
+async def cmd_import_broker_xml(message: Message):
+    await message.answer(
+        "Пришлите XML выписку брокера (файл .xml), и я автоматически импортирую сделки в ваш портфель.\n"
+        "Повторная загрузка той же выписки не продублирует уже импортированные сделки."
+    )
+
+
+async def on_broker_xml_document(message: Message):
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        await message.answer("Не удалось определить пользователя.")
+        return
+
+    doc = message.document
+    if doc is None:
+        return
+    file_name = (doc.file_name or "").strip()
+    file_name_l = file_name.lower()
+    if not file_name_l.endswith(".xml"):
+        await message.answer("Поддерживается только XML файл брокерской выписки.")
+        return
+    if doc.file_size and doc.file_size > MAX_BROKER_XML_SIZE_BYTES:
+        await message.answer("Файл слишком большой. Максимальный размер — 5 МБ.")
+        return
+
+    progress = await message.answer("Загружаю и анализирую выписку...")
+    try:
+        tg_file = await message.bot.get_file(doc.file_id)
+        buf = io.BytesIO()
+        await message.bot.download_file(tg_file.file_path, destination=buf)
+        summary = await _import_broker_xml_trades(user_id, file_name, buf.getvalue())
+        await progress.edit_text(summary)
+    except ValueError as exc:
+        await progress.edit_text(f"Не удалось импортировать выписку: {exc}")
+    except Exception:
+        logger.exception("Failed to import broker XML user=%s file=%s", user_id, file_name)
+        await progress.edit_text("Не удалось импортировать выписку из-за внутренней ошибки.")
 
 async def cmd_interval_off(message: Message):
     user_id = message.from_user.id if message.from_user else None
@@ -1270,6 +1403,7 @@ async def main():
     dp.message.register(cmd_add_trade, Command("add_trade"), StateFilter("*"))
     dp.message.register(cmd_portfolio, Command("portfolio"), StateFilter("*"))
     dp.message.register(cmd_asset_lookup, Command("asset_lookup"), StateFilter("*"))
+    dp.message.register(cmd_import_broker_xml, Command("import_broker_xml"), StateFilter("*"))
     dp.message.register(cmd_why_invest, Command("why_invest"), StateFilter("*"))
     dp.message.register(cmd_set_interval, Command("set_interval"), StateFilter("*"))
     dp.message.register(cmd_interval_off, Command("interval_off"), StateFilter("*"))
@@ -1283,6 +1417,7 @@ async def main():
     dp.message.register(on_menu_alerts_status, StateFilter("*"), F.text == BTN_ALERTS)
     dp.message.register(on_menu_asset_lookup, StateFilter("*"), F.text == BTN_ASSET_LOOKUP)
     dp.message.register(cmd_why_invest, StateFilter("*"), F.text == BTN_WHY_INVEST)
+    dp.message.register(on_broker_xml_document, StateFilter("*"), F.document)
 
     dp.callback_query.register(on_lookup_asset_type_pick, AssetLookupFlow.waiting_asset_type, F.data.startswith("latype:"))
     dp.callback_query.register(on_lookup_back_to_asset_type, AssetLookupFlow.waiting_query, F.data == "lback:asset_type")

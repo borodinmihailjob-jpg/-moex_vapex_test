@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS trades (
   user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
   portfolio_id BIGINT REFERENCES portfolios(id) ON DELETE CASCADE,
   instrument_id BIGINT NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+  external_trade_id TEXT,
+  import_source TEXT,
   trade_date TEXT NOT NULL,
   qty DOUBLE PRECISION NOT NULL,
   price DOUBLE PRECISION NOT NULL,
@@ -49,6 +51,8 @@ CREATE TABLE IF NOT EXISTS trades (
 
 CREATE INDEX IF NOT EXISTS ix_trades_user_instrument
   ON trades (user_id, instrument_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_trades_user_external_trade_id
+  ON trades (user_id, external_trade_id);
 
 CREATE TABLE IF NOT EXISTS user_positions (
   portfolio_id BIGINT NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
@@ -97,6 +101,8 @@ CREATE TABLE IF NOT EXISTS price_alert_state (
 MIGRATION_SQL = [
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS user_ref_id BIGINT",
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS portfolio_id BIGINT",
+    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS external_trade_id TEXT",
+    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS import_source TEXT",
     "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS user_ref_id BIGINT",
     "ALTER TABLE price_alert_state ADD COLUMN IF NOT EXISTS user_ref_id BIGINT",
 ]
@@ -104,6 +110,7 @@ MIGRATION_SQL = [
 POST_MIGRATION_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS ix_trades_user_ref_instrument ON trades (user_ref_id, instrument_id)",
     "CREATE INDEX IF NOT EXISTS ix_trades_portfolio_instrument ON trades (portfolio_id, instrument_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_trades_user_external_trade_id ON trades (user_id, external_trade_id)",
     "CREATE INDEX IF NOT EXISTS ix_user_alert_settings_user_ref ON user_alert_settings (user_ref_id)",
     "CREATE INDEX IF NOT EXISTS ix_price_alert_state_user_ref_instrument ON price_alert_state (user_ref_id, instrument_id)",
 ]
@@ -366,28 +373,49 @@ async def upsert_instrument(
         raise
 
 
-async def add_trade(db_path: str, user_id: int, instrument_id: int, trade_date: str, qty: float, price: float, commission: float):
+async def add_trade(
+    db_path: str,
+    user_id: int,
+    instrument_id: int,
+    trade_date: str,
+    qty: float,
+    price: float,
+    commission: float,
+    external_trade_id: str | None = None,
+    import_source: str | None = None,
+) -> bool:
     try:
         pool = await _get_pool(db_path)
         qty_f = float(qty)
         cost_f = qty_f * float(price) + float(commission)
+        inserted = False
         async with pool.acquire() as conn:
             async with conn.transaction():
                 user_ref_id, portfolio_id = await _ensure_user_context(conn, int(user_id))
-                await conn.execute(
+                row = await conn.fetchrow(
                     """
-                    INSERT INTO trades (user_id, user_ref_id, portfolio_id, instrument_id, trade_date, qty, price, commission)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    INSERT INTO trades (
+                      user_id, user_ref_id, portfolio_id, instrument_id,
+                      external_trade_id, import_source, trade_date, qty, price, commission
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    ON CONFLICT (user_id, external_trade_id) DO NOTHING
+                    RETURNING id
                     """,
                     int(user_id),
                     user_ref_id,
                     portfolio_id,
                     int(instrument_id),
+                    (external_trade_id or None),
+                    (import_source or None),
                     trade_date,
                     qty_f,
                     float(price),
                     float(commission),
                 )
+                inserted = row is not None
+                if not inserted:
+                    return False
                 await conn.execute(
                     """
                     INSERT INTO user_positions (portfolio_id, instrument_id, total_qty, total_cost, avg_price, updated_at)
@@ -417,7 +445,15 @@ async def add_trade(db_path: str, user_id: int, instrument_id: int, trade_date: 
                     portfolio_id,
                     int(instrument_id),
                 )
-        logger.info("Trade inserted: user=%s instrument=%s qty=%s price=%s", user_id, instrument_id, qty, price)
+        logger.info(
+            "Trade inserted: user=%s instrument=%s qty=%s price=%s external_trade_id=%s",
+            user_id,
+            instrument_id,
+            qty,
+            price,
+            external_trade_id,
+        )
+        return inserted
     except Exception:
         logger.exception("Failed add_trade user=%s instrument=%s", user_id, instrument_id)
         raise
