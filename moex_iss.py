@@ -1,9 +1,12 @@
 import asyncio
 import aiohttp
 import logging
+import os
+from contextvars import ContextVar
 from datetime import date
 
-BASE = "https://iss.moex.com/iss"
+ISS_BASE = "https://iss.moex.com/iss"
+ALGOPACK_BASE = "https://apim.moex.com/iss"
 logger = logging.getLogger(__name__)
 ISS_RETRIES = 3
 ISS_RETRY_DELAY_SEC = 0.6
@@ -11,17 +14,54 @@ ISS_TIMEOUT = aiohttp.ClientTimeout(total=12, connect=4, sock_connect=4, sock_re
 
 ASSET_TYPE_STOCK = "stock"
 ASSET_TYPE_METAL = "metal"
+DELAYED_WARNING_TEXT = "(данные с задержкой в 15 минут)"
 
-async def iss_get_json(session: aiohttp.ClientSession, path: str, params: dict | None = None) -> dict:
-    url = f"{BASE}{path}"
+_delayed_data_used_var: ContextVar[bool] = ContextVar("moex_delayed_data_used", default=False)
+
+
+def reset_data_source_flags() -> None:
+    _delayed_data_used_var.set(False)
+
+
+def delayed_data_used() -> bool:
+    return bool(_delayed_data_used_var.get())
+
+
+def mark_delayed_data_used() -> None:
+    _delayed_data_used_var.set(True)
+
+
+def _get_algopack_api_key() -> str:
+    for key in (
+        "ALGOPACK_API_KEY",
+        "MOEX_ALGOPACK_API_KEY",
+        "MOEXALGOPACK_API_KEY",
+        "MOEX_API_KEY",
+    ):
+        value = (os.getenv(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+async def _request_json(
+    session: aiohttp.ClientSession,
+    base: str,
+    path: str,
+    params: dict | None = None,
+    headers: dict | None = None,
+    source_name: str = "iss",
+) -> dict:
+    url = f"{base}{path}"
     last_exc: Exception | None = None
     for attempt in range(1, ISS_RETRIES + 1):
         try:
-            async with session.get(url, params=params, timeout=ISS_TIMEOUT) as resp:
+            async with session.get(url, params=params, timeout=ISS_TIMEOUT, headers=headers) as resp:
                 if resp.status in {429, 500, 502, 503, 504}:
                     if attempt < ISS_RETRIES:
                         logger.warning(
-                            "ISS temporary HTTP status=%s url=%s attempt=%s/%s",
+                            "%s temporary HTTP status=%s url=%s attempt=%s/%s",
+                            source_name.upper(),
                             resp.status,
                             url,
                             attempt,
@@ -37,7 +77,8 @@ async def iss_get_json(session: aiohttp.ClientSession, path: str, params: dict |
             last_exc = exc
             if attempt < ISS_RETRIES:
                 logger.warning(
-                    "ISS transient error url=%s attempt=%s/%s error=%s",
+                    "%s transient error url=%s attempt=%s/%s error=%s",
+                    source_name.upper(),
                     url,
                     attempt,
                     ISS_RETRIES,
@@ -46,7 +87,8 @@ async def iss_get_json(session: aiohttp.ClientSession, path: str, params: dict |
                 await asyncio.sleep(ISS_RETRY_DELAY_SEC * attempt)
                 continue
             logger.error(
-                "ISS request failed after retries: %s params=%s error=%s",
+                "%s request failed after retries: %s params=%s error=%s",
+                source_name.upper(),
                 url,
                 params,
                 exc.__class__.__name__,
@@ -54,7 +96,43 @@ async def iss_get_json(session: aiohttp.ClientSession, path: str, params: dict |
             raise
     if last_exc is not None:
         raise last_exc
-    raise RuntimeError(f"ISS request failed unexpectedly: {url}")
+    raise RuntimeError(f"{source_name.upper()} request failed unexpectedly: {url}")
+
+
+async def iss_get_json(session: aiohttp.ClientSession, path: str, params: dict | None = None) -> dict:
+    return await _request_json(session, ISS_BASE, path, params=params, source_name="iss")
+
+
+async def algopack_get_json(session: aiohttp.ClientSession, path: str, params: dict | None = None) -> dict:
+    token = _get_algopack_api_key()
+    if not token:
+        raise RuntimeError("ALGOPACK API key is not configured")
+    return await _request_json(
+        session,
+        ALGOPACK_BASE,
+        path,
+        params=params,
+        headers={"Authorization": f"Bearer {token}"},
+        source_name="algopack",
+    )
+
+
+async def get_json_with_fallback(session: aiohttp.ClientSession, path: str, params: dict | None = None) -> dict:
+    token = _get_algopack_api_key()
+    if token:
+        try:
+            return await algopack_get_json(session, path, params=params)
+        except Exception as exc:
+            logger.warning(
+                "ALGOPACK failed, fallback to ISS path=%s error=%s",
+                path,
+                exc.__class__.__name__,
+            )
+    else:
+        logger.debug("ALGOPACK API key is missing, using ISS fallback path=%s", path)
+
+    mark_delayed_data_used()
+    return await iss_get_json(session, path, params=params)
 
 async def search_securities(session: aiohttp.ClientSession, query: str) -> list[dict]:
     """
@@ -71,7 +149,7 @@ async def search_securities(session: aiohttp.ClientSession, query: str) -> list[
         "lang": "ru",
         "limit": 50,
     }
-    data = await iss_get_json(session, "/securities.json", params=params)
+    data = await get_json_with_fallback(session, "/securities.json", params=params)
     all_results = _parse_securities_rows(data)
 
     # Приоритет: акции, торгуемые сейчас.
@@ -98,7 +176,7 @@ async def search_metals(session: aiohttp.ClientSession, query: str) -> list[dict
         "lang": "ru",
         "limit": 50,
     }
-    data = await iss_get_json(session, "/securities.json", params=params)
+    data = await get_json_with_fallback(session, "/securities.json", params=params)
     all_results = _parse_securities_rows(data)
     metals = [x for x in all_results if x.get("group") == "currency_metal" and x.get("is_traded") == 1]
     logger.info("ISS metal search query=%r results=%s total=%s", q, len(metals), len(all_results))
@@ -113,7 +191,7 @@ async def get_last_price_stock_shares(session: aiohttp.ClientSession, secid: str
     else:
         path = f"/engines/stock/markets/shares/securities/{secid}.json"
 
-    data = await iss_get_json(session, path, params={"iss.meta": "off"})
+    data = await get_json_with_fallback(session, path, params={"iss.meta": "off"})
     md = data.get("marketdata", {})
     cols = md.get("columns", [])
     rows = md.get("data", [])
@@ -143,7 +221,7 @@ async def get_last_price_metal(session: aiohttp.ClientSession, secid: str, board
     else:
         path = f"/engines/currency/markets/selt/securities/{secid}.json"
 
-    data = await iss_get_json(session, path, params={"iss.meta": "off"})
+    data = await get_json_with_fallback(session, path, params={"iss.meta": "off"})
     md = data.get("marketdata", {})
     cols = md.get("columns", [])
     rows = md.get("data", [])
@@ -192,7 +270,7 @@ async def get_stock_day_movers(session: aiohttp.ClientSession, boardid: str = "T
             "securities.columns": "SECID,SHORTNAME",
             "marketdata.columns": "SECID,OPEN,LAST",
         }
-        data = await iss_get_json(session, path, params=params)
+        data = await get_json_with_fallback(session, path, params=params)
         sec = data.get("securities", {})
         md = data.get("marketdata", {})
         sec_cols = sec.get("columns", [])
@@ -290,7 +368,7 @@ async def get_history_prices_by_asset_type(
             "start": start,
             "history.columns": "TRADEDATE,CLOSE,LEGALCLOSEPRICE,WAPRICE",
         }
-        data = await iss_get_json(session, path, params=params)
+        data = await get_json_with_fallback(session, path, params=params)
         hist = data.get("history", {})
         cols = hist.get("columns", [])
         rows = hist.get("data", [])

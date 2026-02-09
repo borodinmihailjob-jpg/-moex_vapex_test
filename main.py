@@ -49,9 +49,12 @@ from db import (
 from moex_iss import (
     ASSET_TYPE_METAL,
     ASSET_TYPE_STOCK,
+    DELAYED_WARNING_TEXT,
+    delayed_data_used,
     get_stock_day_movers,
     get_history_prices_by_asset_type,
     get_last_price_by_asset_type,
+    reset_data_source_flags,
     search_metals,
     search_securities,
 )
@@ -369,6 +372,13 @@ def pnl_emoji(pnl_amount: float) -> str:
 def fmt_pct(pct: float) -> str:
     return f"{pct:+.2f}%"
 
+
+def append_delayed_warning(text: str) -> str:
+    if delayed_data_used():
+        return f"{text}\n{DELAYED_WARNING_TEXT}"
+    return text
+
+
 async def build_asset_dynamics_text(chosen: dict, asset_type: str) -> str:
     secid = chosen.get("secid") or "UNKNOWN"
     boardid = chosen.get("boardid")
@@ -381,6 +391,7 @@ async def build_asset_dynamics_text(chosen: dict, asset_type: str) -> str:
         ("За год", 365),
     ]
 
+    reset_data_source_flags()
     async with aiohttp.ClientSession() as session:
         current = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
         lines = [f"{name} ({secid})"]
@@ -410,7 +421,7 @@ async def build_asset_dynamics_text(chosen: dict, asset_type: str) -> str:
             lines.append(
                 f"{label}: {emoji} {fmt_pct(pct)} ({money_signed(delta)} RUB)"
             )
-    return "\n".join(lines)
+    return append_delayed_warning("\n".join(lines))
 
 def _cache_age_seconds(updated_at: datetime | None, now_utc: datetime) -> float | None:
     if updated_at is None:
@@ -502,6 +513,7 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
     positions = await get_user_positions(DB_DSN, user_id)
     if not positions:
         return ("Портфель пуст.", None, [])
+    reset_data_source_flags()
     prices = await _load_prices_for_positions(positions)
 
     total_value_known = 0.0
@@ -554,6 +566,8 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
     )
     if unknown_prices:
         footer += f"\nНет рыночной цены для {unknown_prices} инструментов, они не включены в итог."
+    if delayed_data_used():
+        footer += f"\n{DELAYED_WARNING_TEXT}"
 
     text = "💼 Портфель:\n" + "\n".join(lines) + "\n\n" + footer
     return (text, total_value_known, positions)
@@ -720,6 +734,7 @@ async def cmd_top_movers(message: Message):
     open_label = f"{MOEX_OPEN_HOUR:02d}:{MOEX_OPEN_MINUTE:02d}"
     asof_label = now_msk.strftime("%H:%M")
 
+    reset_data_source_flags()
     async with aiohttp.ClientSession() as session:
         movers = await get_stock_day_movers(session, boardid="TQBR")
 
@@ -752,7 +767,7 @@ async def cmd_top_movers(message: Message):
                 f"({money(m['open'])} → {money(m['last'])})"
             )
 
-    await message.answer("\n".join(lines))
+    await message.answer(append_delayed_warning("\n".join(lines)))
 
 async def make_clear_portfolio_kb():
     kb = InlineKeyboardBuilder()
@@ -986,6 +1001,7 @@ async def on_lookup_query(message: Message, state: FSMContext):
         return
     data = await state.get_data()
     asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
+    reset_data_source_flags()
     async with aiohttp.ClientSession() as session:
         if asset_type == ASSET_TYPE_METAL:
             cands = await search_metals(session, q)
@@ -996,7 +1012,7 @@ async def on_lookup_query(message: Message, state: FSMContext):
         return
     await state.update_data(cands=cands)
     await state.set_state(AssetLookupFlow.waiting_pick)
-    await message.answer("Выбери инструмент:", reply_markup=await make_lookup_candidates_kb(cands))
+    await message.answer(append_delayed_warning("Выбери инструмент:"), reply_markup=await make_lookup_candidates_kb(cands))
 
 async def on_lookup_pick(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1084,6 +1100,7 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
                 avg = pos.get("avg_price") or 0.0
                 if avg <= 0:
                     continue
+                reset_data_source_flags()
                 last = await get_last_price_by_asset_type(
                     session,
                     pos["secid"],
@@ -1100,7 +1117,7 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
                     company = pos.get("shortname") or pos["secid"]
                     await bot.send_message(
                         user_id,
-                        (
+                        append_delayed_warning(
                             f"⚠️ Сильное падение цены\n"
                             f"{company} ({pos['secid']})\n"
                             f"Текущая цена: {money(last)} RUB\n"
@@ -1373,6 +1390,7 @@ async def on_query(message: Message, state: FSMContext):
         return
     asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
 
+    reset_data_source_flags()
     async with aiohttp.ClientSession() as session:
         if asset_type == ASSET_TYPE_METAL:
             cands = await search_metals(session, q)
@@ -1391,9 +1409,11 @@ async def on_query(message: Message, state: FSMContext):
     await state.update_data(cands=cands)
     await state.set_state(AddTradeFlow.waiting_pick)
     await message.answer(
-        "Нашёл варианты.\n"
-        "Формат кнопки: Тикер - Название (режим торгов).\n"
-        "Выбери нужный инструмент:",
+        append_delayed_warning(
+            "Нашёл варианты.\n"
+            "Формат кнопки: Тикер - Название (режим торгов).\n"
+            "Выбери нужный инструмент:"
+        ),
         reply_markup=await make_candidates_kb(cands),
     )
 
@@ -1511,6 +1531,7 @@ async def on_confirm_save(call: CallbackQuery, state: FSMContext):
         commission,
     )
 
+    reset_data_source_flags()
     async with aiohttp.ClientSession() as session:
         last = await get_last_price_by_asset_type(
             session,
@@ -1520,7 +1541,7 @@ async def on_confirm_save(call: CallbackQuery, state: FSMContext):
         )
 
     if last is None:
-        text_price = "Текущую цену не удалось получить (ISS)."
+        text_price = "Текущую цену не удалось получить."
     else:
         current_value = total_qty * last
         pnl = current_value - total_cost
@@ -1529,6 +1550,7 @@ async def on_confirm_save(call: CallbackQuery, state: FSMContext):
             f"Текущая стоимость позиции: {money(current_value)} RUB\n"
             f"P&L: {money(pnl)} RUB"
         )
+    text_price = append_delayed_warning(text_price)
     qty_unit = "гр" if (instr.get("asset_type") == ASSET_TYPE_METAL) else "шт"
 
     kb = InlineKeyboardBuilder()
