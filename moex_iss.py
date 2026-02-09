@@ -117,11 +117,15 @@ async def algopack_get_json(session: aiohttp.ClientSession, path: str, params: d
     )
 
 
-async def get_json_with_fallback(session: aiohttp.ClientSession, path: str, params: dict | None = None) -> dict:
+async def get_json_with_fallback_source(
+    session: aiohttp.ClientSession,
+    path: str,
+    params: dict | None = None,
+) -> tuple[dict, bool]:
     token = _get_algopack_api_key()
     if token:
         try:
-            return await algopack_get_json(session, path, params=params)
+            return await algopack_get_json(session, path, params=params), False
         except Exception as exc:
             logger.warning(
                 "ALGOPACK failed, fallback to ISS path=%s error=%s",
@@ -132,7 +136,12 @@ async def get_json_with_fallback(session: aiohttp.ClientSession, path: str, para
         logger.debug("ALGOPACK API key is missing, using ISS fallback path=%s", path)
 
     mark_delayed_data_used()
-    return await iss_get_json(session, path, params=params)
+    return await iss_get_json(session, path, params=params), True
+
+
+async def get_json_with_fallback(session: aiohttp.ClientSession, path: str, params: dict | None = None) -> dict:
+    data, _ = await get_json_with_fallback_source(session, path, params=params)
+    return data
 
 async def search_securities(session: aiohttp.ClientSession, query: str) -> list[dict]:
     """
@@ -149,8 +158,13 @@ async def search_securities(session: aiohttp.ClientSession, query: str) -> list[
         "lang": "ru",
         "limit": 50,
     }
-    data = await get_json_with_fallback(session, "/securities.json", params=params)
+    data, delayed = await get_json_with_fallback_source(session, "/securities.json", params=params)
     all_results = _parse_securities_rows(data)
+    if not all_results and not delayed:
+        logger.warning("ALGOPACK search returned empty set for query=%r; retry via ISS", q)
+        mark_delayed_data_used()
+        data = await iss_get_json(session, "/securities.json", params=params)
+        all_results = _parse_securities_rows(data)
 
     # Приоритет: акции, торгуемые сейчас.
     traded_shares = [x for x in all_results if x.get("group") == "stock_shares" and x.get("is_traded") == 1]
@@ -176,8 +190,13 @@ async def search_metals(session: aiohttp.ClientSession, query: str) -> list[dict
         "lang": "ru",
         "limit": 50,
     }
-    data = await get_json_with_fallback(session, "/securities.json", params=params)
+    data, delayed = await get_json_with_fallback_source(session, "/securities.json", params=params)
     all_results = _parse_securities_rows(data)
+    if not all_results and not delayed:
+        logger.warning("ALGOPACK metal search returned empty set for query=%r; retry via ISS", q)
+        mark_delayed_data_used()
+        data = await iss_get_json(session, "/securities.json", params=params)
+        all_results = _parse_securities_rows(data)
     metals = [x for x in all_results if x.get("group") == "currency_metal" and x.get("is_traded") == 1]
     logger.info("ISS metal search query=%r results=%s total=%s", q, len(metals), len(all_results))
     return metals
@@ -191,25 +210,31 @@ async def get_last_price_stock_shares(session: aiohttp.ClientSession, secid: str
     else:
         path = f"/engines/stock/markets/shares/securities/{secid}.json"
 
-    data = await get_json_with_fallback(session, path, params={"iss.meta": "off"})
-    md = data.get("marketdata", {})
-    cols = md.get("columns", [])
-    rows = md.get("data", [])
-    if not rows:
-        logger.warning("No marketdata rows for secid=%s boardid=%s", secid, boardid)
-        return None
+    def parse_last(data: dict) -> float | None:
+        md = data.get("marketdata", {})
+        cols = md.get("columns", [])
+        rows = md.get("data", [])
+        if not rows:
+            return None
+        idx = {c: i for i, c in enumerate(cols)}
+        if "LAST" not in idx:
+            return None
+        last = rows[0][idx["LAST"]]
+        if last is None:
+            return None
+        return float(last)
 
-    idx = {c: i for i, c in enumerate(cols)}
-    if "LAST" not in idx:
-        logger.warning("LAST column is missing for secid=%s boardid=%s", secid, boardid)
+    data, delayed = await get_json_with_fallback_source(session, path, params={"iss.meta": "off"})
+    price = parse_last(data)
+    if price is None and not delayed:
+        logger.warning("ALGOPACK returned no LAST for secid=%s boardid=%s; retry via ISS", secid, boardid)
+        mark_delayed_data_used()
+        data = await iss_get_json(session, path, params={"iss.meta": "off"})
+        price = parse_last(data)
+    if price is None:
+        logger.warning("No LAST marketdata for secid=%s boardid=%s", secid, boardid)
         return None
-
-    last = rows[0][idx["LAST"]]
-    if last is None:
-        logger.warning("LAST is null for secid=%s boardid=%s", secid, boardid)
-        return None
-    price = float(last)
-    logger.info("ISS last price secid=%s boardid=%s last=%s", secid, boardid, price)
+    logger.info("Last price secid=%s boardid=%s last=%s", secid, boardid, price)
     return price
 
 async def get_last_price_metal(session: aiohttp.ClientSession, secid: str, boardid: str | None = None) -> float | None:
@@ -221,25 +246,31 @@ async def get_last_price_metal(session: aiohttp.ClientSession, secid: str, board
     else:
         path = f"/engines/currency/markets/selt/securities/{secid}.json"
 
-    data = await get_json_with_fallback(session, path, params={"iss.meta": "off"})
-    md = data.get("marketdata", {})
-    cols = md.get("columns", [])
-    rows = md.get("data", [])
-    if not rows:
-        logger.warning("No marketdata rows for metal secid=%s boardid=%s", secid, boardid)
-        return None
+    def parse_last(data: dict) -> float | None:
+        md = data.get("marketdata", {})
+        cols = md.get("columns", [])
+        rows = md.get("data", [])
+        if not rows:
+            return None
+        idx = {c: i for i, c in enumerate(cols)}
+        if "LAST" not in idx:
+            return None
+        last = rows[0][idx["LAST"]]
+        if last is None:
+            return None
+        return float(last)
 
-    idx = {c: i for i, c in enumerate(cols)}
-    if "LAST" not in idx:
-        logger.warning("LAST column is missing for metal secid=%s boardid=%s", secid, boardid)
+    data, delayed = await get_json_with_fallback_source(session, path, params={"iss.meta": "off"})
+    price = parse_last(data)
+    if price is None and not delayed:
+        logger.warning("ALGOPACK returned no metal LAST for secid=%s boardid=%s; retry via ISS", secid, boardid)
+        mark_delayed_data_used()
+        data = await iss_get_json(session, path, params={"iss.meta": "off"})
+        price = parse_last(data)
+    if price is None:
+        logger.warning("No metal LAST marketdata for secid=%s boardid=%s", secid, boardid)
         return None
-
-    last = rows[0][idx["LAST"]]
-    if last is None:
-        logger.warning("LAST is null for metal secid=%s boardid=%s", secid, boardid)
-        return None
-    price = float(last)
-    logger.info("ISS last metal price secid=%s boardid=%s last=%s", secid, boardid, price)
+    logger.info("Last metal price secid=%s boardid=%s last=%s", secid, boardid, price)
     return price
 
 async def get_last_price_by_asset_type(
@@ -259,79 +290,79 @@ async def get_stock_day_movers(session: aiohttp.ClientSession, boardid: str = "T
     OPEN (цена открытия) -> LAST (последняя цена).
     """
     path = f"/engines/stock/markets/shares/boards/{boardid}/securities.json"
-    start = 0
     out: list[dict] = []
-
-    while True:
-        params = {
-            "iss.meta": "off",
-            "start": start,
-            "limit": 100,
-            "securities.columns": "SECID,SHORTNAME",
-            "marketdata.columns": "SECID,OPEN,LAST",
-        }
-        data = await get_json_with_fallback(session, path, params=params)
+    params = {
+        "iss.meta": "off",
+        "securities.columns": "SECID,SHORTNAME",
+        "marketdata.columns": "SECID,OPEN,LAST",
+    }
+    data, delayed = await get_json_with_fallback_source(session, path, params=params)
+    sec = data.get("securities", {})
+    md = data.get("marketdata", {})
+    sec_cols = sec.get("columns", [])
+    sec_rows = sec.get("data", [])
+    md_cols = md.get("columns", [])
+    md_rows = md.get("data", [])
+    if not md_rows and not delayed:
+        logger.warning("ALGOPACK movers response is empty for board=%s; retry via ISS", boardid)
+        mark_delayed_data_used()
+        data = await iss_get_json(session, path, params=params)
         sec = data.get("securities", {})
         md = data.get("marketdata", {})
         sec_cols = sec.get("columns", [])
         sec_rows = sec.get("data", [])
         md_cols = md.get("columns", [])
         md_rows = md.get("data", [])
+    if not md_rows:
+        return out
 
-        if not md_rows:
-            break
+    sec_idx = {str(c).upper(): i for i, c in enumerate(sec_cols)}
+    md_idx = {str(c).upper(): i for i, c in enumerate(md_cols)}
+    secid_i = sec_idx.get("SECID")
+    shortname_i = sec_idx.get("SHORTNAME")
+    md_secid_i = md_idx.get("SECID")
+    open_i = md_idx.get("OPEN")
+    last_i = md_idx.get("LAST")
+    if md_secid_i is None or open_i is None or last_i is None:
+        return out
 
-        sec_idx = {str(c).upper(): i for i, c in enumerate(sec_cols)}
-        md_idx = {str(c).upper(): i for i, c in enumerate(md_cols)}
-        secid_i = sec_idx.get("SECID")
-        shortname_i = sec_idx.get("SHORTNAME")
-        md_secid_i = md_idx.get("SECID")
-        open_i = md_idx.get("OPEN")
-        last_i = md_idx.get("LAST")
-        if md_secid_i is None or open_i is None or last_i is None:
-            break
+    names: dict[str, str] = {}
+    for row in sec_rows:
+        if secid_i is None or secid_i >= len(row):
+            continue
+        secid = str(row[secid_i] or "").strip()
+        if not secid:
+            continue
+        shortname = ""
+        if shortname_i is not None and shortname_i < len(row):
+            shortname = str(row[shortname_i] or "").strip()
+        names[secid] = shortname
 
-        names: dict[str, str] = {}
-        for row in sec_rows:
-            if secid_i is None or secid_i >= len(row):
-                continue
-            secid = str(row[secid_i] or "").strip()
-            if not secid:
-                continue
-            shortname = ""
-            if shortname_i is not None and shortname_i < len(row):
-                shortname = str(row[shortname_i] or "").strip()
-            names[secid] = shortname
-
-        for row in md_rows:
-            secid = str(row[md_secid_i] or "").strip()
-            if not secid:
-                continue
-            open_px = row[open_i] if open_i < len(row) else None
-            last_px = row[last_i] if last_i < len(row) else None
-            if open_px is None or last_px is None:
-                continue
-            try:
-                open_f = float(open_px)
-                last_f = float(last_px)
-            except Exception:
-                continue
-            if open_f <= 0:
-                continue
-            pct = (last_f - open_f) / open_f * 100.0
-            out.append(
-                {
-                    "secid": secid,
-                    "shortname": names.get(secid) or secid,
-                    "open": open_f,
-                    "last": last_f,
-                    "pct": pct,
-                }
-            )
-
-        if len(md_rows) < 100:
-            break
-        start += len(md_rows)
+    for row in md_rows:
+        secid = str(row[md_secid_i] or "").strip()
+        if not secid:
+            continue
+        open_px = row[open_i] if open_i < len(row) else None
+        last_px = row[last_i] if last_i < len(row) else None
+        if open_px is None or last_px is None:
+            continue
+        try:
+            open_f = float(open_px)
+            last_f = float(last_px)
+        except Exception:
+            continue
+        if open_f <= 0:
+            continue
+        pct = (last_f - open_f) / open_f * 100.0
+        out.append(
+            {
+                "secid": secid,
+                "shortname": names.get(secid) or secid,
+                "open": open_f,
+                "last": last_f,
+                "pct": pct,
+            }
+        )
 
     return out
 
@@ -359,6 +390,7 @@ async def get_history_prices_by_asset_type(
     path = _history_path_by_asset_type(secid, boardid, asset_type)
     start = 0
     out: list[tuple[date, float]] = []
+    use_iss_only = False
 
     while True:
         params = {
@@ -368,10 +400,24 @@ async def get_history_prices_by_asset_type(
             "start": start,
             "history.columns": "TRADEDATE,CLOSE,LEGALCLOSEPRICE,WAPRICE",
         }
-        data = await get_json_with_fallback(session, path, params=params)
+        if use_iss_only:
+            data = await iss_get_json(session, path, params=params)
+            delayed = True
+        else:
+            data, delayed = await get_json_with_fallback_source(session, path, params=params)
+            if delayed:
+                use_iss_only = True
         hist = data.get("history", {})
         cols = hist.get("columns", [])
         rows = hist.get("data", [])
+        if not rows and start == 0 and not delayed:
+            logger.warning("ALGOPACK history response is empty for secid=%s; retry via ISS", secid)
+            mark_delayed_data_used()
+            data = await iss_get_json(session, path, params=params)
+            use_iss_only = True
+            hist = data.get("history", {})
+            cols = hist.get("columns", [])
+            rows = hist.get("data", [])
         if not rows:
             break
 
