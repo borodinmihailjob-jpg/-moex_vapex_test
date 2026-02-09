@@ -68,6 +68,8 @@ MOEX_CLOSE_HOUR = 18
 MOEX_CLOSE_MINUTE = 50
 MOEX_EVENT_WINDOW_MIN = 5
 MAX_BROKER_XML_SIZE_BYTES = 5 * 1024 * 1024
+PRICE_FETCH_CONCURRENCY = 20
+PRICE_FETCH_BATCH_SIZE = 100
 BTN_ADD_TRADE = "Добавить сделку"
 BTN_PORTFOLIO = "Стоимость портфеля"
 BTN_ALERTS = "Настройки уведомлений"
@@ -592,30 +594,44 @@ def _cache_age_seconds(updated_at: datetime | None, now_utc: datetime) -> float 
         dt = dt.replace(tzinfo=timezone.utc)
     return max(0.0, (now_utc - dt.astimezone(timezone.utc)).total_seconds())
 
+
+async def _fetch_prices_limited(rows: list[dict]) -> list[tuple[dict, float | None]]:
+    if not rows:
+        return []
+
+    sem = asyncio.Semaphore(PRICE_FETCH_CONCURRENCY)
+    out: list[tuple[dict, float | None]] = []
+
+    async with aiohttp.ClientSession() as session:
+        async def load_price(row: dict) -> tuple[dict, float | None]:
+            async with sem:
+                try:
+                    last = await get_last_price_by_asset_type(
+                        session,
+                        row["secid"],
+                        row.get("boardid"),
+                        row.get("asset_type") or ASSET_TYPE_STOCK,
+                    )
+                    return row, last
+                except Exception:
+                    logger.warning(
+                        "Failed to load price secid=%s boardid=%s",
+                        row.get("secid"),
+                        row.get("boardid"),
+                    )
+                    return row, None
+
+        for i in range(0, len(rows), PRICE_FETCH_BATCH_SIZE):
+            batch = rows[i:i + PRICE_FETCH_BATCH_SIZE]
+            out.extend(await asyncio.gather(*(load_price(row) for row in batch)))
+    return out
+
 async def refresh_price_cache_once() -> None:
     instruments = await list_active_position_instruments(DB_DSN)
     if not instruments:
         return
 
-    async with aiohttp.ClientSession() as session:
-        async def load_price(row: dict):
-            try:
-                last = await get_last_price_by_asset_type(
-                    session,
-                    row["secid"],
-                    row.get("boardid"),
-                    row.get("asset_type") or ASSET_TYPE_STOCK,
-                )
-                return row, last
-            except Exception:
-                logger.warning(
-                    "Failed to refresh price cache secid=%s boardid=%s",
-                    row.get("secid"),
-                    row.get("boardid"),
-                )
-                return row, None
-
-        priced = await asyncio.gather(*(load_price(row) for row in instruments))
+    priced = await _fetch_prices_limited(instruments)
 
     now_utc = datetime.now(timezone.utc)
     for row, last in priced:
@@ -643,25 +659,7 @@ async def _load_prices_for_positions(positions: list[dict]) -> dict[int, float |
     if not missing_positions:
         return prices
 
-    async with aiohttp.ClientSession() as session:
-        async def load_price(pos: dict):
-            try:
-                last = await get_last_price_by_asset_type(
-                    session,
-                    pos["secid"],
-                    pos.get("boardid"),
-                    pos.get("asset_type") or ASSET_TYPE_STOCK,
-                )
-                return pos, last
-            except Exception:
-                logger.warning(
-                    "Failed to load price secid=%s boardid=%s",
-                    pos["secid"],
-                    pos.get("boardid"),
-                )
-                return pos, None
-
-        loaded = await asyncio.gather(*(load_price(pos) for pos in missing_positions))
+    loaded = await _fetch_prices_limited(missing_positions)
 
     for pos, last in loaded:
         iid = int(pos["id"])
