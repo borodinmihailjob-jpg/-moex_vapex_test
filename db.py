@@ -51,8 +51,6 @@ CREATE TABLE IF NOT EXISTS trades (
 
 CREATE INDEX IF NOT EXISTS ix_trades_user_instrument
   ON trades (user_id, instrument_id);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_trades_user_external_trade_id
-  ON trades (user_id, external_trade_id);
 
 CREATE TABLE IF NOT EXISTS user_positions (
   portfolio_id BIGINT NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
