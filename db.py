@@ -94,6 +94,13 @@ CREATE TABLE IF NOT EXISTS price_alert_state (
   PRIMARY KEY (user_id, instrument_id)
 );
 
+CREATE TABLE IF NOT EXISTS app_texts (
+  id BIGSERIAL PRIMARY KEY,
+  text_code TEXT NOT NULL UNIQUE,
+  value TEXT NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
 """
 
 MIGRATION_SQL = [
@@ -103,6 +110,9 @@ MIGRATION_SQL = [
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS import_source TEXT",
     "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS user_ref_id BIGINT",
     "ALTER TABLE price_alert_state ADD COLUMN IF NOT EXISTS user_ref_id BIGINT",
+    "ALTER TABLE app_texts ADD COLUMN IF NOT EXISTS text_code TEXT",
+    "ALTER TABLE app_texts ADD COLUMN IF NOT EXISTS value TEXT",
+    "ALTER TABLE app_texts ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
 ]
 
 POST_MIGRATION_INDEX_SQL = [
@@ -111,6 +121,7 @@ POST_MIGRATION_INDEX_SQL = [
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_trades_user_external_trade_id ON trades (user_id, external_trade_id)",
     "CREATE INDEX IF NOT EXISTS ix_user_alert_settings_user_ref ON user_alert_settings (user_ref_id)",
     "CREATE INDEX IF NOT EXISTS ix_price_alert_state_user_ref_instrument ON price_alert_state (user_ref_id, instrument_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_app_texts_text_code ON app_texts (text_code)",
 ]
 
 _pools: dict[str, asyncpg.Pool] = {}
@@ -704,6 +715,47 @@ async def clear_user_portfolio(db_path: str, user_id: int) -> int:
                 return len(deleted_rows)
     except Exception:
         logger.exception("Failed clear_user_portfolio user=%s", user_id)
+        raise
+
+
+async def ensure_app_text(db_path: str, text_code: str, value: str, active: bool = True) -> None:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO app_texts (text_code, value, active)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (text_code) DO NOTHING
+                """,
+                str(text_code).strip(),
+                str(value),
+                bool(active),
+            )
+    except Exception:
+        logger.exception("Failed ensure_app_text text_code=%s", text_code)
+        raise
+
+
+async def get_active_app_text(db_path: str, text_code: str) -> str | None:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT value
+                FROM app_texts
+                WHERE text_code = $1
+                  AND active = TRUE
+                LIMIT 1
+                """,
+                str(text_code).strip(),
+            )
+            if not row:
+                return None
+            return str(row["value"])
+    except Exception:
+        logger.exception("Failed get_active_app_text text_code=%s", text_code)
         raise
 
 

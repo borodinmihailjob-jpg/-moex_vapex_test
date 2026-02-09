@@ -29,6 +29,7 @@ from db import (
     get_instrument,
     get_user_positions,
     ensure_user_alert_settings,
+    ensure_app_text,
     set_periodic_alert,
     set_drop_alert,
     set_open_close_alert,
@@ -42,6 +43,7 @@ from db import (
     list_active_position_instruments,
     upsert_price_cache,
     get_price_cache_map,
+    get_active_app_text,
 )
 from moex_iss import (
     ASSET_TYPE_METAL,
@@ -828,7 +830,12 @@ async def on_menu_alerts_status(message: Message):
     await cmd_alerts_status(message)
 
 async def cmd_why_invest(message: Message):
-    await message.answer(WHY_INVEST_TEXT)
+    try:
+        text = await get_active_app_text(DB_DSN, "why_invest")
+    except Exception:
+        logger.exception("Failed loading why_invest text from app_texts")
+        text = None
+    await message.answer(text or WHY_INVEST_TEXT)
 
 async def on_menu_asset_lookup(message: Message, state: FSMContext):
     await cmd_asset_lookup(message, state)
@@ -1489,6 +1496,7 @@ async def main():
         )
 
     await init_db(DB_DSN)
+    await ensure_app_text(DB_DSN, "why_invest", WHY_INVEST_TEXT, True)
 
     lock_name = "moex_portfolio_bot_polling"
     while True:
