@@ -3,7 +3,7 @@ import aiohttp
 import logging
 import os
 from contextvars import ContextVar
-from datetime import date
+from datetime import date, datetime
 
 ISS_BASE = "https://iss.moex.com/iss"
 ALGOPACK_BASE = "https://apim.moex.com/iss"
@@ -383,6 +383,145 @@ async def get_stock_day_movers(session: aiohttp.ClientSession, boardid: str = "T
                 "val_today": val_today,
             }
         )
+
+    return out
+
+
+async def get_stock_movers_by_date(
+    session: aiohttp.ClientSession,
+    trade_date: date,
+    boardid: str = "TQBR",
+) -> list[dict]:
+    """
+    Возвращает список акций с дневным изменением и объемом торгов за выбранную дату.
+    Для текущего дня: OPEN -> LAST и VOLTODAY из marketdata.
+    Для прошлых дней: OPEN -> CLOSE и VOLUME из history.
+    """
+    if trade_date >= datetime.now().date():
+        return await get_stock_day_movers(session, boardid=boardid)
+
+    path = f"/history/engines/stock/markets/shares/boards/{boardid}/securities.json"
+    out: list[dict] = []
+    start = 0
+    use_iss_only = False
+
+    while True:
+        params = {
+            "iss.meta": "off",
+            "from": trade_date.isoformat(),
+            "till": trade_date.isoformat(),
+            "start": start,
+            "limit": 100,
+            "securities.columns": "SECID,SHORTNAME",
+            "history.columns": "SECID,OPEN,CLOSE,LEGALCLOSEPRICE,WAPRICE,VOLUME,VALUE",
+        }
+        if use_iss_only:
+            data = await iss_get_json(session, path, params=params)
+            delayed = True
+        else:
+            data, delayed = await get_json_with_fallback_source(session, path, params=params)
+            if delayed:
+                use_iss_only = True
+
+        sec = data.get("securities", {})
+        hist = data.get("history", {})
+        sec_cols = sec.get("columns", [])
+        sec_rows = sec.get("data", [])
+        h_cols = hist.get("columns", [])
+        h_rows = hist.get("data", [])
+
+        if not h_rows and start == 0 and not delayed:
+            logger.warning("ALGOPACK historical movers are empty for date=%s; retry via ISS", trade_date.isoformat())
+            mark_delayed_data_used()
+            data = await iss_get_json(session, path, params=params)
+            use_iss_only = True
+            sec = data.get("securities", {})
+            hist = data.get("history", {})
+            sec_cols = sec.get("columns", [])
+            sec_rows = sec.get("data", [])
+            h_cols = hist.get("columns", [])
+            h_rows = hist.get("data", [])
+
+        if not h_rows:
+            break
+
+        sec_idx = {str(c).upper(): i for i, c in enumerate(sec_cols)}
+        h_idx = {str(c).upper(): i for i, c in enumerate(h_cols)}
+        secid_i = sec_idx.get("SECID")
+        shortname_i = sec_idx.get("SHORTNAME")
+        h_secid_i = h_idx.get("SECID")
+        open_i = h_idx.get("OPEN")
+        close_i = h_idx.get("CLOSE")
+        legal_i = h_idx.get("LEGALCLOSEPRICE")
+        wap_i = h_idx.get("WAPRICE")
+        vol_i = h_idx.get("VOLUME")
+        val_i = h_idx.get("VALUE")
+        if h_secid_i is None or open_i is None:
+            break
+
+        names: dict[str, str] = {}
+        for row in sec_rows:
+            if secid_i is None or secid_i >= len(row):
+                continue
+            secid = str(row[secid_i] or "").strip()
+            if not secid:
+                continue
+            shortname = ""
+            if shortname_i is not None and shortname_i < len(row):
+                shortname = str(row[shortname_i] or "").strip()
+            names[secid] = shortname
+
+        for row in h_rows:
+            secid = str(row[h_secid_i] or "").strip()
+            if not secid:
+                continue
+            open_px = row[open_i] if open_i < len(row) else None
+            close_px = row[close_i] if close_i is not None and close_i < len(row) else None
+            if close_px is None and legal_i is not None and legal_i < len(row):
+                close_px = row[legal_i]
+            if close_px is None and wap_i is not None and wap_i < len(row):
+                close_px = row[wap_i]
+            if open_px is None or close_px is None:
+                continue
+            try:
+                open_f = float(open_px)
+                close_f = float(close_px)
+            except Exception:
+                continue
+            if open_f <= 0:
+                continue
+            vol_day = None
+            if vol_i is not None and vol_i < len(row):
+                raw = row[vol_i]
+                if raw is not None:
+                    try:
+                        vol_day = float(raw)
+                    except Exception:
+                        vol_day = None
+            val_day = None
+            if val_i is not None and val_i < len(row):
+                raw = row[val_i]
+                if raw is not None:
+                    try:
+                        val_day = float(raw)
+                    except Exception:
+                        val_day = None
+            pct = (close_f - open_f) / open_f * 100.0
+            out.append(
+                {
+                    "secid": secid,
+                    "shortname": names.get(secid) or secid,
+                    "open": open_f,
+                    "last": close_f,
+                    "pct": pct,
+                    "vol_today": vol_day,
+                    "val_today": val_day,
+                }
+            )
+
+        if len(h_rows) < 100:
+            break
+        start += len(h_rows)
 
     return out
 

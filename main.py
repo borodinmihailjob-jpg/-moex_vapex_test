@@ -52,7 +52,7 @@ from moex_iss import (
     ASSET_TYPE_STOCK,
     DELAYED_WARNING_TEXT,
     delayed_data_used,
-    get_stock_day_movers,
+    get_stock_movers_by_date,
     get_history_prices_by_asset_type,
     get_last_price_by_asset_type,
     reset_data_source_flags,
@@ -149,6 +149,68 @@ def qty_int(x: float | None) -> str:
         return f"{int(round(float(x))):,}".replace(",", " ")
     except Exception:
         return "н/д"
+
+
+def _ru_weekday_short(d: date) -> str:
+    names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    return names[d.weekday()]
+
+
+def _top_movers_date_options(base_date: date) -> list[date]:
+    # 5 предыдущих дней + текущий.
+    return [base_date - timedelta(days=delta) for delta in range(5, -1, -1)]
+
+
+async def make_top_movers_dates_kb(selected: date | None = None):
+    base = datetime.now(MSK_TZ).date()
+    options = _top_movers_date_options(base)
+    kb = InlineKeyboardBuilder()
+    for d in options:
+        mark = "• " if selected and selected == d else ""
+        label = f"{mark}{_ru_weekday_short(d)} {d.strftime('%d.%m')}"
+        kb.button(text=label[:64], callback_data=f"tmdate:{d.isoformat()}")
+    kb.adjust(3, 3)
+    return kb.as_markup()
+
+
+def build_top_movers_text(movers: list[dict], selected_date: date) -> str:
+    now_msk = datetime.now(MSK_TZ)
+    open_label = f"{MOEX_OPEN_HOUR:02d}:{MOEX_OPEN_MINUTE:02d}"
+    asof_label = now_msk.strftime("%H:%M")
+
+    gainers = sorted(movers, key=lambda x: x["pct"], reverse=True)[:10]
+    losers = sorted([m for m in movers if m["pct"] < 0], key=lambda x: x["pct"])[:5]
+
+    today_msk = now_msk.date()
+    if selected_date == today_msk:
+        period_line = f"Период: {open_label}–{asof_label} МСК"
+    else:
+        period_line = f"Дата: {selected_date.strftime('%d.%m.%Y')}"
+
+    lines = [
+        "Топ акций за сессию MOEX (TQBR)",
+        period_line,
+        "",
+        "📈 Топ-10 роста:",
+    ]
+    for i, m in enumerate(gainers, 1):
+        lines.append(
+            f"{i}. {m['secid']} ({m['shortname']}) — {m['pct']:+.2f}% "
+            f"({money(m['open'])} → {money(m['last'])}) | "
+            f"Объём за день: {qty_int(m.get('vol_today'))}"
+        )
+
+    lines.extend(["", "📉 Топ-5 падения:"])
+    if not losers:
+        lines.append("За выбранную дату падения не обнаружены.")
+    else:
+        for i, m in enumerate(losers, 1):
+            lines.append(
+                f"{i}. {m['secid']} ({m['shortname']}) — {m['pct']:+.2f}% "
+                f"({money(m['open'])} → {money(m['last'])}) | "
+                f"Объём за день: {qty_int(m.get('vol_today'))}"
+            )
+    return "\n".join(lines)
 
 async def safe_edit_text(message: Message | None, text: str, reply_markup=None) -> None:
     if message is None:
@@ -916,46 +978,40 @@ async def cmd_set_interval(message: Message):
 
 
 async def cmd_top_movers(message: Message):
-    now_msk = datetime.now(MSK_TZ)
-    open_label = f"{MOEX_OPEN_HOUR:02d}:{MOEX_OPEN_MINUTE:02d}"
-    asof_label = now_msk.strftime("%H:%M")
+    await message.answer(
+        "Выбери дату для топа роста/падения:",
+        reply_markup=await make_top_movers_dates_kb(selected=datetime.now(MSK_TZ).date()),
+    )
+
+
+async def on_top_movers_date_pick(call: CallbackQuery):
+    raw = (call.data or "").split(":", 1)[1] if ":" in (call.data or "") else ""
+    try:
+        selected = date.fromisoformat(raw)
+    except Exception:
+        await call.answer("Некорректная дата", show_alert=True)
+        return
 
     reset_data_source_flags()
     async with aiohttp.ClientSession() as session:
-        movers = await get_stock_day_movers(session, boardid="TQBR")
+        movers = await get_stock_movers_by_date(session, selected, boardid="TQBR")
 
     if not movers:
-        await message.answer("Не удалось получить данные по акциям TQBR.")
+        await safe_edit_text(
+            call.message,
+            f"Нет данных по акциям TQBR за {selected.strftime('%d.%m.%Y')}.",
+            reply_markup=await make_top_movers_dates_kb(selected=selected),
+        )
+        await call.answer()
         return
 
-    gainers = sorted(movers, key=lambda x: x["pct"], reverse=True)[:10]
-    losers = sorted([m for m in movers if m["pct"] < 0], key=lambda x: x["pct"])[:5]
-
-    lines = [
-        f"Топ акций за текущую сессию MOEX (TQBR)",
-        f"Период: {open_label}–{asof_label} МСК",
-        "",
-        "📈 Топ-10 роста:",
-    ]
-    for i, m in enumerate(gainers, 1):
-        lines.append(
-            f"{i}. {m['secid']} ({m['shortname']}) — {m['pct']:+.2f}% "
-            f"({money(m['open'])} → {money(m['last'])}) | "
-            f"Объём за день: {qty_int(m.get('vol_today'))}"
-        )
-
-    lines.extend(["", "📉 Топ-5 падения:"])
-    if not losers:
-        lines.append("За текущую сессию падения не обнаружены.")
-    else:
-        for i, m in enumerate(losers, 1):
-            lines.append(
-                f"{i}. {m['secid']} ({m['shortname']}) — {m['pct']:+.2f}% "
-                f"({money(m['open'])} → {money(m['last'])}) | "
-                f"Объём за день: {qty_int(m.get('vol_today'))}"
-            )
-
-    await message.answer(append_delayed_warning("\n".join(lines)))
+    text = append_delayed_warning(build_top_movers_text(movers, selected))
+    await safe_edit_text(
+        call.message,
+        text,
+        reply_markup=await make_top_movers_dates_kb(selected=selected),
+    )
+    await call.answer()
 
 async def make_clear_portfolio_kb():
     kb = InlineKeyboardBuilder()
@@ -1972,6 +2028,7 @@ async def main():
     dp.message.register(cmd_market_reports_on, Command("market_reports_on"), StateFilter("*"))
     dp.message.register(cmd_market_reports_off, Command("market_reports_off"), StateFilter("*"))
     dp.message.register(cmd_alerts_status, Command("alerts_status"), StateFilter("*"))
+    dp.callback_query.register(on_top_movers_date_pick, StateFilter("*"), F.data.startswith("tmdate:"))
     dp.message.register(on_menu_add_trade, StateFilter("*"), F.text == BTN_ADD_TRADE)
     dp.message.register(on_menu_portfolio, StateFilter("*"), F.text == BTN_PORTFOLIO)
     dp.message.register(on_menu_portfolio_map, StateFilter("*"), F.text == BTN_PORTFOLIO_MAP)
