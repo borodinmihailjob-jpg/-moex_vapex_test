@@ -48,10 +48,6 @@ CREATE TABLE IF NOT EXISTS trades (
 
 CREATE INDEX IF NOT EXISTS ix_trades_user_instrument
   ON trades (user_id, instrument_id);
-CREATE INDEX IF NOT EXISTS ix_trades_user_ref_instrument
-  ON trades (user_ref_id, instrument_id);
-CREATE INDEX IF NOT EXISTS ix_trades_portfolio_instrument
-  ON trades (portfolio_id, instrument_id);
 
 CREATE TABLE IF NOT EXISTS user_positions (
   portfolio_id BIGINT NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
@@ -85,8 +81,6 @@ CREATE TABLE IF NOT EXISTS user_alert_settings (
   close_last_sent_date TEXT
 );
 
-CREATE INDEX IF NOT EXISTS ix_user_alert_settings_user_ref
-  ON user_alert_settings (user_ref_id);
 
 CREATE TABLE IF NOT EXISTS price_alert_state (
   user_id BIGINT NOT NULL,
@@ -97,8 +91,6 @@ CREATE TABLE IF NOT EXISTS price_alert_state (
   PRIMARY KEY (user_id, instrument_id)
 );
 
-CREATE INDEX IF NOT EXISTS ix_price_alert_state_user_ref_instrument
-  ON price_alert_state (user_ref_id, instrument_id);
 """
 
 MIGRATION_SQL = [
@@ -106,6 +98,13 @@ MIGRATION_SQL = [
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS portfolio_id BIGINT",
     "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS user_ref_id BIGINT",
     "ALTER TABLE price_alert_state ADD COLUMN IF NOT EXISTS user_ref_id BIGINT",
+]
+
+POST_MIGRATION_INDEX_SQL = [
+    "CREATE INDEX IF NOT EXISTS ix_trades_user_ref_instrument ON trades (user_ref_id, instrument_id)",
+    "CREATE INDEX IF NOT EXISTS ix_trades_portfolio_instrument ON trades (portfolio_id, instrument_id)",
+    "CREATE INDEX IF NOT EXISTS ix_user_alert_settings_user_ref ON user_alert_settings (user_ref_id)",
+    "CREATE INDEX IF NOT EXISTS ix_price_alert_state_user_ref_instrument ON price_alert_state (user_ref_id, instrument_id)",
 ]
 
 _pools: dict[str, asyncpg.Pool] = {}
@@ -282,6 +281,8 @@ async def init_db(db_path: str):
             async with conn.transaction():
                 await conn.execute(CREATE_SQL)
                 for sql in MIGRATION_SQL:
+                    await conn.execute(sql)
+                for sql in POST_MIGRATION_INDEX_SQL:
                     await conn.execute(sql)
                 await _backfill_user_links(conn)
                 await _rebuild_positions(conn)
