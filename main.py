@@ -94,6 +94,7 @@ BTN_ALERTS = "Настройки уведомлений"
 BTN_WHY_INVEST = "Зачем инвестировать"
 BTN_ASSET_LOOKUP = "Поиск цены"
 BTN_PORTFOLIO_MAP = "Карта портфеля"
+BTN_TOP_MOVERS = "Топ роста/падения"
 CB_PORTFOLIO_MAP_SELF = "pmap:self"
 CB_PORTFOLIO_MAP_SHARE = "pmap:share"
 TRADE_SIDE_BUY = "buy"
@@ -401,9 +402,10 @@ def make_main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_ADD_TRADE), KeyboardButton(text=BTN_PORTFOLIO)],
-            [KeyboardButton(text=BTN_PORTFOLIO_MAP), KeyboardButton(text=BTN_ASSET_LOOKUP)],
-            [KeyboardButton(text=BTN_ALERTS)],
+            [KeyboardButton(text=BTN_ASSET_LOOKUP), KeyboardButton(text=BTN_PORTFOLIO_MAP)],
+            [KeyboardButton(text=BTN_TOP_MOVERS)],
             [KeyboardButton(text=BTN_WHY_INVEST)],
+            [KeyboardButton(text=BTN_ALERTS)],
         ],
         resize_keyboard=True,
     )
@@ -798,26 +800,23 @@ async def _import_broker_xml_trades(user_id: int, file_name: str, xml_bytes: byt
 async def cmd_start(message: Message):
     logger.info("User %s started bot", message.from_user.id if message.from_user else None)
     await message.answer(
-        "Привет! Я помогу вести твой портфель акций и металлов на MOEX.\n\n"
-        "Что можно сделать сразу:\n"
-        "• Нажми «Добавить сделку», чтобы занести покупку\n"
-        "• Нажми «Стоимость портфеля», чтобы увидеть текущую оценку и P&L\n"
-        "• Нажми «Поиск цены», чтобы посмотреть динамику инструмента\n\n"
-        "Команды:\n"
+        "Привет! Я помогу тебе учитывать сделки и следить за портфелем на MOEX 📈\n"
+        "Покажу текущую стоимость, доходность и динамику по инструментам.\n"
         "💼 Портфель\n"
         "/add_trade — добавить сделку (покупка/продажа)\n"
-        "/portfolio — текущая стоимость портфеля и P&L\n"
-        "/portfolio_map — выбор режима: «Карта для себя» или «Поделиться картой»\n"
-        "/asset_lookup — текущая цена и динамика за неделю/месяц/6 мес/год\n\n"
-        "/top_movers — топ роста/падения акций за текущую сессию\n\n"
-        "🔔 Отчеты дня\n"
-        "/trading_day_on — включить отчет торгового дня (4 точки: открытие/середина/закрытия)\n"
-        "/trading_day_off — выключить отчет торгового дня\n\n"
-        "/clear_portfolio — удалить все сделки и очистить портфель\n\n"
-        "📥 Импорт\n"
-        "/import_broker_xml — загрузить XML брокерской выписки и импортировать сделки\n\n"
+        "/portfolio — стоимость портфеля и P&L\n"
+        "/portfolio_map — выбрать режим карты: «для себя» или «поделиться»\n"
+        "/asset_lookup — цена инструмента и динамика (неделя/месяц/6 мес/год)\n"
+        "/clear_portfolio — удалить все сделки и очистить портфель\n"
+        "🚀 Рынок сегодня\n"
+        "/top_movers — лидеры роста и падения за выбранную сессию\n"
+        "🔔 Отчёты дня\n"
+        "/trading_day_on — включить отчёт по итогам торгов (открытие/закрытие)\n"
+        "/trading_day_off — выключить отчёт\n"
+        "📥 Импорт сделок\n"
+        "/import_broker_xml — загрузить XML брокерской выписки и импортировать сделки (Доступен только АльфаБанк)\n"
         "📚 Полезное\n"
-        "/why_invest — Зачем инвестировать?\n",
+        "/why_invest — зачем инвестировать и почему важна дисциплина\n",
         reply_markup=make_main_menu_kb(),
     )
 
@@ -1043,6 +1042,9 @@ async def on_menu_portfolio_map(message: Message):
 
 async def on_menu_alerts_status(message: Message):
     await cmd_alerts_status(message)
+
+async def on_menu_top_movers(message: Message):
+    await cmd_top_movers(message)
 
 async def cmd_why_invest(message: Message):
     try:
@@ -2123,6 +2125,7 @@ async def main():
     dp.message.register(on_menu_portfolio_map, StateFilter("*"), F.text == BTN_PORTFOLIO_MAP)
     dp.message.register(on_menu_alerts_status, StateFilter("*"), F.text == BTN_ALERTS)
     dp.message.register(on_menu_asset_lookup, StateFilter("*"), F.text == BTN_ASSET_LOOKUP)
+    dp.message.register(on_menu_top_movers, StateFilter("*"), F.text == BTN_TOP_MOVERS)
     dp.message.register(cmd_why_invest, StateFilter("*"), F.text == BTN_WHY_INVEST)
     dp.message.register(on_broker_xml_document, StateFilter("*"), F.document)
 
