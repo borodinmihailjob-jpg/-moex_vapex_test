@@ -1,4 +1,5 @@
 import io
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -18,6 +19,8 @@ def money(x: float) -> str:
 
 def _load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
     candidates = [
+        "/System/Library/Fonts/Supplemental/SF Pro Display Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/SF Pro Display Regular.ttf",
+        "/Library/Fonts/Inter-Bold.ttf" if bold else "/Library/Fonts/Inter-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/Library/Fonts/Arial Bold.ttf" if bold else "/Library/Fonts/Arial.ttf",
     ]
@@ -295,175 +298,311 @@ def build_portfolio_share_card_png(
     top_gainers: list[dict],
     top_losers: list[dict],
 ) -> bytes:
-    width = 2200
-    height = 3000
-    image = Image.new("RGB", (width, height), (241, 245, 252))
+    width, height = 1080, 1350
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
-    title_font = _load_font(74, bold=True)
-    h_font = _load_font(42, bold=True)
-    text_font = _load_font(30, bold=False)
-    metric_font = _load_font(56, bold=True)
-    ticker_font = _load_font(22, bold=False)
+    def alpha(c: tuple[int, int, int], a: int) -> tuple[int, int, int, int]:
+        return c[0], c[1], c[2], a
 
-    draw.ellipse((-220, -260, 540, 420), fill=(233, 244, 255))
-    draw.ellipse((width - 520, -180, width + 140, 420), fill=(223, 251, 242))
+    def strength_color(base: tuple[int, int, int], strength: str) -> tuple[int, int, int]:
+        if strength == "strong":
+            return base
+        if strength == "moderate":
+            return _blend((245, 247, 252), base, 0.72)
+        return _blend((245, 247, 252), base, 0.55)
 
-    pad = 56
-    content_w = width - 2 * pad
-    y = pad
-
-    def card(x: int, top: int, w: int, h: int, title: str | None = None) -> int:
-        draw.rounded_rectangle((x, top, x + w, top + h), radius=30, fill=(255, 255, 255), outline=(224, 233, 246), width=2)
-        if title:
-            draw.text((x + 24, top + 18), title, fill=(35, 49, 84), font=h_font)
-            return top + 84
-        return top + 18
-
-    header_h = 190
-    hy = card(pad, y, content_w, header_h)
-    draw.text((pad + 26, hy - 6), "Мой портфель на MOEX", fill=(27, 38, 66), font=title_font)
-    draw.text((pad + 28, hy + 78), datetime.now(MSK_TZ).strftime("Снимок на %d.%m.%Y %H:%M МСК"), fill=(108, 128, 162), font=text_font)
-    badge_x = pad + content_w - 230
-    draw.rounded_rectangle((badge_x, hy + 14, badge_x + 180, hy + 74), radius=18, fill=(230, 251, 243))
-    draw.text((badge_x + 28, hy + 28), "SHARE", fill=(28, 151, 104), font=text_font)
-    y += header_h + 24
-
-    kpi_h = 220
-    kpi_gap = 18
-    kpi_w = (content_w - 2 * kpi_gap) // 3
-    p30_text = "н/д" if portfolio_return_30d is None else f"{portfolio_return_30d:+.2f}%"
-    p30_color = (29, 163, 108) if (portfolio_return_30d or 0.0) >= 0 else (218, 78, 95)
-    m30_text = "н/д" if moex_return_30d is None else f"{moex_return_30d:+.2f}%"
-    m30_color = (29, 163, 108) if (moex_return_30d or 0.0) >= 0 else (218, 78, 95)
-    alpha = None
-    if portfolio_return_30d is not None and moex_return_30d is not None:
-        alpha = portfolio_return_30d - moex_return_30d
-
-    for i in range(3):
-        x = pad + i * (kpi_w + kpi_gap)
-        cy = card(x, y, kpi_w, kpi_h)
-        if i == 0:
-            draw.text((x + 26, cy + 4), "Рост портфеля (30д)", fill=(97, 117, 149), font=text_font)
-            draw.text((x + 26, cy + 70), p30_text, fill=p30_color, font=metric_font)
-        elif i == 1:
-            draw.text((x + 26, cy + 4), "Индекс MOEX (30д)", fill=(97, 117, 149), font=text_font)
-            draw.text((x + 26, cy + 70), m30_text, fill=m30_color, font=metric_font)
+    def trend_state(v: float | None) -> tuple[str, str]:
+        if v is None:
+            return "flat", "slight"
+        av = abs(float(v))
+        if av >= 7.0:
+            strength = "strong"
+        elif av >= 3.0:
+            strength = "moderate"
         else:
-            draw.text((x + 26, cy + 4), "Сравнение", fill=(97, 117, 149), font=text_font)
-            if alpha is None:
-                atxt, acolor = "н/д", (139, 155, 182)
-            elif alpha >= 0:
-                atxt, acolor = f"Опережение +{alpha:.2f}%", (29, 163, 108)
-            else:
-                atxt, acolor = f"Отставание {alpha:.2f}%", (218, 78, 95)
-            metric = _load_font(42, bold=True)
-            draw.text((x + 26, cy + 72), _fit_line(draw, atxt, metric, kpi_w - 52), fill=acolor, font=metric)
-    y += kpi_h + 24
+            strength = "slight"
+        if v > 0:
+            return "up", strength
+        if v < 0:
+            return "down", strength
+        return "flat", strength
 
-    table_w = int(content_w * 0.68)
-    right_w = content_w - table_w - 18
-    table_h = 1180
-    chart_h = table_h
+    def tint_by_trend(v: float | None) -> tuple[int, int, int]:
+        state, strength = trend_state(v)
+        if state == "up":
+            return strength_color((28, 163, 110), strength)
+        if state == "down":
+            return strength_color((205, 62, 105), strength)
+        return (141, 150, 165)
 
-    ty = card(pad, y, table_w, table_h, "Состав портфеля")
-    col1_x = pad + 24
-    col2_x = pad + table_w - 420
-    col3_x = pad + table_w - 132
-    draw.text((col1_x, ty), "Название актива", fill=(109, 128, 162), font=ticker_font)
-    draw.text((col2_x, ty), "Доля", fill=(109, 128, 162), font=ticker_font)
-    draw.text((col3_x, ty), "Месяц", fill=(109, 128, 162), font=ticker_font)
-    draw.line((pad + 22, ty + 34, pad + table_w - 22, ty + 34), fill=(231, 238, 249), width=2)
-    ty += 48
-    for item in composition_rows[:20]:
-        share_pct = float(item.get("share_pct") or 0.0)
-        secid = str(item.get("secid") or "UNKNOWN")
-        name = str(item.get("name_ru") or "").strip() or secid
-        ret_30 = item.get("ret_30d")
-        draw.text((col1_x, ty), _fit_line(draw, f"{name} ({secid})", text_font, col2_x - col1_x - 20), fill=(42, 56, 88), font=text_font)
-        bar_x = col2_x
-        bar_w = 170
-        bar_h = 18
-        bar_y = ty + 9
-        fill_w = int(max(0.0, min(1.0, share_pct / 100.0)) * bar_w)
-        draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), radius=10, fill=(233, 240, 250))
-        if fill_w > 0:
-            draw.rounded_rectangle((bar_x, bar_y, bar_x + fill_w, bar_y + bar_h), radius=10, fill=(82, 148, 233))
-        draw.text((bar_x + bar_w + 10, ty + 1), f"{share_pct:.1f}%", fill=(97, 117, 149), font=ticker_font)
-        if ret_30 is None:
-            rtxt, rcol = "н/д", (140, 156, 181)
-        else:
-            rv = float(ret_30)
-            rtxt = f"{rv:+.2f}%"
-            rcol = (29, 163, 108) if rv >= 0 else (218, 78, 95)
-        draw.text((col3_x, ty), rtxt, fill=rcol, font=text_font)
-        ty += 52
-        if ty > y + table_h - 52:
+    def weight_level(share_pct: float) -> str:
+        if share_pct >= 15.0:
+            return "high"
+        if share_pct >= 6.0:
+            return "mid"
+        return "low"
+
+    def weight_ratio(level: str) -> float:
+        return {"high": 0.75, "mid": 0.5, "low": 0.25}.get(level, 0.25)
+
+    def draw_glass_card(rect: tuple[int, int, int, int], radius: int = 26) -> None:
+        _draw_drop_shadow(image, rect, radius=radius, blur=14, offset=(0, 6), color=(56, 72, 109, 45))
+        draw.rounded_rectangle(rect, radius=radius, fill=alpha((250, 252, 255), 214), outline=alpha((255, 255, 255), 230), width=2)
+        x1, y1, x2, y2 = rect
+        h = max(1, y2 - y1)
+        for i in range(0, h, 2):
+            t = i / h
+            c = _blend((255, 255, 255), (240, 246, 253), t)
+            draw.line((x1 + 2, y1 + i, x2 - 2, y1 + i), fill=alpha(c, 50))
+
+    def pct_text(v: float | None) -> str:
+        if v is None:
+            return "0.00%"
+        return f"{float(v):+,.2f}%".replace(",", " ")
+
+    def draw_label_value_line(
+        x: int,
+        y: int,
+        label: str,
+        value: str,
+        label_font: ImageFont.ImageFont,
+        value_font: ImageFont.ImageFont,
+        label_color: tuple[int, int, int],
+        value_color: tuple[int, int, int],
+        max_width: int,
+    ) -> tuple[str, str]:
+        label_w = int(draw.textlength(label, font=label_font))
+        max_val_w = max(20, max_width - label_w)
+        val_fit = _fit_line(draw, value, value_font, max_val_w)
+        val_w = int(draw.textlength(val_fit, font=value_font))
+        max_label_w = max(20, max_width - val_w)
+        label_fit = _fit_line(draw, label, label_font, max_label_w)
+        draw.text((x, y), label_fit, fill=label_color, font=label_font)
+        lx = x + int(draw.textlength(label_fit, font=label_font))
+        draw.text((lx, y), val_fit, fill=value_color, font=value_font)
+        return label_fit, val_fit
+
+    def validate_public_text_policy(texts: list[str]) -> None:
+        forbidden_currency = re.compile(r"(₽|RUB|руб|USD|EUR|CNY|\$|€|¥)", re.IGNORECASE)
+        sum_like = re.compile(r"\d[\d\s]{3,}(?:[.,]\d+)?")
+        for txt in texts:
+            if re.search(r"\d", txt) and forbidden_currency.search(txt):
+                raise ValueError("PUBLIC policy: currency value detected")
+            if "%" not in txt and sum_like.search(txt):
+                # allow date like 12.02.2026
+                if not re.search(r"\d{2}\.\d{2}\.\d{4}", txt):
+                    raise ValueError("PUBLIC policy: absolute numeric value detected")
+
+    # Background
+    _draw_soft_background(draw, width, height)
+    draw.ellipse((-140, -120, 500, 420), fill=(237, 244, 252))
+    draw.ellipse((620, -160, 1180, 380), fill=(226, 238, 252))
+
+    title_font = _load_font(68, bold=True)
+    subtitle_font = _load_font(26, bold=False)
+    card_title_font = _load_font(34, bold=True)
+    row_font = _load_font(22, bold=False)
+    row_bold = _load_font(22, bold=True)
+    pct_font = _load_font(21, bold=True)
+    small_font = _load_font(20, bold=False)
+    compare_big = _load_font(32, bold=True)
+
+    pad = 48
+    content_w = width - pad * 2
+    y = 62
+    public_texts: list[str] = []
+
+    header_title = "Мой портфель"
+    header_sub = datetime.now(MSK_TZ).strftime("%d.%m.%Y")
+    draw.text((pad, y), header_title, fill=(31, 45, 80), font=title_font)
+    draw.text((pad, y + 78), header_sub, fill=(106, 123, 151), font=subtitle_font)
+    public_texts.extend([header_title, header_sub])
+    y += 132
+
+    # 2) Состав портфеля
+    comp_h = 620
+    comp_rect = (pad, y, pad + content_w, y + comp_h)
+    draw_glass_card(comp_rect)
+    cx1, cy1, cx2, cy2 = comp_rect
+    draw.text((cx1 + 24, cy1 + 20), "Состав портфеля", fill=(39, 55, 90), font=card_title_font)
+    header_sep_y = cy1 + 66
+    draw.line((cx1 + 22, header_sep_y, cx2 - 22, header_sep_y), fill=(220, 230, 244), width=1)
+    list_y = header_sep_y + 12
+    row_h = 25
+    name_col_w = 430
+    bar_col_w = 230
+    month_col_x = cx2 - 120
+    for idx, item in enumerate(composition_rows[:20]):
+        base_y = list_y + idx * row_h
+        if base_y + row_h > cy2 - 12:
             break
+        name = str(item.get("name_ru") or "").strip() or str(item.get("secid") or "UNKNOWN")
+        share_pct = float(item.get("share_pct") or 0.0)
+        ret_30 = item.get("ret_30d")
+        pname = _fit_line(draw, name, row_font, name_col_w)
+        draw.text((cx1 + 24, base_y), pname, fill=(57, 74, 106), font=row_font)
+        level = weight_level(share_pct)
+        ratio = weight_ratio(level)
+        bar_x = cx1 + 24 + name_col_w + 20
+        bar_y = base_y + 7
+        draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_col_w, bar_y + 11), radius=7, fill=(225, 234, 246))
+        fill_w = int(bar_col_w * ratio)
+        draw.rounded_rectangle((bar_x, bar_y, bar_x + fill_w, bar_y + 11), radius=7, fill=(100, 140, 198))
+        share_text = f"{share_pct:.1f}%"
+        draw.text((bar_x + bar_col_w + 8, base_y - 1), share_text, fill=(116, 131, 158), font=small_font)
+        mtxt = pct_text(ret_30)
+        mcolor = tint_by_trend(ret_30)
+        mt = _fit_line(draw, mtxt, pct_font, cx2 - month_col_x - 16)
+        tw = int(draw.textlength(mt, font=pct_font))
+        draw.text((cx2 - 18 - tw, base_y - 1), mt, fill=mcolor, font=pct_font)
+        if idx < min(19, len(composition_rows) - 1):
+            draw.line((cx1 + 24, base_y + row_h - 2, cx2 - 24, base_y + row_h - 2), fill=(231, 238, 248), width=1)
+        public_texts.extend([name, pname, share_text, mt])
+    y += comp_h + 20
 
-    rx = pad + table_w + 18
-    cy = card(rx, y, right_w, chart_h, "Динамика")
-    draw.text((rx + 24, cy + 4), "Top-3 актива", fill=(97, 117, 149), font=text_font)
-    ly = cy + 50
+    # 3 + 4) Аллокация и Динамика
+    left_w = int(content_w * 0.43)
+    right_w = content_w - left_w - 20
+    block_h = 300
+    alloc_rect = (pad, y, pad + left_w, y + block_h)
+    dyn_rect = (pad + left_w + 20, y, pad + left_w + 20 + right_w, y + block_h)
+    draw_glass_card(alloc_rect)
+    draw_glass_card(dyn_rect)
+
+    ax1, ay1, ax2, ay2 = alloc_rect
+    draw.text((ax1 + 20, ay1 + 18), "Аллокация", fill=(39, 55, 90), font=card_title_font)
+    cat_map = {"stock": "Акции", "metal": "Металлы", "fiat": "Другое"}
+    alloc = {"Акции": 0.0, "Металлы": 0.0, "Другое": 0.0}
+    for item in composition_rows:
+        share = float(item.get("share_pct") or 0.0)
+        key = cat_map.get(str(item.get("asset_type") or "").lower(), "Другое")
+        alloc[key] += share
+    colors = {"Акции": (80, 143, 226), "Металлы": (46, 178, 133), "Другое": (167, 123, 232)}
+    donut_center = (ax1 + 110, ay1 + 175)
+    donut_r = 72
+    start = -90
+    total = sum(alloc.values()) or 100.0
+    for label in ("Акции", "Металлы", "Другое"):
+        val = alloc[label]
+        sweep = 360.0 * (val / total)
+        draw.pieslice(
+            (
+                donut_center[0] - donut_r,
+                donut_center[1] - donut_r,
+                donut_center[0] + donut_r,
+                donut_center[1] + donut_r,
+            ),
+            start=start,
+            end=start + sweep,
+            fill=colors[label],
+        )
+        start += sweep
+    draw.ellipse(
+        (
+            donut_center[0] - 42,
+            donut_center[1] - 42,
+            donut_center[0] + 42,
+            donut_center[1] + 42,
+        ),
+        fill=alpha((250, 252, 255), 240),
+    )
+    ly = ay1 + 106
+    for label in ("Акции", "Металлы", "Другое"):
+        pct = f"{alloc[label]:.1f}%"
+        draw.rounded_rectangle((ax1 + 205, ly + 5, ax1 + 219, ly + 19), radius=4, fill=colors[label])
+        lname = _fit_line(draw, label, row_font, 110)
+        draw.text((ax1 + 227, ly), lname, fill=(61, 77, 106), font=row_font)
+        pct_fit = _fit_line(draw, pct, row_bold, 84)
+        draw.text((ax2 - 18 - int(draw.textlength(pct_fit, font=row_bold)), ly), pct_fit, fill=(61, 77, 106), font=row_bold)
+        public_texts.extend([lname, pct_fit])
+        ly += 42
+
+    dx1, dy1, dx2, dy2 = dyn_rect
+    draw.text((dx1 + 20, dy1 + 18), "Динамика", fill=(39, 55, 90), font=card_title_font)
+    draw.text((dx1 + 20, dy1 + 64), "Топ 3 лучших активов", fill=(96, 112, 141), font=small_font)
+    ly = dy1 + 95
     for item in top_gainers[:3]:
-        name = str(item.get("shortname") or "").strip() or str(item.get("secid") or "UNKNOWN")
-        draw.text((rx + 24, ly), _fit_line(draw, f"• {name}", text_font, right_w - 150), fill=(42, 56, 88), font=text_font)
-        draw.text((rx + right_w - 116, ly), f"{item['pnl_pct']:+.2f}%", fill=(29, 163, 108), font=text_font)
-        ly += 44
-    if not top_gainers:
-        draw.text((rx + 24, ly), "• н/д", fill=(140, 156, 181), font=text_font)
-        ly += 44
-
-    draw.text((rx + 24, ly + 12), "Top-3 убыточных", fill=(97, 117, 149), font=text_font)
-    ly += 56
+        name = str(item.get("shortname") or item.get("secid") or "UNKNOWN").strip()
+        pct = float(item.get("pnl_pct") or 0.0)
+        pname = _fit_line(draw, name, row_font, right_w - 210)
+        chip = f"▲ {pct_text(pct)}"
+        chip = _fit_line(draw, chip, pct_font, 140)
+        c = tint_by_trend(pct)
+        draw.text((dx1 + 20, ly), pname, fill=(54, 71, 103), font=row_font)
+        tw = int(draw.textlength(chip, font=pct_font))
+        draw.text((dx2 - 18 - tw, ly), chip, fill=c, font=pct_font)
+        public_texts.extend([name, pname, chip])
+        ly += 34
+    draw.line((dx1 + 20, ly + 4, dx2 - 20, ly + 4), fill=(226, 236, 248), width=1)
+    draw.text((dx1 + 20, ly + 14), "Топ 3 худших активов", fill=(96, 112, 141), font=small_font)
+    ly += 45
     for item in top_losers[:3]:
-        name = str(item.get("shortname") or "").strip() or str(item.get("secid") or "UNKNOWN")
-        draw.text((rx + 24, ly), _fit_line(draw, f"• {name}", text_font, right_w - 150), fill=(42, 56, 88), font=text_font)
-        draw.text((rx + right_w - 116, ly), f"{item['pnl_pct']:+.2f}%", fill=(218, 78, 95), font=text_font)
-        ly += 44
-    if not top_losers:
-        draw.text((rx + 24, ly), "• н/д", fill=(140, 156, 181), font=text_font)
-        ly += 44
+        name = str(item.get("shortname") or item.get("secid") or "UNKNOWN").strip()
+        pct = float(item.get("pnl_pct") or 0.0)
+        pname = _fit_line(draw, name, row_font, right_w - 210)
+        chip = f"▼ {pct_text(-abs(pct))}"
+        chip = _fit_line(draw, chip, pct_font, 140)
+        c = tint_by_trend(-abs(pct))
+        draw.text((dx1 + 20, ly), pname, fill=(54, 71, 103), font=row_font)
+        tw = int(draw.textlength(chip, font=pct_font))
+        draw.text((dx2 - 18 - tw, ly), chip, fill=c, font=pct_font)
+        public_texts.extend([name, pname, chip])
+        ly += 34
 
-    spark_top = y + chart_h - 360
-    draw.text((rx + 24, spark_top), "Тренд изменения (условная шкала)", fill=(97, 117, 149), font=ticker_font)
-    plot_x1 = rx + 24
-    plot_y1 = spark_top + 44
-    plot_x2 = rx + right_w - 24
-    plot_y2 = y + chart_h - 34
-    draw.rounded_rectangle((plot_x1, plot_y1, plot_x2, plot_y2), radius=18, fill=(247, 250, 255), outline=(226, 234, 246), width=2)
-    vals = [float(r["ret_30d"]) for r in composition_rows if r.get("ret_30d") is not None][:12]
-    if len(vals) < 3:
-        vals = [0.4, 1.1, 0.8, 1.6, 1.3, 1.9, 1.5, 2.0]
-    mn = min(vals)
-    mx = max(vals)
-    span = max(1e-9, mx - mn)
-    points: list[tuple[int, int]] = []
-    for i, v in enumerate(vals):
-        px = int(plot_x1 + 20 + i * (plot_x2 - plot_x1 - 40) / max(1, len(vals) - 1))
-        py = int(plot_y2 - 20 - ((v - mn) / span) * (plot_y2 - plot_y1 - 40))
-        points.append((px, py))
-    for i in range(1, len(points)):
-        draw.line((points[i - 1], points[i]), fill=(82, 148, 233), width=5)
-    for px, py in points:
-        draw.ellipse((px - 5, py - 5, px + 5, py + 5), fill=(82, 148, 233))
+    y += block_h + 20
 
-    y += table_h + 24
+    # 5) Сравнение с индексом MOEX
+    cmp_h = 192
+    cmp_rect = (pad, y, pad + content_w, y + cmp_h)
+    draw_glass_card(cmp_rect)
+    kx1, ky1, kx2, ky2 = cmp_rect
+    draw.text((kx1 + 22, ky1 + 18), "Сравнение с индексом MOEX (30 дней)", fill=(39, 55, 90), font=card_title_font)
+    port_txt = pct_text(portfolio_return_30d)
+    moex_txt = pct_text(moex_return_30d)
+    alpha_v = None
+    if portfolio_return_30d is not None and moex_return_30d is not None:
+        alpha_v = float(portfolio_return_30d) - float(moex_return_30d)
+    alpha_val = "0.00%" if alpha_v is None else pct_text(alpha_v)
+    alpha_label = "Разница "
+    line_w = (kx2 - kx1) - 44
+    l1, v1 = draw_label_value_line(
+        kx1 + 22,
+        ky1 + 72,
+        "Портфель: ",
+        port_txt,
+        compare_big,
+        compare_big,
+        (54, 71, 103),
+        tint_by_trend(portfolio_return_30d),
+        line_w,
+    )
+    l2, v2 = draw_label_value_line(
+        kx1 + 22,
+        ky1 + 111,
+        "MOEX (IMOEX): ",
+        moex_txt,
+        compare_big,
+        compare_big,
+        (54, 71, 103),
+        tint_by_trend(moex_return_30d),
+        line_w,
+    )
+    l3, v3 = draw_label_value_line(
+        kx1 + 22,
+        ky1 + 150,
+        alpha_label,
+        alpha_val,
+        compare_big,
+        compare_big,
+        (54, 71, 103),
+        tint_by_trend(alpha_v),
+        line_w,
+    )
+    public_texts.extend([l1 + v1, l2 + v2, l3 + v3])
 
-    bottom_h = 300
-    by = card(pad, y, content_w, bottom_h, "Сравнение с индексом MOEX (30 дней)")
-    moex_text = "н/д" if moex_return_30d is None else f"{moex_return_30d:+.2f}%"
-    port_text = "н/д" if portfolio_return_30d is None else f"{portfolio_return_30d:+.2f}%"
-    draw.text((pad + 24, by + 6), f"Портфель: {port_text}", fill=(42, 56, 88), font=text_font)
-    draw.text((pad + 24, by + 54), f"MOEX (IMOEX): {moex_text}", fill=(42, 56, 88), font=text_font)
-    if alpha is None:
-        alpha_text, alpha_color = "Сравнение: н/д", (140, 156, 181)
-    elif alpha >= 0:
-        alpha_text, alpha_color = f"Опережение +{alpha:.2f}%", (29, 163, 108)
-    else:
-        alpha_text, alpha_color = f"Отставание {alpha:.2f}%", (218, 78, 95)
-    draw.text((pad + 24, by + 118), alpha_text, fill=alpha_color, font=metric_font)
+    validate_public_text_policy(public_texts)
 
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    return buf.getvalue()
+    out = io.BytesIO()
+    image.convert("RGB").save(out, format="PNG")
+    return out.getvalue()

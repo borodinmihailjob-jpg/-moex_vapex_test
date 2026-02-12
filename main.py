@@ -1710,7 +1710,15 @@ async def on_portfolio_map_share(call: CallbackQuery):
     composition_rows = []
     for row in rows:
         share_pct = (float(row["value"]) / total_value * 100.0) if total_value > 0 else 0.0
-        composition_rows.append({"instrument_id": int(row["instrument_id"]), "secid": row["secid"], "name_ru": row["shortname"], "share_pct": share_pct})
+        composition_rows.append(
+            {
+                "instrument_id": int(row["instrument_id"]),
+                "secid": row["secid"],
+                "name_ru": row["shortname"],
+                "share_pct": share_pct,
+                "asset_type": row.get("asset_type") or ASSET_TYPE_STOCK,
+            }
+        )
 
     top_gainers = sorted(
         [r for r in rows if r.get("pnl_pct") is not None],
