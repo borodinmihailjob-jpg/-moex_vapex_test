@@ -54,6 +54,7 @@ const el = {
   alertSearchClear: document.getElementById("alertSearchClear"),
   alertSearchResults: document.getElementById("alertSearchResults"),
   alertSelected: document.getElementById("alertSelected"),
+  alertSelectedPrice: document.getElementById("alertSelectedPrice"),
   alertTargetPrice: document.getElementById("alertTargetPrice"),
   alertRange: document.getElementById("alertRange"),
   addAlertBtn: document.getElementById("addAlertBtn"),
@@ -113,14 +114,40 @@ function updateViewport() {
   document.documentElement.style.setProperty("--app-height", `${h}px`);
 }
 
+function ensureActiveFieldVisible() {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement)) return;
+  const vv = window.visualViewport;
+  const rect = active.getBoundingClientRect();
+  const visibleTop = vv ? 8 : 8;
+  const visibleBottom = vv ? vv.height - 14 : window.innerHeight - 14;
+  if (rect.bottom > visibleBottom) {
+    el.content.scrollBy({ top: rect.bottom - visibleBottom + 12, behavior: "smooth" });
+  } else if (rect.top < visibleTop) {
+    el.content.scrollBy({ top: rect.top - visibleTop - 12, behavior: "smooth" });
+  }
+}
+
 function setupKeyboardBehavior() {
   updateViewport();
-  window.addEventListener("resize", updateViewport);
+  window.addEventListener("resize", () => {
+    updateViewport();
+    ensureActiveFieldVisible();
+  });
   if (window.visualViewport) {
-    window.visualViewport.addEventListener("resize", updateViewport);
-    window.visualViewport.addEventListener("scroll", updateViewport);
+    window.visualViewport.addEventListener("resize", () => {
+      updateViewport();
+      ensureActiveFieldVisible();
+    });
+    window.visualViewport.addEventListener("scroll", () => {
+      updateViewport();
+      ensureActiveFieldVisible();
+    });
   }
-  tg?.onEvent?.("viewportChanged", updateViewport);
+  tg?.onEvent?.("viewportChanged", () => {
+    updateViewport();
+    ensureActiveFieldVisible();
+  });
 
   document.addEventListener("focusin", (ev) => {
     const t = ev.target;
@@ -129,6 +156,7 @@ function setupKeyboardBehavior() {
       try {
         t.scrollIntoView({ block: "center", behavior: "smooth" });
       } catch (_) {}
+      ensureActiveFieldVisible();
     }, 140);
   });
 }
@@ -171,10 +199,42 @@ function renderSearchList(container, items, onPick) {
   });
 }
 
-function bindSearch({ inputEl, clearEl, typeEl, resultEl, selectedEl, getSelected, setSelected }) {
+function fiatPrettyName(candidate) {
+  const secid = String(candidate?.secid || "").toUpperCase();
+  const fallback = String(candidate?.shortname || candidate?.name || secid);
+  const map = {
+    USDRUB_TOM: "Доллар США / Российский рубль",
+    USD000UTSTOM: "Доллар США / Российский рубль",
+    EURRUB_TOM: "Евро / Российский рубль",
+    EUR000UTSTOM: "Евро / Российский рубль",
+    CNYRUB_TOM: "Китайский юань / Российский рубль",
+    CNY000TOM: "Китайский юань / Российский рубль",
+  };
+  return map[secid] || fallback;
+}
+
+function buildCandidateLabel(candidate, assetType) {
+  const secid = String(candidate?.secid || "").trim();
+  if (assetType === "fiat") {
+    return `${fiatPrettyName(candidate)} (${secid})`;
+  }
+  return `${candidate.shortname || candidate.name || secid} (${secid})`;
+}
+
+async function loadCurrentPrice({ secid, boardid, asset_type }) {
+  return api("/api/miniapp/price", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ secid, boardid, asset_type }),
+  });
+}
+
+function bindSearch({ inputEl, clearEl, typeEl, resultEl, selectedEl, getSelected, setSelected, onSelected, onCleared }) {
   const showClear = (show) => {
     if (!clearEl) return;
     clearEl.classList.toggle("show", !!show);
+    const wrapper = clearEl.closest(".search-control");
+    if (wrapper) wrapper.classList.toggle("has-clear", !!show);
   };
 
   const clearSelection = ({ focus = false } = {}) => {
@@ -183,6 +243,7 @@ function bindSearch({ inputEl, clearEl, typeEl, resultEl, selectedEl, getSelecte
     resultEl.innerHTML = "";
     selectedEl.textContent = "Инструмент не выбран";
     showClear(false);
+    if (onCleared) onCleared();
     if (focus) {
       inputEl.focus();
     }
@@ -202,6 +263,7 @@ function bindSearch({ inputEl, clearEl, typeEl, resultEl, selectedEl, getSelecte
         setSelected(null);
         selectedEl.textContent = "Инструмент не выбран";
         showClear(false);
+        if (onCleared) onCleared();
       }
       if (!q) {
         resultEl.innerHTML = "";
@@ -209,12 +271,14 @@ function bindSearch({ inputEl, clearEl, typeEl, resultEl, selectedEl, getSelecte
       }
       try {
         const data = await api(`/api/miniapp/search?q=${encodeURIComponent(q)}&asset_type=${encodeURIComponent(typeEl.value)}`);
-        renderSearchList(resultEl, data || [], (picked, label) => {
+        renderSearchList(resultEl, data || [], (picked) => {
+          const label = buildCandidateLabel(picked, typeEl.value);
           setSelected(picked);
-          inputEl.value = String(picked.secid || "").trim() || label;
+          inputEl.value = String(picked.secid || "").trim() || "";
           selectedEl.textContent = `Выбрано: ${label}`;
           resultEl.innerHTML = "";
           showClear(true);
+          if (onSelected) onSelected(picked, label);
         });
       } catch (e) {
         renderEmpty(resultEl, "Ошибка поиска");
@@ -393,6 +457,7 @@ function setupEvents() {
     selectedEl: el.tradeSelected,
     getSelected: () => state.selectedTrade,
     setSelected: (s) => { state.selectedTrade = s; },
+    onCleared: () => {},
   });
   state.searchControllers.lookup = bindSearch({
     inputEl: el.lookupSearch,
@@ -402,7 +467,12 @@ function setupEvents() {
     selectedEl: el.lookupSelected,
     getSelected: () => state.selectedLookup,
     setSelected: (s) => { state.selectedLookup = s; },
+    onCleared: () => {},
   });
+  const resetAlertPrice = () => {
+    el.alertSelectedPrice.textContent = "";
+    el.alertSelectedPrice.classList.remove("price");
+  };
   state.searchControllers.alert = bindSearch({
     inputEl: el.alertSearch,
     clearEl: el.alertSearchClear,
@@ -411,10 +481,31 @@ function setupEvents() {
     selectedEl: el.alertSelected,
     getSelected: () => state.selectedAlert,
     setSelected: (s) => { state.selectedAlert = s; },
+    onSelected: async (picked) => {
+      try {
+        const data = await loadCurrentPrice({
+          secid: picked.secid,
+          boardid: picked.boardid,
+          asset_type: el.alertAssetType.value,
+        });
+        if (data?.price === null || data?.price === undefined) {
+          el.alertSelectedPrice.textContent = "Текущая цена: нет данных";
+        } else {
+          el.alertSelectedPrice.textContent = `Текущая цена: ${money(data.price)}`;
+        }
+      } catch (_) {
+        el.alertSelectedPrice.textContent = "Текущая цена: не удалось загрузить";
+      }
+      el.alertSelectedPrice.classList.add("price");
+    },
+    onCleared: resetAlertPrice,
   });
   el.tradeAssetType.addEventListener("change", () => state.searchControllers.trade?.clearSelection());
   el.lookupAssetType.addEventListener("change", () => state.searchControllers.lookup?.clearSelection());
-  el.alertAssetType.addEventListener("change", () => state.searchControllers.alert?.clearSelection());
+  el.alertAssetType.addEventListener("change", () => {
+    state.searchControllers.alert?.clearSelection();
+    resetAlertPrice();
+  });
 
   el.tradeDate.value = todayDdmmyyyy();
   el.refreshBtn.addEventListener("click", async () => {

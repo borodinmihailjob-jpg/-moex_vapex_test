@@ -423,6 +423,25 @@ async def api_usd_rub(request: web.Request) -> web.Response:
     return _json_ok({"secid": "USDRUB_TOM", "rate": rate, "as_of": datetime.utcnow().isoformat()})
 
 
+async def api_price(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    _ = await _auth_user_id(request, bot_token)
+    payload = await request.json()
+    secid = str(payload.get("secid") or "").strip().upper()
+    if not secid:
+        raise web.HTTPBadRequest(text="secid is required")
+    boardid = str(payload.get("boardid") or "").strip() or None
+    asset_type = str(payload.get("asset_type") or ASSET_TYPE_STOCK).strip().lower()
+    if asset_type not in {ASSET_TYPE_STOCK, ASSET_TYPE_METAL, ASSET_TYPE_FIAT}:
+        raise web.HTTPBadRequest(text="invalid asset_type")
+    async with aiohttp.ClientSession() as session:
+        if asset_type == ASSET_TYPE_FIAT:
+            price = await get_last_price_fiat(session, secid, boardid or "CETS")
+        else:
+            price = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
+    return _json_ok({"secid": secid, "price": price, "as_of": datetime.utcnow().isoformat()})
+
+
 async def api_portfolio_clear(request: web.Request) -> web.Response:
     bot_token = request.app["bot_token"]
     db_dsn = request.app["db_dsn"]
@@ -655,6 +674,7 @@ def attach_miniapp_routes(app: web.Application, db_dsn: str, bot_token: str) -> 
     app.router.add_post("/api/miniapp/asset_lookup", api_asset_lookup_post)
     app.router.add_get("/api/miniapp/top_movers", api_top_movers)
     app.router.add_get("/api/miniapp/usd_rub", api_usd_rub)
+    app.router.add_post("/api/miniapp/price", api_price)
     app.router.add_post("/api/miniapp/portfolio/clear", api_portfolio_clear)
     app.router.add_get("/api/miniapp/settings/open_close", api_open_close_settings)
     app.router.add_post("/api/miniapp/settings/open_close", api_open_close_settings)

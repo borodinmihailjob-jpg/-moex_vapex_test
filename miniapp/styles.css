@@ -158,6 +158,9 @@ input, select {
 }
 .search-control input {
   margin-top: 0;
+  padding-left: 12px;
+}
+.search-control.has-clear input {
   padding-left: 42px;
 }
 .search-clear {
@@ -212,6 +215,10 @@ input:focus, select:focus {
   margin: 6px 0 0;
   font-size: 12px;
   color: var(--muted);
+}
+.hint.price {
+  color: var(--text);
+  font-weight: 600;
 }
 .lookup-result {
   margin-top: 10px;
