@@ -2,74 +2,217 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <title>MOEX Portfolio Mini App</title>
   <link rel="stylesheet" href="/miniapp/styles.css" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
-  <div class="app">
-    <header class="topbar">
-      <h1>Портфель</h1>
-      <p id="userLine">Mini App</p>
+  <div id="app" class="app-shell">
+    <header class="app-header">
+      <div>
+        <h1>MOEX Portfolio</h1>
+        <p id="userLine">Загрузка…</p>
+      </div>
+      <button id="refreshBtn" class="btn ghost">Обновить</button>
     </header>
 
-    <section class="card">
-      <h2>Сводка</h2>
-      <div class="summary-grid">
-        <div>
-          <span class="label">Стоимость</span>
-          <strong id="totalValue">—</strong>
-        </div>
-        <div>
-          <span class="label">P&L</span>
-          <strong id="totalPnl">—</strong>
-        </div>
-      </div>
-    </section>
+    <main id="content" class="content">
+      <section id="tab-dashboard" class="tab-view active">
+        <article class="card summary-card">
+          <h2>Портфель</h2>
+          <div class="summary-grid">
+            <div>
+              <span class="label">Стоимость</span>
+              <strong id="totalValue">—</strong>
+            </div>
+            <div>
+              <span class="label">P&amp;L</span>
+              <strong id="totalPnl">—</strong>
+            </div>
+          </div>
+        </article>
+        <article class="card">
+          <h2>Позиции</h2>
+          <div id="positions" class="list"></div>
+        </article>
+      </section>
 
-    <section class="card">
-      <h2>Позиции</h2>
-      <div id="positions" class="list"></div>
-    </section>
+      <section id="tab-trade" class="tab-view">
+        <article class="card">
+          <h2>Добавить сделку</h2>
+          <div class="form-grid two">
+            <label>Операция
+              <select id="tradeSide">
+                <option value="buy">Покупка</option>
+                <option value="sell">Продажа</option>
+              </select>
+            </label>
+            <label>Тип актива
+              <select id="tradeAssetType">
+                <option value="stock">Акции</option>
+                <option value="metal">Металлы</option>
+                <option value="fiat">Фиат</option>
+              </select>
+            </label>
+          </div>
+          <div class="form-grid two">
+            <label>Дата сделки
+              <input id="tradeDate" type="text" placeholder="dd.mm.yyyy" />
+            </label>
+            <label>Поиск инструмента
+              <input id="tradeSearch" type="text" placeholder="SBER / GLDRUB_TOM / доллар" />
+            </label>
+          </div>
+          <div id="tradeSearchResults" class="list compact"></div>
+          <p id="tradeSelected" class="hint">Инструмент не выбран</p>
+          <div class="form-grid three">
+            <label>Количество
+              <input id="tradeQty" type="number" step="0.0001" min="0" inputmode="decimal" />
+            </label>
+            <label>Цена
+              <input id="tradePrice" type="number" step="0.0001" min="0" inputmode="decimal" />
+            </label>
+            <label>Комиссия
+              <input id="tradeCommission" type="number" step="0.0001" min="0" value="0" inputmode="decimal" />
+            </label>
+          </div>
+          <button id="saveTradeBtn" class="btn primary">Сохранить сделку</button>
+        </article>
+      </section>
 
-    <section class="card">
-      <h2>Добавить алерт</h2>
-      <div class="form-grid">
-        <label>
-          Тип
-          <select id="assetType">
-            <option value="stock">Акции</option>
-            <option value="metal">Металлы</option>
-            <option value="fiat">Фиат</option>
-          </select>
-        </label>
-        <label>
-          Поиск
-          <input id="searchInput" placeholder="SBER / Золото / доллар" />
-        </label>
-      </div>
-      <div id="searchResults" class="list compact"></div>
-      <div class="form-grid">
-        <label>
-          Цена
-          <input id="targetPrice" type="number" step="0.0001" min="0" placeholder="Например 92.5" />
-        </label>
-        <label>
-          Диапазон, %
-          <input id="rangePercent" type="number" step="0.1" min="0" max="50" value="5" />
-        </label>
-      </div>
-      <button id="addAlertBtn" class="btn primary">Сохранить алерт</button>
-      <p id="selectedLine" class="hint">Инструмент не выбран</p>
-    </section>
+      <section id="tab-lookup" class="tab-view">
+        <article class="card">
+          <h2>Поиск цены и динамики</h2>
+          <div class="form-grid two">
+            <label>Тип
+              <select id="lookupAssetType">
+                <option value="stock">Акции</option>
+                <option value="metal">Металлы</option>
+                <option value="fiat">Фиат</option>
+              </select>
+            </label>
+            <label>Поиск
+              <input id="lookupSearch" type="text" placeholder="Тикер или название" />
+            </label>
+          </div>
+          <div id="lookupSearchResults" class="list compact"></div>
+          <p id="lookupSelected" class="hint">Инструмент не выбран</p>
+          <button id="lookupBtn" class="btn primary">Показать динамику</button>
+          <div id="lookupResult" class="lookup-result"></div>
+        </article>
+      </section>
 
-    <section class="card">
-      <h2>Активные алерты</h2>
-      <div id="alerts" class="list"></div>
-    </section>
+      <section id="tab-movers" class="tab-view">
+        <article class="card">
+          <h2>Топ роста/падения</h2>
+          <div class="chips">
+            <button class="chip active" data-day="0">Сегодня</button>
+            <button class="chip" data-day="1">Вчера</button>
+            <button class="chip" data-day="2">Позавчера</button>
+          </div>
+          <p id="moversDate" class="hint"></p>
+          <div class="split-list">
+            <div>
+              <h3>Рост</h3>
+              <div id="moversTop" class="list compact"></div>
+            </div>
+            <div>
+              <h3>Падение</h3>
+              <div id="moversBottom" class="list compact"></div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="tab-alerts" class="tab-view">
+        <article class="card">
+          <h2>Ценовые алерты</h2>
+          <div class="form-grid two">
+            <label>Тип
+              <select id="alertAssetType">
+                <option value="stock">Акции</option>
+                <option value="metal">Металлы</option>
+                <option value="fiat">Фиат</option>
+              </select>
+            </label>
+            <label>Поиск
+              <input id="alertSearch" type="text" placeholder="Тикер или название" />
+            </label>
+          </div>
+          <div id="alertSearchResults" class="list compact"></div>
+          <p id="alertSelected" class="hint">Инструмент не выбран</p>
+          <div class="form-grid two">
+            <label>Цена
+              <input id="alertTargetPrice" type="number" step="0.0001" min="0" inputmode="decimal" />
+            </label>
+            <label>Диапазон ±%
+              <input id="alertRange" type="number" step="0.1" min="0" max="50" value="5" inputmode="decimal" />
+            </label>
+          </div>
+          <button id="addAlertBtn" class="btn primary">Добавить алерт</button>
+        </article>
+        <article class="card">
+          <h2>Активные алерты</h2>
+          <div id="alerts" class="list"></div>
+        </article>
+      </section>
+
+      <section id="tab-more" class="tab-view">
+        <article class="card">
+          <h2>USD/RUB</h2>
+          <div class="row-between">
+            <strong id="usdRubRate">—</strong>
+            <button id="usdRubBtn" class="btn ghost">Обновить</button>
+          </div>
+          <p id="usdRubAsOf" class="hint"></p>
+        </article>
+
+        <article class="card">
+          <h2>Отчеты дня</h2>
+          <div class="toggle-row">
+            <span>4 уведомления (открытие/середина/основная/вечерняя)</span>
+            <label class="switch">
+              <input id="openCloseToggle" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+        </article>
+
+        <article class="card">
+          <h2>Импорт XML</h2>
+          <form id="xmlForm" class="upload-form">
+            <input id="xmlFile" type="file" accept=".xml,text/xml,application/xml" />
+            <button class="btn primary" type="submit">Импортировать</button>
+          </form>
+          <pre id="xmlResult" class="plain"></pre>
+        </article>
+
+        <article class="card">
+          <h2>Почему инвестировать</h2>
+          <div id="articles" class="list compact"></div>
+          <div id="articleText" class="plain"></div>
+        </article>
+
+        <article class="card danger-zone">
+          <h2>Очистка портфеля</h2>
+          <p class="hint">Удалит все сделки и позиции. Необратимо.</p>
+          <button id="clearPortfolioBtn" class="btn danger">Очистить портфель</button>
+        </article>
+      </section>
+    </main>
+
+    <nav class="tabbar" id="tabbar">
+      <button class="tab-btn active" data-tab="dashboard">Портфель</button>
+      <button class="tab-btn" data-tab="trade">Сделка</button>
+      <button class="tab-btn" data-tab="lookup">Поиск</button>
+      <button class="tab-btn" data-tab="movers">Рынок</button>
+      <button class="tab-btn" data-tab="alerts">Алерты</button>
+      <button class="tab-btn" data-tab="more">Ещё</button>
+    </nav>
   </div>
 
+  <div id="toast" class="toast"></div>
   <script src="/miniapp/app.js"></script>
 </body>
 </html>
