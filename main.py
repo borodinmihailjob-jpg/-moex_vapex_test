@@ -667,140 +667,181 @@ def build_portfolio_share_card_png(
 ) -> bytes:
     width = 2200
     height = 3000
-    image = Image.new("RGB", (width, height), (16, 23, 38))
+    image = Image.new("RGB", (width, height), (241, 245, 252))
     draw = ImageDraw.Draw(image)
 
-    title_font = _load_font(78, bold=True)
-    h_font = _load_font(48, bold=True)
-    text_font = _load_font(34, bold=False)
-    small_font = _load_font(30, bold=False)
-    metric_font = _load_font(62, bold=True)
-    ticker_font = _load_font(26, bold=False)
+    title_font = _load_font(74, bold=True)
+    h_font = _load_font(42, bold=True)
+    text_font = _load_font(30, bold=False)
+    small_font = _load_font(24, bold=False)
+    metric_font = _load_font(56, bold=True)
+    ticker_font = _load_font(22, bold=False)
 
-    # Soft gradient background.
-    for y in range(height):
-        t = y / max(1, height - 1)
-        color = _blend((18, 26, 43), (10, 15, 26), t)
-        draw.line([(0, y), (width, y)], fill=color, width=1)
+    # Accent backdrop shapes.
+    draw.ellipse((-220, -260, 540, 420), fill=(233, 244, 255))
+    draw.ellipse((width - 520, -180, width + 140, 420), fill=(223, 251, 242))
 
-    pad = 70
-    card_w = width - 2 * pad
+    pad = 56
+    content_w = width - 2 * pad
     y = pad
 
-    draw.text((pad, y), "Мой портфель на MOEX", fill=(232, 240, 255), font=title_font)
-    y += 94
-    draw.text((pad, y), datetime.now(MSK_TZ).strftime("Снимок на %d.%m.%Y %H:%M МСК"), fill=(145, 168, 198), font=small_font)
-    y += 70
+    def card(x: int, top: int, w: int, h: int, title: str | None = None) -> int:
+        draw.rounded_rectangle((x, top, x + w, top + h), radius=30, fill=(255, 255, 255), outline=(224, 233, 246), width=2)
+        if title:
+            draw.text((x + 24, top + 18), title, fill=(35, 49, 84), font=h_font)
+            return top + 84
+        return top + 18
 
-    def block(x: int, top: int, w: int, h: int, title: str) -> int:
-        draw.rounded_rectangle((x, top, x + w, top + h), radius=36, fill=(25, 36, 56), outline=(45, 68, 102), width=2)
-        draw.text((x + 28, top + 20), title, fill=(224, 236, 255), font=h_font)
-        return top + 95
+    # Header card.
+    header_h = 190
+    hy = card(pad, y, content_w, header_h)
+    draw.text((pad + 26, hy - 6), "Мой портфель на MOEX", fill=(27, 38, 66), font=title_font)
+    draw.text((pad + 28, hy + 78), datetime.now(MSK_TZ).strftime("Снимок на %d.%m.%Y %H:%M МСК"), fill=(108, 128, 162), font=text_font)
+    badge_x = pad + content_w - 230
+    draw.rounded_rectangle((badge_x, hy + 14, badge_x + 180, hy + 74), radius=18, fill=(230, 251, 243))
+    draw.text((badge_x + 28, hy + 28), "SHARE", fill=(28, 151, 104), font=text_font)
+    y += header_h + 24
 
-    # Section 1: composition table sorted by 30d return (best -> worst), max 20 rows.
-    s1_h = 1120
-    cy = block(pad, y, card_w, s1_h, "Состав портфеля")
-    col1_x = pad + 32
-    col2_x = pad + card_w - 640
-    col3_x = pad + card_w - 240
-    header_y = cy
-    draw.text((col1_x, header_y), "Название актива", fill=(166, 191, 225), font=ticker_font)
-    draw.text((col2_x, header_y), "Доля актива в портфеле", fill=(166, 191, 225), font=ticker_font)
-    change_header = _fit_line(
-        draw,
-        "Изменение стоимости актива на бирже за месяц",
-        ticker_font,
-        pad + card_w - 32 - col3_x,
-    )
-    draw.text((col3_x, header_y), change_header, fill=(166, 191, 225), font=ticker_font)
-    draw.line((pad + 28, header_y + 38, pad + card_w - 28, header_y + 38), fill=(55, 80, 116), width=2)
-    cy = header_y + 50
+    # KPI cards row.
+    kpi_h = 220
+    kpi_gap = 18
+    kpi_w = (content_w - 2 * kpi_gap) // 3
+    p30_text = "н/д" if portfolio_return_30d is None else f"{portfolio_return_30d:+.2f}%"
+    p30_color = (29, 163, 108) if (portfolio_return_30d or 0.0) >= 0 else (218, 78, 95)
+    m30_text = "н/д" if moex_return_30d is None else f"{moex_return_30d:+.2f}%"
+    m30_color = (29, 163, 108) if (moex_return_30d or 0.0) >= 0 else (218, 78, 95)
+    alpha = None
+    if portfolio_return_30d is not None and moex_return_30d is not None:
+        alpha = portfolio_return_30d - moex_return_30d
 
-    rows = composition_rows[:20]
-    for item in rows:
+    for i in range(3):
+        x = pad + i * (kpi_w + kpi_gap)
+        cy = card(x, y, kpi_w, kpi_h)
+        if i == 0:
+            draw.text((x + 26, cy + 4), "Рост портфеля (30д)", fill=(97, 117, 149), font=text_font)
+            draw.text((x + 26, cy + 70), p30_text, fill=p30_color, font=metric_font)
+        elif i == 1:
+            draw.text((x + 26, cy + 4), "Индекс MOEX (30д)", fill=(97, 117, 149), font=text_font)
+            draw.text((x + 26, cy + 70), m30_text, fill=m30_color, font=metric_font)
+        else:
+            draw.text((x + 26, cy + 4), "Сравнение", fill=(97, 117, 149), font=text_font)
+            if alpha is None:
+                atxt, acolor = "н/д", (139, 155, 182)
+            elif alpha >= 0:
+                atxt, acolor = f"Опережение +{alpha:.2f}%", (29, 163, 108)
+            else:
+                atxt, acolor = f"Отставание {alpha:.2f}%", (218, 78, 95)
+            draw.text((x + 26, cy + 72), _fit_line(draw, atxt, _load_font(42, bold=True), kpi_w - 52), fill=acolor, font=_load_font(42, bold=True))
+    y += kpi_h + 24
+
+    # Main row: composition table + momentum chart.
+    table_w = int(content_w * 0.68)
+    right_w = content_w - table_w - 18
+    table_h = 1180
+    chart_h = table_h
+
+    # Composition table.
+    ty = card(pad, y, table_w, table_h, "Состав портфеля")
+    col1_x = pad + 24
+    col2_x = pad + table_w - 420
+    col3_x = pad + table_w - 132
+    draw.text((col1_x, ty), "Название актива", fill=(109, 128, 162), font=ticker_font)
+    draw.text((col2_x, ty), "Доля", fill=(109, 128, 162), font=ticker_font)
+    draw.text((col3_x, ty), "Месяц", fill=(109, 128, 162), font=ticker_font)
+    draw.line((pad + 22, ty + 34, pad + table_w - 22, ty + 34), fill=(231, 238, 249), width=2)
+    ty += 48
+    for item in composition_rows[:20]:
         share_pct = float(item.get("share_pct") or 0.0)
         secid = str(item.get("secid") or "UNKNOWN")
         name = str(item.get("name_ru") or "").strip() or secid
         ret_30 = item.get("ret_30d")
-        asset_label = _fit_line(draw, f"{name} ({secid})", text_font, col2_x - col1_x - 26)
-        draw.text((col1_x, cy), asset_label, fill=(222, 232, 246), font=text_font)
-
-        # Mini share bar for visual style without showing money.
+        draw.text((col1_x, ty), _fit_line(draw, f"{name} ({secid})", text_font, col2_x - col1_x - 20), fill=(42, 56, 88), font=text_font)
         bar_x = col2_x
-        bar_y = cy + 10
-        bar_w = 220
-        bar_h = 24
+        bar_w = 170
+        bar_h = 18
+        bar_y = ty + 9
         fill_w = int(max(0.0, min(1.0, share_pct / 100.0)) * bar_w)
-        draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), radius=12, fill=(43, 63, 92))
+        draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), radius=10, fill=(233, 240, 250))
         if fill_w > 0:
-            draw.rounded_rectangle((bar_x, bar_y, bar_x + fill_w, bar_y + bar_h), radius=12, fill=(86, 141, 215))
-        draw.text((bar_x + bar_w + 14, cy + 5), f"{share_pct:.1f}%", fill=(174, 205, 240), font=ticker_font)
-
+            draw.rounded_rectangle((bar_x, bar_y, bar_x + fill_w, bar_y + bar_h), radius=10, fill=(82, 148, 233))
+        draw.text((bar_x + bar_w + 10, ty + 1), f"{share_pct:.1f}%", fill=(97, 117, 149), font=ticker_font)
         if ret_30 is None:
-            ret_text = "н/д"
-            ret_color = (187, 203, 224)
+            rtxt, rcol = "н/д", (140, 156, 181)
         else:
-            ret_val = float(ret_30)
-            ret_text = f"{ret_val:+.2f}%"
-            ret_color = (163, 241, 194) if ret_val >= 0 else (255, 150, 166)
-        draw.text((col3_x, cy), ret_text, fill=ret_color, font=text_font)
-        cy += 50
-        if cy > y + s1_h - 62:
+            rv = float(ret_30)
+            rtxt = f"{rv:+.2f}%"
+            rcol = (29, 163, 108) if rv >= 0 else (218, 78, 95)
+        draw.text((col3_x, ty), rtxt, fill=rcol, font=text_font)
+        ty += 52
+        if ty > y + table_h - 52:
             break
-    y += s1_h + 26
 
-    # Section 2: growth 30d.
-    s2_h = 290
-    cy = block(pad, y, card_w, s2_h, "Рост портфеля за последние 30 дней")
-    p30 = "н/д" if portfolio_return_30d is None else f"{portfolio_return_30d:+.2f}%"
-    p30_color = (163, 241, 194) if (portfolio_return_30d or 0.0) >= 0 else (255, 150, 166)
-    draw.text((pad + 32, cy + 25), p30, fill=p30_color, font=metric_font)
-    y += s2_h + 26
-
-    # Section 3: Top-3 assets.
-    s3_h = 520
-    cy = block(pad, y, card_w, s3_h, "Топ-3 актива")
-    draw.text((pad + 32, cy), "Выгодные:", fill=(178, 244, 202), font=text_font)
-    ly = cy + 44
+    # Right analytics panel.
+    rx = pad + table_w + 18
+    cy = card(rx, y, right_w, chart_h, "Динамика")
+    draw.text((rx + 24, cy + 4), "Top-3 актива", fill=(97, 117, 149), font=text_font)
+    ly = cy + 50
     for item in top_gainers[:3]:
         name = str(item.get("shortname") or "").strip() or str(item.get("secid") or "UNKNOWN")
-        line = _fit_line(draw, f"• {name} {item['pnl_pct']:+.2f}%", text_font, card_w // 2 - 80)
-        draw.text((pad + 44, ly), line, fill=(163, 241, 194), font=text_font)
+        draw.text((rx + 24, ly), _fit_line(draw, f"• {name}", text_font, right_w - 150), fill=(42, 56, 88), font=text_font)
+        draw.text((rx + right_w - 116, ly), f"{item['pnl_pct']:+.2f}%", fill=(29, 163, 108), font=text_font)
         ly += 44
     if not top_gainers:
-        draw.text((pad + 44, ly), "• н/д", fill=(187, 203, 224), font=text_font)
-    ry = cy
-    draw.text((pad + card_w // 2 + 30, ry), "Убыточные:", fill=(255, 185, 194), font=text_font)
-    ry += 44
+        draw.text((rx + 24, ly), "• н/д", fill=(140, 156, 181), font=text_font)
+        ly += 44
+
+    draw.text((rx + 24, ly + 12), "Top-3 убыточных", fill=(97, 117, 149), font=text_font)
+    ly += 56
     for item in top_losers[:3]:
         name = str(item.get("shortname") or "").strip() or str(item.get("secid") or "UNKNOWN")
-        line = _fit_line(draw, f"• {name} {item['pnl_pct']:+.2f}%", text_font, card_w // 2 - 80)
-        draw.text((pad + card_w // 2 + 42, ry), line, fill=(255, 150, 166), font=text_font)
-        ry += 44
+        draw.text((rx + 24, ly), _fit_line(draw, f"• {name}", text_font, right_w - 150), fill=(42, 56, 88), font=text_font)
+        draw.text((rx + right_w - 116, ly), f"{item['pnl_pct']:+.2f}%", fill=(218, 78, 95), font=text_font)
+        ly += 44
     if not top_losers:
-        draw.text((pad + card_w // 2 + 42, ry), "• н/д", fill=(187, 203, 224), font=text_font)
-    y += s3_h + 26
+        draw.text((rx + 24, ly), "• н/д", fill=(140, 156, 181), font=text_font)
+        ly += 44
 
-    # Section 4: portfolio vs MOEX.
-    s4_h = 360
-    cy = block(pad, y, card_w, s4_h, "Сравнение с индексом MOEX (30 дней)")
-    moex = "н/д" if moex_return_30d is None else f"{moex_return_30d:+.2f}%"
-    port = "н/д" if portfolio_return_30d is None else f"{portfolio_return_30d:+.2f}%"
-    alpha = None
-    if portfolio_return_30d is not None and moex_return_30d is not None:
-        alpha = portfolio_return_30d - moex_return_30d
+    # Sparkline block.
+    spark_top = y + chart_h - 360
+    draw.text((rx + 24, spark_top), "Тренд изменения (условная шкала)", fill=(97, 117, 149), font=ticker_font)
+    plot_x1 = rx + 24
+    plot_y1 = spark_top + 44
+    plot_x2 = rx + right_w - 24
+    plot_y2 = y + chart_h - 34
+    draw.rounded_rectangle((plot_x1, plot_y1, plot_x2, plot_y2), radius=18, fill=(247, 250, 255), outline=(226, 234, 246), width=2)
+    # Build pseudo-series from composition monthly returns.
+    vals = [float(r["ret_30d"]) for r in composition_rows if r.get("ret_30d") is not None][:12]
+    if len(vals) < 3:
+        vals = [0.4, 1.1, 0.8, 1.6, 1.3, 1.9, 1.5, 2.0]
+    mn = min(vals)
+    mx = max(vals)
+    span = max(1e-9, mx - mn)
+    points: list[tuple[int, int]] = []
+    for i, v in enumerate(vals):
+        px = int(plot_x1 + 20 + i * (plot_x2 - plot_x1 - 40) / max(1, len(vals) - 1))
+        py = int(plot_y2 - 20 - ((v - mn) / span) * (plot_y2 - plot_y1 - 40))
+        points.append((px, py))
+    for i in range(1, len(points)):
+        draw.line((points[i - 1], points[i]), fill=(82, 148, 233), width=5)
+    for px, py in points:
+        draw.ellipse((px - 5, py - 5, px + 5, py + 5), fill=(82, 148, 233))
+
+    y += table_h + 24
+
+    # Bottom index comparison card.
+    bottom_h = 300
+    by = card(pad, y, content_w, bottom_h, "Сравнение с индексом MOEX (30 дней)")
+    moex_text = "н/д" if moex_return_30d is None else f"{moex_return_30d:+.2f}%"
+    port_text = "н/д" if portfolio_return_30d is None else f"{portfolio_return_30d:+.2f}%"
+    draw.text((pad + 24, by + 6), f"Портфель: {port_text}", fill=(42, 56, 88), font=text_font)
+    draw.text((pad + 24, by + 54), f"MOEX (IMOEX): {moex_text}", fill=(42, 56, 88), font=text_font)
     if alpha is None:
-        alpha_text = "Сравнение: н/д"
-        alpha_color = (187, 203, 224)
+        alpha_text, alpha_color = "Сравнение: н/д", (140, 156, 181)
     elif alpha >= 0:
-        alpha_text = f"Опережение +{alpha:.2f}%"
-        alpha_color = (163, 241, 194)
+        alpha_text, alpha_color = f"Опережение +{alpha:.2f}%", (29, 163, 108)
     else:
-        alpha_text = f"Отставание {alpha:.2f}%"
-        alpha_color = (255, 150, 166)
-    draw.text((pad + 32, cy), f"Портфель: {port}", fill=(220, 232, 248), font=text_font)
-    draw.text((pad + 32, cy + 52), f"MOEX (IMOEX): {moex}", fill=(220, 232, 248), font=text_font)
-    draw.text((pad + 32, cy + 130), alpha_text, fill=alpha_color, font=metric_font)
+        alpha_text, alpha_color = f"Отставание {alpha:.2f}%", (218, 78, 95)
+    draw.text((pad + 24, by + 118), alpha_text, fill=alpha_color, font=metric_font)
 
     buf = io.BytesIO()
     image.save(buf, format="PNG")
