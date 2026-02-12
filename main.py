@@ -38,6 +38,8 @@ from db import (
     list_users_with_alerts,
     update_periodic_last_sent_at,
     update_open_sent_date,
+    update_midday_sent_date,
+    update_main_close_sent_date,
     update_close_sent_date,
     update_day_open_value,
     get_price_alert_states_bulk,
@@ -73,8 +75,14 @@ def _env(name: str) -> str:
 MSK_TZ = ZoneInfo("Europe/Moscow")
 MOEX_OPEN_HOUR = int(_env("MOEX_OPEN_HOUR") or "10")
 MOEX_OPEN_MINUTE = int(_env("MOEX_OPEN_MINUTE") or "0")
-MOEX_CLOSE_HOUR = int(_env("MOEX_CLOSE_HOUR") or "23")
-MOEX_CLOSE_MINUTE = int(_env("MOEX_CLOSE_MINUTE") or "50")
+TRADING_DAY_OPEN_HOUR = int(_env("TRADING_DAY_OPEN_HOUR") or "6")
+TRADING_DAY_OPEN_MINUTE = int(_env("TRADING_DAY_OPEN_MINUTE") or "50")
+TRADING_DAY_MIDDAY_HOUR = int(_env("TRADING_DAY_MIDDAY_HOUR") or "14")
+TRADING_DAY_MIDDAY_MINUTE = int(_env("TRADING_DAY_MIDDAY_MINUTE") or "30")
+TRADING_DAY_MAIN_CLOSE_HOUR_ENV = _env("TRADING_DAY_MAIN_CLOSE_HOUR")
+TRADING_DAY_MAIN_CLOSE_MINUTE_ENV = _env("TRADING_DAY_MAIN_CLOSE_MINUTE")
+TRADING_DAY_EVENING_CLOSE_HOUR = int(_env("TRADING_DAY_EVENING_CLOSE_HOUR") or "23")
+TRADING_DAY_EVENING_CLOSE_MINUTE = int(_env("TRADING_DAY_EVENING_CLOSE_MINUTE") or "50")
 MOEX_EVENT_WINDOW_MIN = 5
 MAX_BROKER_XML_SIZE_BYTES = 5 * 1024 * 1024
 PRICE_FETCH_CONCURRENCY = 20
@@ -90,6 +98,16 @@ CB_PORTFOLIO_MAP_SELF = "pmap:self"
 CB_PORTFOLIO_MAP_SHARE = "pmap:share"
 TRADE_SIDE_BUY = "buy"
 TRADE_SIDE_SELL = "sell"
+
+
+def get_trading_day_main_close_time(now_msk: datetime) -> tuple[int, int]:
+    if TRADING_DAY_MAIN_CLOSE_HOUR_ENV and TRADING_DAY_MAIN_CLOSE_MINUTE_ENV:
+        return int(TRADING_DAY_MAIN_CLOSE_HOUR_ENV), int(TRADING_DAY_MAIN_CLOSE_MINUTE_ENV)
+    switch_date = date(2026, 3, 23)
+    if now_msk.date() >= switch_date:
+        return 19, 0
+    return 18, 50
+
 
 def setup_logging() -> None:
     project_root = Path(__file__).resolve().parent
@@ -793,7 +811,7 @@ async def cmd_start(message: Message):
         "/asset_lookup — текущая цена и динамика за неделю/месяц/6 мес/год\n\n"
         "/top_movers — топ роста/падения акций за текущую сессию\n\n"
         "🔔 Отчеты дня\n"
-        "/trading_day_on — включить отчет торгового дня (открытие/закрытие)\n"
+        "/trading_day_on — включить отчет торгового дня (4 точки: открытие/середина/закрытия)\n"
         "/trading_day_off — выключить отчет торгового дня\n\n"
         "/clear_portfolio — удалить все сделки и очистить портфель\n\n"
         "📥 Импорт\n"
@@ -986,7 +1004,11 @@ async def cmd_trading_day_on(message: Message):
         message,
         True,
         "Дневной отчет включен.\n"
-        "Я пришлю баланс портфеля на открытии и на закрытии торгов, а также результат за торговый день."
+        "Я пришлю состояние портфеля в 4 точки по МСК:\n"
+        "• открытие биржи\n"
+        "• середина торгового дня\n"
+        "• закрытие основной сессии\n"
+        "• закрытие вечерней сессии"
     )
 
 
@@ -1431,8 +1453,11 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
         if now_msk.weekday() < 5:
             today = now_msk.date().isoformat()
             now_min_of_day = now_msk.hour * 60 + now_msk.minute
-            open_min_of_day = MOEX_OPEN_HOUR * 60 + MOEX_OPEN_MINUTE
-            close_min_of_day = MOEX_CLOSE_HOUR * 60 + MOEX_CLOSE_MINUTE
+            open_min_of_day = TRADING_DAY_OPEN_HOUR * 60 + TRADING_DAY_OPEN_MINUTE
+            midday_min_of_day = TRADING_DAY_MIDDAY_HOUR * 60 + TRADING_DAY_MIDDAY_MINUTE
+            main_close_hour, main_close_minute = get_trading_day_main_close_time(now_msk)
+            main_close_min_of_day = main_close_hour * 60 + main_close_minute
+            close_min_of_day = TRADING_DAY_EVENING_CLOSE_HOUR * 60 + TRADING_DAY_EVENING_CLOSE_MINUTE
             if (
                 open_min_of_day <= now_min_of_day < open_min_of_day + MOEX_EVENT_WINDOW_MIN
                 and settings.get("open_last_sent_date") != today
@@ -1450,6 +1475,36 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
                 await update_open_sent_date(DB_DSN, user_id, today)
                 await update_day_open_value(DB_DSN, user_id, today, open_value)
             if (
+                midday_min_of_day <= now_min_of_day < midday_min_of_day + MOEX_EVENT_WINDOW_MIN
+                and settings.get("midday_last_sent_date") != today
+            ):
+                text, midday_value, _ = await build_portfolio_report(user_id)
+                await bot.send_message(
+                    user_id,
+                    (
+                        f"Середина торгового дня (МСК):\n"
+                        f"Баланс портфеля: <b>{money(midday_value or 0.0)}</b> RUB\n\n"
+                        f"{text}"
+                    ),
+                    parse_mode="HTML",
+                )
+                await update_midday_sent_date(DB_DSN, user_id, today)
+            if (
+                main_close_min_of_day <= now_min_of_day < main_close_min_of_day + MOEX_EVENT_WINDOW_MIN
+                and settings.get("main_close_last_sent_date") != today
+            ):
+                text, main_close_value, _ = await build_portfolio_report(user_id)
+                await bot.send_message(
+                    user_id,
+                    (
+                        f"Закрытие основной сессии (МСК):\n"
+                        f"Баланс портфеля: <b>{money(main_close_value or 0.0)}</b> RUB\n\n"
+                        f"{text}"
+                    ),
+                    parse_mode="HTML",
+                )
+                await update_main_close_sent_date(DB_DSN, user_id, today)
+            if (
                 close_min_of_day <= now_min_of_day < close_min_of_day + MOEX_EVENT_WINDOW_MIN
                 and settings.get("close_last_sent_date") != today
             ):
@@ -1460,14 +1515,14 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
                     day_pnl = close_value - float(open_value)
                     day_pnl_text = money_signed(day_pnl)
                     close_header = (
-                        f"Закрытие торгов (МСК):\n"
+                        f"Закрытие вечерней сессии (МСК):\n"
                         f"Баланс на открытии: <b>{money(float(open_value))}</b> RUB\n"
                         f"Баланс на закрытии: <b>{money(close_value)}</b> RUB\n"
                         f"Результат за торговый день: <b>{day_pnl_text}</b> RUB\n\n"
                     )
                 else:
                     close_header = (
-                        f"Закрытие торгов (МСК):\n"
+                        f"Закрытие вечерней сессии (МСК):\n"
                         f"Баланс портфеля на закрытии: <b>{money(close_value or 0.0)}</b> RUB\n"
                         "Результат за торговый день: нет данных (не найден снимок открытия).\n\n"
                     )

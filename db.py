@@ -84,6 +84,10 @@ CREATE TABLE IF NOT EXISTS user_alert_settings (
   open_close_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   open_last_sent_date TEXT,
   open_last_sent_on DATE,
+  midday_last_sent_date TEXT,
+  midday_last_sent_on DATE,
+  main_close_last_sent_date TEXT,
+  main_close_last_sent_on DATE,
   close_last_sent_date TEXT,
   close_last_sent_on DATE,
   day_open_value DOUBLE PRECISION,
@@ -134,6 +138,10 @@ MIGRATION_SQL = [
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS trade_date_date DATE",
     "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS periodic_last_sent_at_ts TIMESTAMPTZ",
     "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS open_last_sent_on DATE",
+    "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS midday_last_sent_date TEXT",
+    "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS midday_last_sent_on DATE",
+    "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS main_close_last_sent_date TEXT",
+    "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS main_close_last_sent_on DATE",
     "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS close_last_sent_on DATE",
     "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS day_open_value_on DATE",
     "ALTER TABLE price_alert_state ADD COLUMN IF NOT EXISTS last_alert_at_ts TIMESTAMPTZ",
@@ -415,6 +423,24 @@ async def _backfill_user_links(conn: asyncpg.Connection) -> None:
         WHERE close_last_sent_on IS NULL
           AND close_last_sent_date IS NOT NULL
           AND close_last_sent_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
+        """
+    )
+    await conn.execute(
+        """
+        UPDATE user_alert_settings
+        SET midday_last_sent_on = midday_last_sent_date::date
+        WHERE midday_last_sent_on IS NULL
+          AND midday_last_sent_date IS NOT NULL
+          AND midday_last_sent_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
+        """
+    )
+    await conn.execute(
+        """
+        UPDATE user_alert_settings
+        SET main_close_last_sent_on = main_close_last_sent_date::date
+        WHERE main_close_last_sent_on IS NULL
+          AND main_close_last_sent_date IS NOT NULL
+          AND main_close_last_sent_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
         """
     )
     await conn.execute(
@@ -1118,6 +1144,10 @@ async def set_open_close_alert(db_path: str, user_id: int, enabled: bool):
                 SET open_close_enabled=$1,
                     open_last_sent_date=NULL,
                     open_last_sent_on=NULL,
+                    midday_last_sent_date=NULL,
+                    midday_last_sent_on=NULL,
+                    main_close_last_sent_date=NULL,
+                    main_close_last_sent_on=NULL,
                     close_last_sent_date=NULL,
                     close_last_sent_on=NULL,
                     day_open_value=NULL,
@@ -1151,6 +1181,10 @@ async def get_user_alert_settings(db_path: str, user_id: int):
                   open_close_enabled,
                   open_last_sent_date,
                   open_last_sent_on,
+                  midday_last_sent_date,
+                  midday_last_sent_on,
+                  main_close_last_sent_date,
+                  main_close_last_sent_on,
                   close_last_sent_date,
                   close_last_sent_on,
                   day_open_value,
@@ -1164,6 +1198,8 @@ async def get_user_alert_settings(db_path: str, user_id: int):
         periodic_ts = row["periodic_last_sent_at_ts"]
         periodic_last_sent_at = periodic_ts.isoformat() if periodic_ts is not None else row["periodic_last_sent_at"]
         open_on = row["open_last_sent_on"]
+        midday_on = row["midday_last_sent_on"]
+        main_close_on = row["main_close_last_sent_on"]
         close_on = row["close_last_sent_on"]
         day_open_on = row["day_open_value_on"]
         return {
@@ -1175,6 +1211,12 @@ async def get_user_alert_settings(db_path: str, user_id: int):
             "drop_percent": float(row["drop_percent"]),
             "open_close_enabled": bool(row["open_close_enabled"]),
             "open_last_sent_date": open_on.isoformat() if open_on is not None else row["open_last_sent_date"],
+            "midday_last_sent_date": (
+                midday_on.isoformat() if midday_on is not None else row["midday_last_sent_date"]
+            ),
+            "main_close_last_sent_date": (
+                main_close_on.isoformat() if main_close_on is not None else row["main_close_last_sent_date"]
+            ),
             "close_last_sent_date": close_on.isoformat() if close_on is not None else row["close_last_sent_date"],
             "day_open_value": (float(row["day_open_value"]) if row["day_open_value"] is not None else None),
             "day_open_value_date": day_open_on.isoformat() if day_open_on is not None else row["day_open_value_date"],
@@ -1240,6 +1282,48 @@ async def update_open_sent_date(db_path: str, user_id: int, date_iso: str):
             )
     except Exception:
         logger.exception("Failed update_open_sent_date user=%s", user_id)
+        raise
+
+
+async def update_midday_sent_date(db_path: str, user_id: int, date_iso: str):
+    try:
+        pool = await _get_pool(db_path)
+        day = _parse_date_iso(date_iso)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE user_alert_settings
+                SET midday_last_sent_date=$1,
+                    midday_last_sent_on=$2
+                WHERE user_id=$3
+                """,
+                date_iso,
+                day,
+                int(user_id),
+            )
+    except Exception:
+        logger.exception("Failed update_midday_sent_date user=%s", user_id)
+        raise
+
+
+async def update_main_close_sent_date(db_path: str, user_id: int, date_iso: str):
+    try:
+        pool = await _get_pool(db_path)
+        day = _parse_date_iso(date_iso)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE user_alert_settings
+                SET main_close_last_sent_date=$1,
+                    main_close_last_sent_on=$2
+                WHERE user_id=$3
+                """,
+                date_iso,
+                day,
+                int(user_id),
+            )
+    except Exception:
+        logger.exception("Failed update_main_close_sent_date user=%s", user_id)
         raise
 
 
