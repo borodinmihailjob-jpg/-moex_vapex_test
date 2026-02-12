@@ -3,3 +3,4 @@ aiohttp
 asyncpg
 python-dotenv
 Pillow
+defusedxml

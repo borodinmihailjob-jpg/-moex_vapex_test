@@ -1,7 +1,7 @@
 import asyncio
 import hashlib
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 import asyncpg
@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS trades (
   external_trade_id TEXT,
   import_source TEXT,
   trade_date TEXT NOT NULL,
+  trade_date_date DATE,
   qty DOUBLE PRECISION NOT NULL,
   price DOUBLE PRECISION NOT NULL,
   commission DOUBLE PRECISION NOT NULL DEFAULT 0
@@ -77,13 +78,17 @@ CREATE TABLE IF NOT EXISTS user_alert_settings (
   periodic_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   periodic_interval_min INTEGER NOT NULL DEFAULT 60,
   periodic_last_sent_at TEXT,
+  periodic_last_sent_at_ts TIMESTAMPTZ,
   drop_alert_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   drop_percent DOUBLE PRECISION NOT NULL DEFAULT 10,
   open_close_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   open_last_sent_date TEXT,
+  open_last_sent_on DATE,
   close_last_sent_date TEXT,
+  close_last_sent_on DATE,
   day_open_value DOUBLE PRECISION,
-  day_open_value_date TEXT
+  day_open_value_date TEXT,
+  day_open_value_on DATE
 );
 
 
@@ -93,6 +98,7 @@ CREATE TABLE IF NOT EXISTS price_alert_state (
   instrument_id BIGINT NOT NULL,
   was_below BOOLEAN NOT NULL DEFAULT FALSE,
   last_alert_at TEXT,
+  last_alert_at_ts TIMESTAMPTZ,
   PRIMARY KEY (user_id, instrument_id)
 );
 
@@ -102,6 +108,12 @@ CREATE TABLE IF NOT EXISTS app_texts (
   button_name TEXT,
   value TEXT NOT NULL,
   active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS schema_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 """
@@ -119,6 +131,13 @@ MIGRATION_SQL = [
     "ALTER TABLE app_texts ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
     "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS day_open_value DOUBLE PRECISION",
     "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS day_open_value_date TEXT",
+    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS trade_date_date DATE",
+    "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS periodic_last_sent_at_ts TIMESTAMPTZ",
+    "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS open_last_sent_on DATE",
+    "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS close_last_sent_on DATE",
+    "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS day_open_value_on DATE",
+    "ALTER TABLE price_alert_state ADD COLUMN IF NOT EXISTS last_alert_at_ts TIMESTAMPTZ",
+    "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
 ]
 
 POST_MIGRATION_INDEX_SQL = [
@@ -139,6 +158,41 @@ _single_instance_lock_key: int | None = None
 
 def _norm_boardid(boardid: str | None) -> str:
     return (boardid or "").strip()
+
+
+def _parse_date_iso(value: str | None) -> date | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _parse_date_ddmmyyyy(value: str | None) -> date | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%d.%m.%Y").date()
+    except ValueError:
+        return None
+
+
+def _parse_iso_utc(value: str | None) -> datetime | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _pick_canonical_metal(rows: list[asyncpg.Record]) -> asyncpg.Record:
@@ -328,6 +382,59 @@ async def _backfill_user_links(conn: asyncpg.Connection) -> None:
           AND u.telegram_user_id = s.user_id
         """
     )
+    await conn.execute(
+        """
+        UPDATE trades
+        SET trade_date_date = TO_DATE(trade_date, 'DD.MM.YYYY')
+        WHERE trade_date_date IS NULL
+          AND trade_date ~ '^\\d{2}\\.\\d{2}\\.\\d{4}$'
+        """
+    )
+    await conn.execute(
+        """
+        UPDATE user_alert_settings
+        SET periodic_last_sent_at_ts = periodic_last_sent_at::timestamptz
+        WHERE periodic_last_sent_at_ts IS NULL
+          AND periodic_last_sent_at IS NOT NULL
+          AND periodic_last_sent_at ~ '^\\d{4}-\\d{2}-\\d{2}T'
+        """
+    )
+    await conn.execute(
+        """
+        UPDATE user_alert_settings
+        SET open_last_sent_on = open_last_sent_date::date
+        WHERE open_last_sent_on IS NULL
+          AND open_last_sent_date IS NOT NULL
+          AND open_last_sent_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
+        """
+    )
+    await conn.execute(
+        """
+        UPDATE user_alert_settings
+        SET close_last_sent_on = close_last_sent_date::date
+        WHERE close_last_sent_on IS NULL
+          AND close_last_sent_date IS NOT NULL
+          AND close_last_sent_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
+        """
+    )
+    await conn.execute(
+        """
+        UPDATE user_alert_settings
+        SET day_open_value_on = day_open_value_date::date
+        WHERE day_open_value_on IS NULL
+          AND day_open_value_date IS NOT NULL
+          AND day_open_value_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
+        """
+    )
+    await conn.execute(
+        """
+        UPDATE price_alert_state
+        SET last_alert_at_ts = last_alert_at::timestamptz
+        WHERE last_alert_at_ts IS NULL
+          AND last_alert_at IS NOT NULL
+          AND last_alert_at ~ '^\\d{4}-\\d{2}-\\d{2}T'
+        """
+    )
 
 
 async def _rebuild_positions(conn: asyncpg.Connection) -> None:
@@ -391,10 +498,53 @@ async def _deduplicate_metal_instruments(conn: asyncpg.Connection) -> None:
         )
 
         for dup_id in dup_ids:
+            await conn.execute(
+                """
+                INSERT INTO price_cache (instrument_id, last_price, updated_at)
+                SELECT $1, pc.last_price, pc.updated_at
+                FROM price_cache pc
+                WHERE pc.instrument_id = $2
+                ON CONFLICT (instrument_id) DO UPDATE
+                SET last_price = CASE
+                      WHEN EXCLUDED.updated_at >= price_cache.updated_at THEN EXCLUDED.last_price
+                      ELSE price_cache.last_price
+                    END,
+                    updated_at = GREATEST(price_cache.updated_at, EXCLUDED.updated_at)
+                """,
+                canonical_id,
+                dup_id,
+            )
+            await conn.execute(
+                """
+                WITH moved AS (
+                  DELETE FROM price_alert_state
+                  WHERE instrument_id = $2
+                  RETURNING user_id, user_ref_id, was_below, last_alert_at, last_alert_at_ts
+                )
+                INSERT INTO price_alert_state (user_id, user_ref_id, instrument_id, was_below, last_alert_at, last_alert_at_ts)
+                SELECT m.user_id, m.user_ref_id, $1, m.was_below, m.last_alert_at, m.last_alert_at_ts
+                FROM moved m
+                ON CONFLICT (user_id, instrument_id) DO UPDATE
+                SET user_ref_id = COALESCE(price_alert_state.user_ref_id, EXCLUDED.user_ref_id),
+                    was_below = price_alert_state.was_below OR EXCLUDED.was_below,
+                    last_alert_at = CASE
+                      WHEN EXCLUDED.last_alert_at_ts IS NULL THEN price_alert_state.last_alert_at
+                      WHEN price_alert_state.last_alert_at_ts IS NULL THEN EXCLUDED.last_alert_at
+                      WHEN EXCLUDED.last_alert_at_ts >= price_alert_state.last_alert_at_ts THEN EXCLUDED.last_alert_at
+                      ELSE price_alert_state.last_alert_at
+                    END,
+                    last_alert_at_ts = CASE
+                      WHEN price_alert_state.last_alert_at_ts IS NULL THEN EXCLUDED.last_alert_at_ts
+                      WHEN EXCLUDED.last_alert_at_ts IS NULL THEN price_alert_state.last_alert_at_ts
+                      ELSE GREATEST(price_alert_state.last_alert_at_ts, EXCLUDED.last_alert_at_ts)
+                    END
+                """,
+                canonical_id,
+                dup_id,
+            )
             await conn.execute("UPDATE trades SET instrument_id = $1 WHERE instrument_id = $2", canonical_id, dup_id)
-            await conn.execute("DELETE FROM price_cache WHERE instrument_id = $1", dup_id)
-            await conn.execute("DELETE FROM price_alert_state WHERE instrument_id = $1", dup_id)
             await conn.execute("DELETE FROM user_positions WHERE instrument_id = $1", dup_id)
+            await conn.execute("DELETE FROM price_cache WHERE instrument_id = $1", dup_id)
             await conn.execute("DELETE FROM instruments WHERE id = $1", dup_id)
 
         logger.info(
@@ -405,8 +555,27 @@ async def _deduplicate_metal_instruments(conn: asyncpg.Connection) -> None:
         )
 
     if merged_any:
-        await conn.execute("DELETE FROM price_cache")
-        await conn.execute("TRUNCATE TABLE price_alert_state")
+        logger.info("Metal deduplication finished with merges")
+
+
+async def _run_one_time_maintenance(conn: asyncpg.Connection, key: str) -> None:
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"schema_meta:{key}")
+    already = await conn.fetchval("SELECT 1 FROM schema_meta WHERE key = $1", key)
+    if already:
+        return
+    await _backfill_user_links(conn)
+    await _deduplicate_metal_instruments(conn)
+    await _rebuild_positions(conn)
+    await conn.execute(
+        """
+        INSERT INTO schema_meta (key, value, updated_at)
+        VALUES ($1, 'done', NOW())
+        ON CONFLICT (key) DO UPDATE
+        SET value = EXCLUDED.value,
+            updated_at = EXCLUDED.updated_at
+        """,
+        key,
+    )
 
 
 async def init_db(db_path: str):
@@ -419,9 +588,7 @@ async def init_db(db_path: str):
                     await conn.execute(sql)
                 for sql in POST_MIGRATION_INDEX_SQL:
                     await conn.execute(sql)
-                await _backfill_user_links(conn)
-                await _deduplicate_metal_instruments(conn)
-                await _rebuild_positions(conn)
+                await _run_one_time_maintenance(conn, "maintenance_v2_done")
         logger.info("Database initialized (PostgreSQL)")
     except Exception:
         logger.exception("Failed to initialize database")
@@ -477,6 +644,7 @@ async def add_trade(
         pool = await _get_pool(db_path)
         qty_f = float(qty)
         cost_f = qty_f * float(price) + float(commission)
+        trade_date_parsed = _parse_date_ddmmyyyy(trade_date) or _parse_date_iso(trade_date)
         inserted = False
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -485,9 +653,9 @@ async def add_trade(
                     """
                     INSERT INTO trades (
                       user_id, user_ref_id, portfolio_id, instrument_id,
-                      external_trade_id, import_source, trade_date, qty, price, commission
+                      external_trade_id, import_source, trade_date, trade_date_date, qty, price, commission
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     ON CONFLICT (user_id, external_trade_id) DO NOTHING
                     RETURNING id
                     """,
@@ -498,6 +666,7 @@ async def add_trade(
                     (external_trade_id or None),
                     (import_source or None),
                     trade_date,
+                    trade_date_parsed,
                     qty_f,
                     float(price),
                     float(commission),
@@ -889,7 +1058,8 @@ async def set_periodic_alert(db_path: str, user_id: int, enabled: bool, interval
                     """
                     UPDATE user_alert_settings
                     SET periodic_enabled=$1,
-                        periodic_last_sent_at=NULL
+                        periodic_last_sent_at=NULL,
+                        periodic_last_sent_at_ts=NULL
                     WHERE user_id=$2
                     """,
                     bool(enabled),
@@ -901,7 +1071,8 @@ async def set_periodic_alert(db_path: str, user_id: int, enabled: bool, interval
                     UPDATE user_alert_settings
                     SET periodic_enabled=$1,
                         periodic_interval_min=$2,
-                        periodic_last_sent_at=NULL
+                        periodic_last_sent_at=NULL,
+                        periodic_last_sent_at_ts=NULL
                     WHERE user_id=$3
                     """,
                     bool(enabled),
@@ -946,9 +1117,12 @@ async def set_open_close_alert(db_path: str, user_id: int, enabled: bool):
                 UPDATE user_alert_settings
                 SET open_close_enabled=$1,
                     open_last_sent_date=NULL,
+                    open_last_sent_on=NULL,
                     close_last_sent_date=NULL,
+                    close_last_sent_on=NULL,
                     day_open_value=NULL,
-                    day_open_value_date=NULL
+                    day_open_value_date=NULL,
+                    day_open_value_on=NULL
                 WHERE user_id=$2
                 """,
                 bool(enabled),
@@ -971,30 +1145,39 @@ async def get_user_alert_settings(db_path: str, user_id: int):
                   periodic_enabled,
                   periodic_interval_min,
                   periodic_last_sent_at,
+                  periodic_last_sent_at_ts,
                   drop_alert_enabled,
                   drop_percent,
                   open_close_enabled,
                   open_last_sent_date,
+                  open_last_sent_on,
                   close_last_sent_date,
+                  close_last_sent_on,
                   day_open_value,
-                  day_open_value_date
+                  day_open_value_date,
+                  day_open_value_on
                 FROM user_alert_settings
                 WHERE user_id=$1
                 """,
                 int(user_id),
             )
+        periodic_ts = row["periodic_last_sent_at_ts"]
+        periodic_last_sent_at = periodic_ts.isoformat() if periodic_ts is not None else row["periodic_last_sent_at"]
+        open_on = row["open_last_sent_on"]
+        close_on = row["close_last_sent_on"]
+        day_open_on = row["day_open_value_on"]
         return {
             "user_id": int(row["user_id"]),
             "periodic_enabled": bool(row["periodic_enabled"]),
             "periodic_interval_min": int(row["periodic_interval_min"]),
-            "periodic_last_sent_at": row["periodic_last_sent_at"],
+            "periodic_last_sent_at": periodic_last_sent_at,
             "drop_alert_enabled": bool(row["drop_alert_enabled"]),
             "drop_percent": float(row["drop_percent"]),
             "open_close_enabled": bool(row["open_close_enabled"]),
-            "open_last_sent_date": row["open_last_sent_date"],
-            "close_last_sent_date": row["close_last_sent_date"],
+            "open_last_sent_date": open_on.isoformat() if open_on is not None else row["open_last_sent_date"],
+            "close_last_sent_date": close_on.isoformat() if close_on is not None else row["close_last_sent_date"],
             "day_open_value": (float(row["day_open_value"]) if row["day_open_value"] is not None else None),
-            "day_open_value_date": row["day_open_value_date"],
+            "day_open_value_date": day_open_on.isoformat() if day_open_on is not None else row["day_open_value_date"],
         }
     except Exception:
         logger.exception("Failed get_user_alert_settings user=%s", user_id)
@@ -1021,10 +1204,17 @@ async def list_users_with_alerts(db_path: str):
 async def update_periodic_last_sent_at(db_path: str, user_id: int, iso_ts: str):
     try:
         pool = await _get_pool(db_path)
+        dt = _parse_iso_utc(iso_ts)
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE user_alert_settings SET periodic_last_sent_at=$1 WHERE user_id=$2",
+                """
+                UPDATE user_alert_settings
+                SET periodic_last_sent_at=$1,
+                    periodic_last_sent_at_ts=$2
+                WHERE user_id=$3
+                """,
                 iso_ts,
+                dt,
                 int(user_id),
             )
     except Exception:
@@ -1035,10 +1225,17 @@ async def update_periodic_last_sent_at(db_path: str, user_id: int, iso_ts: str):
 async def update_open_sent_date(db_path: str, user_id: int, date_iso: str):
     try:
         pool = await _get_pool(db_path)
+        day = _parse_date_iso(date_iso)
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE user_alert_settings SET open_last_sent_date=$1 WHERE user_id=$2",
+                """
+                UPDATE user_alert_settings
+                SET open_last_sent_date=$1,
+                    open_last_sent_on=$2
+                WHERE user_id=$3
+                """,
                 date_iso,
+                day,
                 int(user_id),
             )
     except Exception:
@@ -1049,10 +1246,17 @@ async def update_open_sent_date(db_path: str, user_id: int, date_iso: str):
 async def update_close_sent_date(db_path: str, user_id: int, date_iso: str):
     try:
         pool = await _get_pool(db_path)
+        day = _parse_date_iso(date_iso)
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE user_alert_settings SET close_last_sent_date=$1 WHERE user_id=$2",
+                """
+                UPDATE user_alert_settings
+                SET close_last_sent_date=$1,
+                    close_last_sent_on=$2
+                WHERE user_id=$3
+                """,
                 date_iso,
+                day,
                 int(user_id),
             )
     except Exception:
@@ -1063,16 +1267,19 @@ async def update_close_sent_date(db_path: str, user_id: int, date_iso: str):
 async def update_day_open_value(db_path: str, user_id: int, date_iso: str, open_value: float | None) -> None:
     try:
         pool = await _get_pool(db_path)
+        day = _parse_date_iso(date_iso)
         async with pool.acquire() as conn:
             await conn.execute(
                 """
                 UPDATE user_alert_settings
                 SET day_open_value=$1,
-                    day_open_value_date=$2
-                WHERE user_id=$3
+                    day_open_value_date=$2,
+                    day_open_value_on=$3
+                WHERE user_id=$4
                 """,
                 (float(open_value) if open_value is not None else None),
                 date_iso,
+                day,
                 int(user_id),
             )
     except Exception:
@@ -1095,26 +1302,107 @@ async def get_price_alert_state(db_path: str, user_id: int, instrument_id: int) 
         raise
 
 
+async def get_price_alert_states_bulk(db_path: str, user_id: int, instrument_ids: list[int]) -> dict[int, bool]:
+    if not instrument_ids:
+        return {}
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT instrument_id, was_below
+                FROM price_alert_state
+                WHERE user_id = $1
+                  AND instrument_id = ANY($2::bigint[])
+                """,
+                int(user_id),
+                [int(iid) for iid in instrument_ids],
+            )
+        return {int(row["instrument_id"]): bool(row["was_below"]) for row in rows}
+    except Exception:
+        logger.exception("Failed get_price_alert_states_bulk user=%s count=%s", user_id, len(instrument_ids))
+        raise
+
+
 async def set_price_alert_state(db_path: str, user_id: int, instrument_id: int, was_below: bool, alert_ts: str | None = None):
     try:
         pool = await _get_pool(db_path)
+        alert_dt = _parse_iso_utc(alert_ts)
         async with pool.acquire() as conn:
             user_ref_id, _ = await _get_user_context(conn, int(user_id))
             await conn.execute(
                 """
-                INSERT INTO price_alert_state (user_id, user_ref_id, instrument_id, was_below, last_alert_at)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO price_alert_state (user_id, user_ref_id, instrument_id, was_below, last_alert_at, last_alert_at_ts)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT(user_id, instrument_id) DO UPDATE SET
                   user_ref_id=EXCLUDED.user_ref_id,
                   was_below=EXCLUDED.was_below,
-                  last_alert_at=EXCLUDED.last_alert_at
+                  last_alert_at=EXCLUDED.last_alert_at,
+                  last_alert_at_ts=EXCLUDED.last_alert_at_ts
                 """,
                 int(user_id),
                 user_ref_id,
                 int(instrument_id),
                 bool(was_below),
                 alert_ts,
+                alert_dt,
             )
     except Exception:
         logger.exception("Failed set_price_alert_state user=%s instrument=%s", user_id, instrument_id)
+        raise
+
+
+async def set_price_alert_states_bulk(
+    db_path: str,
+    user_id: int,
+    updates: list[tuple[int, bool, str | None]],
+) -> None:
+    if not updates:
+        return
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            user_ref_id, _ = await _get_user_context(conn, int(user_id))
+            if user_ref_id is None:
+                user_ref_id, _ = await _ensure_user_context(conn, int(user_id))
+            instrument_ids: list[int] = []
+            was_below_values: list[bool] = []
+            alert_text_values: list[str | None] = []
+            alert_ts_values: list[datetime | None] = []
+            for instrument_id, was_below, alert_ts in updates:
+                instrument_ids.append(int(instrument_id))
+                was_below_values.append(bool(was_below))
+                alert_text_values.append(alert_ts)
+                alert_ts_values.append(_parse_iso_utc(alert_ts))
+            await conn.execute(
+                """
+                INSERT INTO price_alert_state (user_id, user_ref_id, instrument_id, was_below, last_alert_at, last_alert_at_ts)
+                SELECT
+                  $1::bigint,
+                  $2::bigint,
+                  x.instrument_id,
+                  x.was_below,
+                  x.last_alert_at,
+                  x.last_alert_at_ts
+                FROM UNNEST(
+                  $3::bigint[],
+                  $4::boolean[],
+                  $5::text[],
+                  $6::timestamptz[]
+                ) AS x(instrument_id, was_below, last_alert_at, last_alert_at_ts)
+                ON CONFLICT(user_id, instrument_id) DO UPDATE SET
+                  user_ref_id = EXCLUDED.user_ref_id,
+                  was_below = EXCLUDED.was_below,
+                  last_alert_at = EXCLUDED.last_alert_at,
+                  last_alert_at_ts = EXCLUDED.last_alert_at_ts
+                """,
+                int(user_id),
+                int(user_ref_id),
+                instrument_ids,
+                was_below_values,
+                alert_text_values,
+                alert_ts_values,
+            )
+    except Exception:
+        logger.exception("Failed set_price_alert_states_bulk user=%s count=%s", user_id, len(updates))
         raise

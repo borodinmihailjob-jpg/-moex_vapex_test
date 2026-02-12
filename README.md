@@ -193,9 +193,20 @@ Telegram-бот для учета сделок, оценки портфеля и
 3. Запустить:
 `python main.py`
 
+## Smoke-check перед деплоем
+
+Быстрая проверка проекта из локального виртуального окружения:
+
+`./.venv/bin/python scripts/smoke_check.py`
+
+Опционально:
+- с проверкой БД (нужен `DATABASE_URL`): `./.venv/bin/python scripts/smoke_check.py --with-db`
+- с live-проверкой MOEX API: `./.venv/bin/python scripts/smoke_check.py --with-network`
+
 ## Технические модули
 
 - `main.py` — Telegram-логика, команды, FSM, генерация карты портфеля, воркер уведомлений.
 - `db.py` — инициализация и доступ к PostgreSQL, позиции и алерты.
 - `moex_iss.py` — рыночные API MOEX/ALGOPACK, fallback, поиск, цены, история, movers, snapshot.
 - `broker_report_xml.py` — парсинг XML брокерского отчета.
+- `portfolio_cards.py` — рендер PNG-карт (карта портфеля и share-карточка).

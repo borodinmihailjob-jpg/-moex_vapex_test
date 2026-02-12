@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-import xml.etree.ElementTree as ET
+from defusedxml import ElementTree as ET
 
 from moex_iss import ASSET_TYPE_METAL, ASSET_TYPE_STOCK
 
@@ -45,12 +45,12 @@ def _to_ddmmyyyy(ts: str) -> str:
 def parse_broker_report_xml(xml_bytes: bytes) -> list[ParsedBrokerTrade]:
     try:
         xml_text = xml_bytes.decode("utf-8-sig")
-    except Exception as exc:
+    except UnicodeDecodeError as exc:
         raise ValueError("Файл не похож на UTF-8 XML выписку") from exc
 
     try:
         root = ET.fromstring(xml_text)
-    except Exception as exc:
+    except ET.ParseError as exc:
         raise ValueError("Не удалось разобрать XML") from exc
 
     if root.tag != "report_broker":

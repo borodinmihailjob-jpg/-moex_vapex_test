@@ -2,8 +2,10 @@ import asyncio
 import aiohttp
 import logging
 import os
+from dataclasses import dataclass
 from contextvars import ContextVar
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 ISS_BASE = "https://iss.moex.com/iss"
 ALGOPACK_BASE = "https://apim.moex.com/iss"
@@ -15,20 +17,32 @@ ISS_TIMEOUT = aiohttp.ClientTimeout(total=12, connect=4, sock_connect=4, sock_re
 ASSET_TYPE_STOCK = "stock"
 ASSET_TYPE_METAL = "metal"
 DELAYED_WARNING_TEXT = "(данные с задержкой в 15 минут)"
+MSK_TZ = ZoneInfo("Europe/Moscow")
 
-_delayed_data_used_var: ContextVar[bool] = ContextVar("moex_delayed_data_used", default=False)
+
+@dataclass
+class DataSourceFlags:
+    delayed_data_used: bool = False
+
+
+_data_source_flags_var: ContextVar[DataSourceFlags | None] = ContextVar("moex_data_source_flags", default=None)
 
 
 def reset_data_source_flags() -> None:
-    _delayed_data_used_var.set(False)
+    _data_source_flags_var.set(DataSourceFlags())
 
 
 def delayed_data_used() -> bool:
-    return bool(_delayed_data_used_var.get())
+    flags = _data_source_flags_var.get()
+    return bool(flags.delayed_data_used) if flags is not None else False
 
 
 def mark_delayed_data_used() -> None:
-    _delayed_data_used_var.set(True)
+    flags = _data_source_flags_var.get()
+    if flags is None:
+        flags = DataSourceFlags()
+        _data_source_flags_var.set(flags)
+    flags.delayed_data_used = True
 
 
 def _get_algopack_api_key() -> str:
@@ -126,7 +140,7 @@ async def get_json_with_fallback_source(
     if token:
         try:
             return await algopack_get_json(session, path, params=params), False
-        except Exception as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
             logger.warning(
                 "ALGOPACK failed, fallback to ISS path=%s error=%s",
                 path,
@@ -234,7 +248,7 @@ async def get_last_price_stock_shares(session: aiohttp.ClientSession, secid: str
     if price is None:
         logger.warning("No LAST marketdata for secid=%s boardid=%s", secid, boardid)
         return None
-    logger.info("Last price secid=%s boardid=%s last=%s", secid, boardid, price)
+    logger.debug("Last price secid=%s boardid=%s last=%s", secid, boardid, price)
     return price
 
 async def get_last_price_metal(session: aiohttp.ClientSession, secid: str, boardid: str | None = None) -> float | None:
@@ -270,7 +284,7 @@ async def get_last_price_metal(session: aiohttp.ClientSession, secid: str, board
     if price is None:
         logger.warning("No metal LAST marketdata for secid=%s boardid=%s", secid, boardid)
         return None
-    logger.info("Last metal price secid=%s boardid=%s last=%s", secid, boardid, price)
+    logger.debug("Last metal price secid=%s boardid=%s last=%s", secid, boardid, price)
     return price
 
 async def get_last_price_by_asset_type(
@@ -351,7 +365,7 @@ async def get_stock_day_movers(session: aiohttp.ClientSession, boardid: str = "T
         try:
             open_f = float(open_px)
             last_f = float(last_px)
-        except Exception:
+        except (TypeError, ValueError):
             continue
         vol_today = None
         if vol_i is not None and vol_i < len(row):
@@ -359,7 +373,7 @@ async def get_stock_day_movers(session: aiohttp.ClientSession, boardid: str = "T
             if raw_vol is not None:
                 try:
                     vol_today = float(raw_vol)
-                except Exception:
+                except (TypeError, ValueError):
                     vol_today = None
         val_today = None
         if val_i is not None and val_i < len(row):
@@ -367,7 +381,7 @@ async def get_stock_day_movers(session: aiohttp.ClientSession, boardid: str = "T
             if raw_val is not None:
                 try:
                     val_today = float(raw_val)
-                except Exception:
+                except (TypeError, ValueError):
                     val_today = None
         if open_f <= 0:
             continue
@@ -397,7 +411,7 @@ async def get_stock_movers_by_date(
     Для текущего дня: OPEN -> LAST и VOLTODAY из marketdata.
     Для прошлых дней: OPEN -> CLOSE и VOLUME из history.
     """
-    if trade_date >= datetime.now().date():
+    if trade_date >= datetime.now(MSK_TZ).date():
         return await get_stock_day_movers(session, boardid=boardid)
 
     path = f"/history/engines/stock/markets/shares/boards/{boardid}/securities.json"
@@ -486,7 +500,7 @@ async def get_stock_movers_by_date(
             try:
                 open_f = float(open_px)
                 close_f = float(close_px)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if open_f <= 0:
                 continue
@@ -496,7 +510,7 @@ async def get_stock_movers_by_date(
                 if raw is not None:
                     try:
                         vol_day = float(raw)
-                    except Exception:
+                    except (TypeError, ValueError):
                         vol_day = None
             val_day = None
             if val_i is not None and val_i < len(row):
@@ -504,7 +518,7 @@ async def get_stock_movers_by_date(
                 if raw is not None:
                     try:
                         val_day = float(raw)
-                    except Exception:
+                    except (TypeError, ValueError):
                         val_day = None
             pct = (close_f - open_f) / open_f * 100.0
             out.append(
@@ -534,7 +548,7 @@ async def get_stock_movers_by_date(
                 shortname = str(row.get("shortname") or "").strip()
                 if not shortname or shortname == secid:
                     row["shortname"] = names_map.get(secid) or shortname or secid
-        except Exception:
+        except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError):
             logger.warning("Failed enriching shortnames for board=%s", boardid)
 
     return out
@@ -583,7 +597,7 @@ async def get_stock_snapshot(
             return None
         try:
             return float(v)
-        except Exception:
+        except (TypeError, ValueError):
             return None
 
     shortname = None
@@ -650,7 +664,7 @@ async def get_stock_avg_daily_volume(
             f = float(v)
             if f >= 0:
                 values.append(f)
-        except Exception:
+        except (TypeError, ValueError):
             continue
     if not values:
         return None
@@ -771,7 +785,7 @@ async def get_history_prices_by_asset_type(
             try:
                 trade_day = date.fromisoformat(str(dt_raw))
                 out.append((trade_day, float(px)))
-            except Exception:
+            except (TypeError, ValueError):
                 continue
 
         if len(rows) < 100:
@@ -847,7 +861,7 @@ async def get_moex_index_return_percent(
                 continue
             try:
                 points.append((date.fromisoformat(str(dt_raw)), float(px_raw)))
-            except Exception:
+            except (TypeError, ValueError):
                 continue
 
         if len(rows) < 100:
