@@ -781,6 +781,89 @@ async def get_history_prices_by_asset_type(
     out.sort(key=lambda x: x[0])
     return out
 
+
+async def get_moex_index_return_percent(
+    session: aiohttp.ClientSession,
+    from_date: date,
+    till_date: date,
+    secid: str = "IMOEX",
+) -> float | None:
+    """
+    Доходность индекса MOEX за период [from_date, till_date] в процентах.
+    """
+    path = f"/history/engines/stock/markets/index/securities/{secid}.json"
+    start = 0
+    points: list[tuple[date, float]] = []
+    use_iss_only = False
+
+    while True:
+        params = {
+            "iss.meta": "off",
+            "from": from_date.isoformat(),
+            "till": till_date.isoformat(),
+            "start": start,
+        }
+        if use_iss_only:
+            data = await iss_get_json(session, path, params=params)
+            delayed = True
+        else:
+            data, delayed = await get_json_with_fallback_source(session, path, params=params)
+            if delayed:
+                use_iss_only = True
+
+        hist = data.get("history", {})
+        cols = hist.get("columns", [])
+        rows = hist.get("data", [])
+        if not rows and start == 0 and not delayed:
+            logger.warning("ALGOPACK index history is empty for secid=%s; retry via ISS", secid)
+            mark_delayed_data_used()
+            data = await iss_get_json(session, path, params=params)
+            use_iss_only = True
+            hist = data.get("history", {})
+            cols = hist.get("columns", [])
+            rows = hist.get("data", [])
+        if not rows:
+            break
+
+        idx = {str(c).upper(): i for i, c in enumerate(cols)}
+        dt_i = idx.get("TRADEDATE")
+        if dt_i is None:
+            break
+        price_i = None
+        for candidate in ("CLOSE", "CLOSEVALUE", "LEGALCLOSEPRICE", "CURRENTVALUE", "WAPRICE"):
+            found = idx.get(candidate)
+            if found is not None:
+                price_i = found
+                break
+        if price_i is None:
+            break
+
+        for row in rows:
+            if dt_i >= len(row) or price_i >= len(row):
+                continue
+            dt_raw = row[dt_i]
+            px_raw = row[price_i]
+            if not dt_raw or px_raw is None:
+                continue
+            try:
+                points.append((date.fromisoformat(str(dt_raw)), float(px_raw)))
+            except Exception:
+                continue
+
+        if len(rows) < 100:
+            break
+        start += len(rows)
+
+    if len(points) < 2:
+        return None
+
+    points.sort(key=lambda x: x[0])
+    first = float(points[0][1])
+    last = float(points[-1][1])
+    if first <= 0:
+        return None
+    return (last - first) / first * 100.0
+
 def _parse_securities_rows(data: dict) -> list[dict]:
     sec = data.get("securities", {})
     cols = sec.get("columns", [])

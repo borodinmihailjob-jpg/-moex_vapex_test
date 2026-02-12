@@ -54,6 +54,7 @@ from moex_iss import (
     ASSET_TYPE_STOCK,
     DELAYED_WARNING_TEXT,
     delayed_data_used,
+    get_moex_index_return_percent,
     get_stock_movers_by_date,
     get_history_prices_by_asset_type,
     get_last_price_by_asset_type,
@@ -85,6 +86,8 @@ BTN_ALERTS = "Настройки уведомлений"
 BTN_WHY_INVEST = "Зачем инвестировать"
 BTN_ASSET_LOOKUP = "Поиск цены"
 BTN_PORTFOLIO_MAP = "Карта портфеля"
+CB_PORTFOLIO_MAP_SELF = "pmap:self"
+CB_PORTFOLIO_MAP_SHARE = "pmap:share"
 TRADE_SIDE_BUY = "buy"
 TRADE_SIDE_SELL = "sell"
 
@@ -369,6 +372,13 @@ async def make_edit_step_kb():
     kb.adjust(1)
     return kb.as_markup()
 
+async def make_portfolio_map_mode_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🧩 Карта для себя", callback_data=CB_PORTFOLIO_MAP_SELF)
+    kb.button(text="📤 Поделиться картой портфеля", callback_data=CB_PORTFOLIO_MAP_SHARE)
+    kb.adjust(1)
+    return kb.as_markup()
+
 def make_main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -547,6 +557,11 @@ def _fit_line(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, m
     return out + "..." if out else ""
 
 
+def _text_height(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
+    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+    return max(1, int(bottom - top))
+
+
 def build_portfolio_map_png(tiles: list[dict]) -> bytes:
     width = 2800
     height = 1700
@@ -607,15 +622,16 @@ def build_portfolio_map_png(tiles: list[dict]) -> bytes:
         px = x1 + 10
         py = y1 + 8
 
-        if inner_w >= 180 and inner_h >= 70:
-            secid = _fit_line(draw, str(tile["secid"]), secid_font, inner_w - 20)
+        secid = _fit_line(draw, str(tile["secid"]), secid_font, inner_w - 20)
+        secid_h = _text_height(draw, secid, secid_font)
+        if inner_w >= 180 and inner_h >= max(70, secid_h + 18):
             draw.text((px, py), secid, fill=fg_color, font=secid_font)
-            py += 45
-        if inner_w >= 220 and inner_h >= 110:
-            shortname = _fit_line(draw, str(tile.get("shortname") or ""), name_font, inner_w - 20)
-            if shortname:
-                draw.text((px, py), shortname, fill=fg_color, font=name_font)
-                py += 34
+            py += secid_h + 6
+        shortname = _fit_line(draw, str(tile.get("shortname") or ""), name_font, inner_w - 20)
+        name_h = _text_height(draw, shortname, name_font) if shortname else 0
+        if shortname and inner_w >= 220 and (y1 + inner_h - py) >= (name_h + 18):
+            draw.text((px, py), shortname, fill=fg_color, font=name_font)
+            py += name_h + 6
 
         if inner_w >= 240 and inner_h >= 150:
             val = f"{money(float(tile['value']))} RUB"
@@ -632,7 +648,111 @@ def build_portfolio_map_png(tiles: list[dict]) -> bytes:
                 stat = "P&L: н/д"
             else:
                 stat = f"P&L {pnl_pct:+.2f}%"
-            draw.text((x1 + inner_w - 12 - draw.textlength(stat, font=stat_font), y1 + 10), stat, fill=fg_color, font=stat_font)
+            stat_w = int(draw.textlength(stat, font=stat_font))
+            if stat_w <= (inner_w - 24):
+                draw.text((x1 + inner_w - 12 - stat_w, y1 + 10), stat, fill=fg_color, font=stat_font)
+
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def build_portfolio_share_card_png(
+    *,
+    instruments: list[dict],
+    portfolio_return_30d: float | None,
+    moex_return_30d: float | None,
+    top_gainers: list[dict],
+    top_losers: list[dict],
+) -> bytes:
+    width = 2200
+    height = 2800
+    image = Image.new("RGB", (width, height), (16, 23, 38))
+    draw = ImageDraw.Draw(image)
+
+    title_font = _load_font(78, bold=True)
+    h_font = _load_font(48, bold=True)
+    text_font = _load_font(34, bold=False)
+    small_font = _load_font(30, bold=False)
+    metric_font = _load_font(62, bold=True)
+
+    # Soft gradient background.
+    for y in range(height):
+        t = y / max(1, height - 1)
+        color = _blend((18, 26, 43), (10, 15, 26), t)
+        draw.line([(0, y), (width, y)], fill=color, width=1)
+
+    pad = 70
+    card_w = width - 2 * pad
+    y = pad
+
+    draw.text((pad, y), "Портфель: Share Card", fill=(232, 240, 255), font=title_font)
+    y += 94
+    draw.text((pad, y), datetime.now(MSK_TZ).strftime("Снимок на %d.%m.%Y %H:%M МСК"), fill=(145, 168, 198), font=small_font)
+    y += 70
+
+    def block(x: int, top: int, w: int, h: int, title: str) -> int:
+        draw.rounded_rectangle((x, top, x + w, top + h), radius=36, fill=(25, 36, 56), outline=(45, 68, 102), width=2)
+        draw.text((x + 28, top + 20), title, fill=(224, 236, 255), font=h_font)
+        return top + 95
+
+    # Section 1: instruments sorted by size, without sums.
+    s1_h = 870
+    cy = block(pad, y, card_w, s1_h, "Текущие инструменты (от большего к меньшему)")
+    for i, item in enumerate(instruments[:16], 1):
+        share_pct = float(item.get("share_pct") or 0.0)
+        secid = str(item.get("secid") or "UNKNOWN")
+        name = str(item.get("shortname") or "").strip()
+        label = f"{i}. {secid}" + (f" - {name}" if name else "")
+        label = _fit_line(draw, label, text_font, card_w - 360)
+        draw.text((pad + 32, cy), label, fill=(222, 232, 246), font=text_font)
+        draw.text((pad + card_w - 175, cy), f"{share_pct:.1f}%", fill=(158, 232, 191), font=text_font)
+        cy += 46
+        if cy > y + s1_h - 56:
+            break
+    y += s1_h + 26
+
+    # Section 2: growth 30d.
+    s2_h = 290
+    cy = block(pad, y, card_w, s2_h, "Рост портфеля за последние 30 дней")
+    p30 = "н/д" if portfolio_return_30d is None else f"{portfolio_return_30d:+.2f}%"
+    p30_color = (163, 241, 194) if (portfolio_return_30d or 0.0) >= 0 else (255, 150, 166)
+    draw.text((pad + 32, cy + 25), p30, fill=p30_color, font=metric_font)
+    y += s2_h + 26
+
+    # Section 3: Top gainers/losers.
+    s3_h = 520
+    cy = block(pad, y, card_w, s3_h, "Топ-3: самые выгодные и самые убыточные")
+    draw.text((pad + 32, cy), "Выгодные:", fill=(178, 244, 202), font=text_font)
+    ly = cy + 44
+    for item in top_gainers[:3]:
+        draw.text((pad + 44, ly), f"• {item['secid']} {item['pnl_pct']:+.2f}%", fill=(163, 241, 194), font=text_font)
+        ly += 44
+    if not top_gainers:
+        draw.text((pad + 44, ly), "• н/д", fill=(187, 203, 224), font=text_font)
+    ry = cy
+    draw.text((pad + card_w // 2 + 30, ry), "Убыточные:", fill=(255, 185, 194), font=text_font)
+    ry += 44
+    for item in top_losers[:3]:
+        draw.text((pad + card_w // 2 + 42, ry), f"• {item['secid']} {item['pnl_pct']:+.2f}%", fill=(255, 150, 166), font=text_font)
+        ry += 44
+    if not top_losers:
+        draw.text((pad + card_w // 2 + 42, ry), "• н/д", fill=(187, 203, 224), font=text_font)
+    y += s3_h + 26
+
+    # Section 4: portfolio vs MOEX.
+    s4_h = 360
+    cy = block(pad, y, card_w, s4_h, "Сравнение с индексом MOEX (30 дней)")
+    moex = "н/д" if moex_return_30d is None else f"{moex_return_30d:+.2f}%"
+    port = "н/д" if portfolio_return_30d is None else f"{portfolio_return_30d:+.2f}%"
+    alpha = None
+    if portfolio_return_30d is not None and moex_return_30d is not None:
+        alpha = portfolio_return_30d - moex_return_30d
+    alpha_text = "н/д" if alpha is None else f"{alpha:+.2f}%"
+    alpha_color = (163, 241, 194) if (alpha or 0.0) >= 0 else (255, 150, 166)
+    draw.text((pad + 32, cy), f"Портфель: {port}", fill=(220, 232, 248), font=text_font)
+    draw.text((pad + 32, cy + 52), f"MOEX (IMOEX): {moex}", fill=(220, 232, 248), font=text_font)
+    draw.text((pad + 32, cy + 130), f"Отставание/опережение: {alpha_text}", fill=alpha_color, font=metric_font)
 
     buf = io.BytesIO()
     image.save(buf, format="PNG")
@@ -955,7 +1075,7 @@ async def cmd_start(message: Message):
         "💼 Портфель\n"
         "/add_trade — добавить сделку (покупка/продажа)\n"
         "/portfolio — текущая стоимость портфеля и P&L\n"
-        "/portfolio_map — карта портфеля (акции и металлы)\n"
+        "/portfolio_map — выбор режима: «Карта для себя» или «Поделиться картой»\n"
         "/asset_lookup — текущая цена и динамика за неделю/месяц/6 мес/год\n\n"
         "/top_movers — топ роста/падения акций за текущую сессию\n\n"
         "🔔 Отчеты дня\n"
@@ -1338,55 +1458,185 @@ async def cmd_portfolio(message: Message):
         await message.answer("\n".join(chunk), parse_mode="HTML")
 
 
-async def cmd_portfolio_map(message: Message):
-    user_id = message.from_user.id if message.from_user else None
-    if not user_id:
-        await message.answer("Не удалось определить пользователя.")
-        return
-
+async def _build_portfolio_map_rows(user_id: int) -> tuple[list[dict], int]:
     positions = await get_user_positions(DB_DSN, user_id)
     if not positions:
-        await message.answer("Портфель пуст. Добавьте сделки через /add_trade.")
-        return
+        return [], 0
 
-    reset_data_source_flags()
     prices = await _load_prices_for_positions(positions)
-
-    tiles: list[dict] = []
+    rows: list[dict] = []
+    unknown_prices = 0
     for pos in positions:
         qty = float(pos.get("total_qty") or 0.0)
         if qty <= 1e-12:
             continue
         last = prices.get(int(pos["id"]))
         if last is None:
+            unknown_prices += 1
             continue
         total_cost = float(pos.get("total_cost") or 0.0)
         value = qty * float(last)
         if value <= 0:
             continue
-        pnl = value - total_cost
-        pnl_pct = (pnl / total_cost * 100.0) if abs(total_cost) > 1e-12 else None
-        tiles.append(
+        pnl_pct = (value - total_cost) / total_cost * 100.0 if abs(total_cost) > 1e-12 else None
+        rows.append(
             {
+                "instrument_id": int(pos["id"]),
                 "secid": str(pos.get("secid") or "").strip() or "UNKNOWN",
                 "shortname": (pos.get("shortname") or "").strip(),
-                "value": value,
-                "weight": value,
+                "boardid": pos.get("boardid"),
+                "asset_type": pos.get("asset_type") or ASSET_TYPE_STOCK,
+                "qty": qty,
+                "last": float(last),
+                "value": float(value),
                 "pnl_pct": pnl_pct,
             }
         )
+    rows.sort(key=lambda x: float(x["value"]), reverse=True)
+    return rows, unknown_prices
 
-    if not tiles:
-        await message.answer("Нет рыночных данных по инструментам для построения карты.")
+
+async def _compute_portfolio_return_30d(
+    rows: list[dict],
+) -> tuple[float | None, dict[int, float]]:
+    if not rows:
+        return None, {}
+    from_date = datetime.now(MSK_TZ).date() - timedelta(days=30)
+    till_date = datetime.now(MSK_TZ).date()
+    sem = asyncio.Semaphore(PRICE_FETCH_CONCURRENCY)
+    base_price_map: dict[int, float] = {}
+
+    async with aiohttp.ClientSession() as session:
+        async def load_base(row: dict) -> None:
+            async with sem:
+                try:
+                    history = await get_history_prices_by_asset_type(
+                        session,
+                        secid=row["secid"],
+                        boardid=row.get("boardid"),
+                        asset_type=row.get("asset_type") or ASSET_TYPE_STOCK,
+                        from_date=from_date,
+                        till_date=till_date,
+                    )
+                    if history and history[0][1] > 0:
+                        base_price_map[int(row["instrument_id"])] = float(history[0][1])
+                except Exception:
+                    logger.warning("Failed loading 30d history for secid=%s", row.get("secid"))
+
+        await asyncio.gather(*(load_base(row) for row in rows))
+
+    base_total = 0.0
+    current_total = 0.0
+    for row in rows:
+        iid = int(row["instrument_id"])
+        base_price = base_price_map.get(iid)
+        if base_price is None or base_price <= 0:
+            continue
+        qty = float(row["qty"])
+        base_total += qty * base_price
+        current_total += qty * float(row["last"])
+    if base_total <= 1e-12:
+        return None, base_price_map
+    return (current_total - base_total) / base_total * 100.0, base_price_map
+
+
+async def cmd_portfolio_map(message: Message):
+    await message.answer("Выбери режим карты портфеля:", reply_markup=await make_portfolio_map_mode_kb())
+
+
+async def on_portfolio_map_self(call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else None
+    if not user_id or call.message is None:
+        await call.answer("Не удалось определить пользователя", show_alert=True)
         return
 
+    reset_data_source_flags()
+    rows, unknown_prices = await _build_portfolio_map_rows(user_id)
+    if not rows:
+        await safe_edit_text(call.message, "Нет рыночных данных по инструментам для построения карты.")
+        await call.answer()
+        return
+
+    tiles = [
+        {
+            "secid": row["secid"],
+            "shortname": row["shortname"],
+            "value": row["value"],
+            "weight": row["value"],
+            "pnl_pct": row["pnl_pct"],
+        }
+        for row in rows
+    ]
     image_bytes = build_portfolio_map_png(tiles)
     caption = f"Карта портфеля ({len(tiles)} инструментов: акции и металлы)"
+    if unknown_prices:
+        caption += f"\nИнструментов без рыночной цены: {unknown_prices}"
     caption = append_delayed_warning(caption)
-    await message.answer_document(
+    await call.message.answer_document(
         document=BufferedInputFile(image_bytes, filename="portfolio_map.png"),
         caption=caption,
     )
+    await call.answer()
+
+
+async def on_portfolio_map_share(call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else None
+    if not user_id or call.message is None:
+        await call.answer("Не удалось определить пользователя", show_alert=True)
+        return
+
+    reset_data_source_flags()
+    rows, _ = await _build_portfolio_map_rows(user_id)
+    if not rows:
+        await safe_edit_text(call.message, "Нет данных для share-карточки. Добавьте сделки через /add_trade.")
+        await call.answer()
+        return
+
+    total_value = sum(float(row["value"]) for row in rows)
+    instruments = []
+    for row in rows:
+        share_pct = (float(row["value"]) / total_value * 100.0) if total_value > 0 else 0.0
+        instruments.append(
+            {
+                "secid": row["secid"],
+                "shortname": row["shortname"],
+                "share_pct": share_pct,
+            }
+        )
+
+    top_gainers = sorted(
+        [r for r in rows if r.get("pnl_pct") is not None],
+        key=lambda x: float(x["pnl_pct"]),
+        reverse=True,
+    )[:3]
+    top_losers = sorted(
+        [r for r in rows if r.get("pnl_pct") is not None and float(r["pnl_pct"]) < 0],
+        key=lambda x: float(x["pnl_pct"]),
+    )[:3]
+
+    portfolio_return_30d, _ = await _compute_portfolio_return_30d(rows)
+    from_date = datetime.now(MSK_TZ).date() - timedelta(days=30)
+    till_date = datetime.now(MSK_TZ).date()
+    moex_return_30d = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            moex_return_30d = await get_moex_index_return_percent(session, from_date, till_date)
+    except Exception:
+        logger.warning("Failed loading IMOEX return for share card")
+
+    image_bytes = build_portfolio_share_card_png(
+        instruments=instruments,
+        portfolio_return_30d=portfolio_return_30d,
+        moex_return_30d=moex_return_30d,
+        top_gainers=top_gainers,
+        top_losers=top_losers,
+    )
+    caption = append_delayed_warning("Share-карточка портфеля (без раскрытия сумм)")
+    await call.message.answer_document(
+        document=BufferedInputFile(image_bytes, filename="portfolio_share_card.png"),
+        caption=caption,
+    )
+    await call.answer()
 
 def _parse_iso_utc(value: str | None) -> datetime | None:
     if not value:
@@ -2081,6 +2331,8 @@ async def main():
     dp.message.register(cmd_market_reports_off, Command("market_reports_off"), StateFilter("*"))
     dp.message.register(cmd_alerts_status, Command("alerts_status"), StateFilter("*"))
     dp.callback_query.register(on_top_movers_date_pick, StateFilter("*"), F.data.startswith("tmdate:"))
+    dp.callback_query.register(on_portfolio_map_self, StateFilter("*"), F.data == CB_PORTFOLIO_MAP_SELF)
+    dp.callback_query.register(on_portfolio_map_share, StateFilter("*"), F.data == CB_PORTFOLIO_MAP_SHARE)
     dp.message.register(on_menu_add_trade, StateFilter("*"), F.text == BTN_ADD_TRADE)
     dp.message.register(on_menu_portfolio, StateFilter("*"), F.text == BTN_PORTFOLIO)
     dp.message.register(on_menu_portfolio_map, StateFilter("*"), F.text == BTN_PORTFOLIO_MAP)
