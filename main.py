@@ -60,6 +60,7 @@ from moex_iss import (
     get_stock_movers_by_date,
     get_history_prices_by_asset_type,
     get_last_price_by_asset_type,
+    get_usd_rub_rate,
     reset_data_source_flags,
     search_metals,
     search_securities,
@@ -810,6 +811,7 @@ async def cmd_start(message: Message):
         "/clear_portfolio — удалить все сделки и очистить портфель\n"
         "🚀 Рынок сегодня\n"
         "/top_movers — лидеры роста и падения за выбранную сессию\n"
+        "/usd_rub — текущий курс USD/RUB (MOEX)\n"
         "🔔 Отчёты дня\n"
         "/trading_day_on — включить отчёт по итогам торгов (открытие/закрытие)\n"
         "/trading_day_off — выключить отчёт\n"
@@ -847,6 +849,22 @@ async def cmd_top_movers(message: Message):
         "Выбери дату для топа роста/падения:",
         reply_markup=await make_top_movers_dates_kb(selected=None),
     )
+
+
+async def cmd_usd_rub(message: Message):
+    reset_data_source_flags()
+    async with aiohttp.ClientSession() as session:
+        rate = await get_usd_rub_rate(session)
+    if rate is None:
+        await message.answer("Не удалось получить курс USD/RUB с MOEX.")
+        return
+    now_msk = datetime.now(MSK_TZ).strftime("%d.%m.%Y %H:%M")
+    text = (
+        "USD/RUB (MOEX, USDRUB_TOM)\n"
+        f"Курс: <b>{rate:.4f}</b>\n"
+        f"Время (МСК): {now_msk}"
+    )
+    await message.answer(append_delayed_warning(text), parse_mode="HTML")
 
 
 async def on_top_movers_date_pick(call: CallbackQuery):
@@ -2104,6 +2122,7 @@ async def main():
     dp.message.register(cmd_portfolio, Command("portfolio"), StateFilter("*"))
     dp.message.register(cmd_portfolio_map, Command("portfolio_map"), StateFilter("*"))
     dp.message.register(cmd_top_movers, Command("top_movers"), StateFilter("*"))
+    dp.message.register(cmd_usd_rub, Command("usd_rub"), StateFilter("*"))
     dp.message.register(cmd_clear_portfolio, Command("clear_portfolio"), StateFilter("*"))
     dp.message.register(cmd_asset_lookup, Command("asset_lookup"), StateFilter("*"))
     dp.message.register(cmd_import_broker_xml, Command("import_broker_xml"), StateFilter("*"))
