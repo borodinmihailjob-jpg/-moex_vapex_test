@@ -3,6 +3,7 @@ import logging
 import asyncio
 import html
 import io
+from urllib.parse import urlparse, urlunparse
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta, date
@@ -161,10 +162,30 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = _env("BOT_TOKEN") or _env("TELEGRAM_BOT_TOKEN")
 DB_DSN = _env("DATABASE_URL") or _env("DB_DSN") or _env("DB_PATH")
 MINIAPP_URL = _env("MINIAPP_URL")
+
+
+def _normalize_miniapp_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    value = url.strip()
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return value.rstrip("/")
+    path = parsed.path or ""
+    if path in ("", "/"):
+        path = "/miniapp"
+    elif path == "/miniapp/":
+        path = "/miniapp"
+    return urlunparse(parsed._replace(path=path))
+
+
 if not MINIAPP_URL:
     ext = (_env("RENDER_EXTERNAL_URL") or "").rstrip("/")
     if ext:
         MINIAPP_URL = f"{ext}/miniapp"
+MINIAPP_URL = _normalize_miniapp_url(MINIAPP_URL)
 
 class AddTradeFlow(StatesGroup):
     waiting_date_mode = State()
@@ -2035,8 +2056,13 @@ async def start_health_server():
     async def healthz(_request: web.Request):
         return web.json_response({"ok": True, "service": "moex_portfolio_bot"})
 
+    async def root_handler(request: web.Request):
+        if BOT_TOKEN and DB_DSN:
+            raise web.HTTPFound("/miniapp")
+        return await healthz(request)
+
     app = web.Application()
-    app.router.add_get("/", healthz)
+    app.router.add_get("/", root_handler)
     app.router.add_get("/healthz", healthz)
     if BOT_TOKEN and DB_DSN:
         attach_miniapp_routes(app, DB_DSN, BOT_TOKEN)
