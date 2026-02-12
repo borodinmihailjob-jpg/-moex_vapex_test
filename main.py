@@ -659,14 +659,14 @@ def build_portfolio_map_png(tiles: list[dict]) -> bytes:
 
 def build_portfolio_share_card_png(
     *,
-    instruments: list[dict],
+    composition_rows: list[dict],
     portfolio_return_30d: float | None,
     moex_return_30d: float | None,
     top_gainers: list[dict],
     top_losers: list[dict],
 ) -> bytes:
     width = 2200
-    height = 2800
+    height = 3000
     image = Image.new("RGB", (width, height), (16, 23, 38))
     draw = ImageDraw.Draw(image)
 
@@ -675,6 +675,7 @@ def build_portfolio_share_card_png(
     text_font = _load_font(34, bold=False)
     small_font = _load_font(30, bold=False)
     metric_font = _load_font(62, bold=True)
+    ticker_font = _load_font(26, bold=False)
 
     # Soft gradient background.
     for y in range(height):
@@ -686,7 +687,7 @@ def build_portfolio_share_card_png(
     card_w = width - 2 * pad
     y = pad
 
-    draw.text((pad, y), "Портфель: Share Card", fill=(232, 240, 255), font=title_font)
+    draw.text((pad, y), "Мой портфель на MOEX", fill=(232, 240, 255), font=title_font)
     y += 94
     draw.text((pad, y), datetime.now(MSK_TZ).strftime("Снимок на %d.%m.%Y %H:%M МСК"), fill=(145, 168, 198), font=small_font)
     y += 70
@@ -696,19 +697,40 @@ def build_portfolio_share_card_png(
         draw.text((x + 28, top + 20), title, fill=(224, 236, 255), font=h_font)
         return top + 95
 
-    # Section 1: instruments sorted by size, without sums.
-    s1_h = 870
-    cy = block(pad, y, card_w, s1_h, "Текущие инструменты (от большего к меньшему)")
-    for i, item in enumerate(instruments[:16], 1):
+    # Section 1: composition sorted by 30d return (best -> worst), max 20 rows.
+    s1_h = 1120
+    cy = block(pad, y, card_w, s1_h, "Состав портфеля")
+    rows = composition_rows[:20]
+    for i, item in enumerate(rows, 1):
         share_pct = float(item.get("share_pct") or 0.0)
         secid = str(item.get("secid") or "UNKNOWN")
-        name = str(item.get("shortname") or "").strip()
-        label = f"{i}. {secid}" + (f" - {name}" if name else "")
-        label = _fit_line(draw, label, text_font, card_w - 360)
+        name = str(item.get("name_ru") or "").strip() or secid
+        ret_30 = item.get("ret_30d")
+        label = _fit_line(draw, f"{i}. {name}", text_font, card_w - 590)
         draw.text((pad + 32, cy), label, fill=(222, 232, 246), font=text_font)
-        draw.text((pad + card_w - 175, cy), f"{share_pct:.1f}%", fill=(158, 232, 191), font=text_font)
-        cy += 46
-        if cy > y + s1_h - 56:
+        draw.text((pad + 44, cy + 34), _fit_line(draw, secid, ticker_font, 260), fill=(134, 157, 188), font=ticker_font)
+
+        # Mini share bar for visual style without showing money.
+        bar_x = pad + card_w - 560
+        bar_y = cy + 12
+        bar_w = 220
+        bar_h = 24
+        fill_w = int(max(0.0, min(1.0, share_pct / 100.0)) * bar_w)
+        draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), radius=12, fill=(43, 63, 92))
+        if fill_w > 0:
+            draw.rounded_rectangle((bar_x, bar_y, bar_x + fill_w, bar_y + bar_h), radius=12, fill=(86, 141, 215))
+        draw.text((bar_x + bar_w + 14, cy + 6), f"{share_pct:.1f}%", fill=(174, 205, 240), font=ticker_font)
+
+        if ret_30 is None:
+            ret_text = "н/д"
+            ret_color = (187, 203, 224)
+        else:
+            ret_val = float(ret_30)
+            ret_text = f"{ret_val:+.2f}%"
+            ret_color = (163, 241, 194) if ret_val >= 0 else (255, 150, 166)
+        draw.text((pad + card_w - 190, cy), ret_text, fill=ret_color, font=text_font)
+        cy += 50
+        if cy > y + s1_h - 62:
             break
     y += s1_h + 26
 
@@ -720,13 +742,15 @@ def build_portfolio_share_card_png(
     draw.text((pad + 32, cy + 25), p30, fill=p30_color, font=metric_font)
     y += s2_h + 26
 
-    # Section 3: Top gainers/losers.
+    # Section 3: Top-3 assets.
     s3_h = 520
-    cy = block(pad, y, card_w, s3_h, "Топ-3: самые выгодные и самые убыточные")
+    cy = block(pad, y, card_w, s3_h, "Топ-3 актива")
     draw.text((pad + 32, cy), "Выгодные:", fill=(178, 244, 202), font=text_font)
     ly = cy + 44
     for item in top_gainers[:3]:
-        draw.text((pad + 44, ly), f"• {item['secid']} {item['pnl_pct']:+.2f}%", fill=(163, 241, 194), font=text_font)
+        name = str(item.get("shortname") or "").strip() or str(item.get("secid") or "UNKNOWN")
+        line = _fit_line(draw, f"• {name} {item['pnl_pct']:+.2f}%", text_font, card_w // 2 - 80)
+        draw.text((pad + 44, ly), line, fill=(163, 241, 194), font=text_font)
         ly += 44
     if not top_gainers:
         draw.text((pad + 44, ly), "• н/д", fill=(187, 203, 224), font=text_font)
@@ -734,7 +758,9 @@ def build_portfolio_share_card_png(
     draw.text((pad + card_w // 2 + 30, ry), "Убыточные:", fill=(255, 185, 194), font=text_font)
     ry += 44
     for item in top_losers[:3]:
-        draw.text((pad + card_w // 2 + 42, ry), f"• {item['secid']} {item['pnl_pct']:+.2f}%", fill=(255, 150, 166), font=text_font)
+        name = str(item.get("shortname") or "").strip() or str(item.get("secid") or "UNKNOWN")
+        line = _fit_line(draw, f"• {name} {item['pnl_pct']:+.2f}%", text_font, card_w // 2 - 80)
+        draw.text((pad + card_w // 2 + 42, ry), line, fill=(255, 150, 166), font=text_font)
         ry += 44
     if not top_losers:
         draw.text((pad + card_w // 2 + 42, ry), "• н/д", fill=(187, 203, 224), font=text_font)
@@ -748,11 +774,18 @@ def build_portfolio_share_card_png(
     alpha = None
     if portfolio_return_30d is not None and moex_return_30d is not None:
         alpha = portfolio_return_30d - moex_return_30d
-    alpha_text = "н/д" if alpha is None else f"{alpha:+.2f}%"
-    alpha_color = (163, 241, 194) if (alpha or 0.0) >= 0 else (255, 150, 166)
+    if alpha is None:
+        alpha_text = "Сравнение: н/д"
+        alpha_color = (187, 203, 224)
+    elif alpha >= 0:
+        alpha_text = f"Опережение +{alpha:.2f}%"
+        alpha_color = (163, 241, 194)
+    else:
+        alpha_text = f"Отставание {alpha:.2f}%"
+        alpha_color = (255, 150, 166)
     draw.text((pad + 32, cy), f"Портфель: {port}", fill=(220, 232, 248), font=text_font)
     draw.text((pad + 32, cy + 52), f"MOEX (IMOEX): {moex}", fill=(220, 232, 248), font=text_font)
-    draw.text((pad + 32, cy + 130), f"Отставание/опережение: {alpha_text}", fill=alpha_color, font=metric_font)
+    draw.text((pad + 32, cy + 130), alpha_text, fill=alpha_color, font=metric_font)
 
     buf = io.BytesIO()
     image.save(buf, format="PNG")
@@ -1593,16 +1626,10 @@ async def on_portfolio_map_share(call: CallbackQuery):
         return
 
     total_value = sum(float(row["value"]) for row in rows)
-    instruments = []
+    composition_rows = []
     for row in rows:
         share_pct = (float(row["value"]) / total_value * 100.0) if total_value > 0 else 0.0
-        instruments.append(
-            {
-                "secid": row["secid"],
-                "shortname": row["shortname"],
-                "share_pct": share_pct,
-            }
-        )
+        composition_rows.append({"instrument_id": int(row["instrument_id"]), "secid": row["secid"], "name_ru": row["shortname"], "share_pct": share_pct})
 
     top_gainers = sorted(
         [r for r in rows if r.get("pnl_pct") is not None],
@@ -1614,7 +1641,23 @@ async def on_portfolio_map_share(call: CallbackQuery):
         key=lambda x: float(x["pnl_pct"]),
     )[:3]
 
-    portfolio_return_30d, _ = await _compute_portfolio_return_30d(rows)
+    portfolio_return_30d, base_price_map = await _compute_portfolio_return_30d(rows)
+    rows_by_id = {int(row["instrument_id"]): row for row in rows}
+    for item in composition_rows:
+        iid = int(item["instrument_id"])
+        row = rows_by_id.get(iid)
+        if row is None:
+            item["ret_30d"] = None
+            continue
+        base_price = base_price_map.get(iid)
+        if base_price is None or base_price <= 0:
+            item["ret_30d"] = None
+            continue
+        item["ret_30d"] = (float(row["last"]) - float(base_price)) / float(base_price) * 100.0
+    composition_rows.sort(
+        key=lambda x: float(x["ret_30d"]) if x.get("ret_30d") is not None else -10**9,
+        reverse=True,
+    )
     from_date = datetime.now(MSK_TZ).date() - timedelta(days=30)
     till_date = datetime.now(MSK_TZ).date()
     moex_return_30d = None
@@ -1625,7 +1668,7 @@ async def on_portfolio_map_share(call: CallbackQuery):
         logger.warning("Failed loading IMOEX return for share card")
 
     image_bytes = build_portfolio_share_card_png(
-        instruments=instruments,
+        composition_rows=composition_rows,
         portfolio_return_30d=portfolio_return_30d,
         moex_return_30d=moex_return_30d,
         top_gainers=top_gainers,
