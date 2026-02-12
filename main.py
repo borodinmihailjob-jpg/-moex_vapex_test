@@ -417,9 +417,9 @@ async def make_alerts_list_kb(alerts: list[dict]):
         range_percent = float(alert.get("range_percent") or 0.0)
         label = f"{shortname} ({secid})" if shortname else secid
         if range_percent > 0:
-            text = f"{label}: {money(target_price)} ±{range_percent:g}%"
+            text = f"🔔 {label}: {money(target_price)} ±{range_percent:g}%"
         else:
-            text = f"{label}: {money(target_price)}"
+            text = f"🔔 {label}: {money(target_price)}"
         kb.button(text=text[:64], callback_data=f"talert:{int(alert['id'])}")
     kb.adjust(1)
     return kb.as_markup()
@@ -732,7 +732,10 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
         if last is None:
             unknown_prices += 1
             lines.append(
-                f"• {asset_name} - {ticker_safe} - {qty:g} {unit} - Общая стоимость актива: нет данных - P&L: нет данных"
+                f"• <b>{asset_name}</b> (<code>{ticker_safe}</code>)\n"
+                f"  Кол-во: {qty:g} {unit}\n"
+                "  Стоимость: н/д\n"
+                "  P&L: н/д"
             )
             continue
 
@@ -748,7 +751,10 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
         else:
             pnl_tail = f"{emoji} {pnl_pct:+.2f}% {money_signed(pnl)} RUB"
         lines.append(
-            f"• {asset_name} - {ticker_safe} - {qty:g} {unit} - Общая стоимость актива: <b>{money(value)}</b> RUB - P&L {pnl_tail}"
+            f"• <b>{asset_name}</b> (<code>{ticker_safe}</code>)\n"
+            f"  Кол-во: {qty:g} {unit}\n"
+            f"  Стоимость: <b>{money(value)}</b> RUB\n"
+            f"  P&L: {pnl_tail}"
         )
 
     total_pnl = total_value_known - total_cost_known
@@ -759,7 +765,8 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
     else:
         total_pnl_text = f"{total_emoji} {total_pnl_pct:+.2f}% <b>{money_signed(total_pnl)} RUB</b>"
     footer = (
-        f"💰 Итоговая стоимость активов по всем тикерам: <b>{money(total_value_known)}</b> RUB\n"
+        f"💰 <b>Итоги портфеля</b>\n"
+        f"Стоимость активов: <b>{money(total_value_known)}</b> RUB\n"
         f"P&L: {total_pnl_text}"
     )
     if unknown_prices:
@@ -767,7 +774,7 @@ async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[
     if delayed_data_used():
         footer += f"\n{DELAYED_WARNING_TEXT}"
 
-    text = "💼 Портфель:\n" + "\n".join(lines) + "\n\n" + footer
+    text = "💼 <b>Портфель</b>\n\n" + "\n\n".join(lines) + "\n\n" + footer
     return (text, total_value_known, positions)
 
 
@@ -971,7 +978,7 @@ async def cmd_alert(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(PriceTargetAlertFlow.waiting_asset_type)
     await message.answer(
-        "На что поставить алерт?",
+        "🔔 Настройка ценового алерта\n\nВыберите тип инструмента:",
         reply_markup=await make_alert_asset_type_kb(),
     )
 
@@ -1028,7 +1035,10 @@ async def on_alert_query(message: Message, state: FSMContext):
         return
     await state.update_data(cands=cands)
     await state.set_state(PriceTargetAlertFlow.waiting_pick)
-    await message.answer(append_delayed_warning("Выбери инструмент:"), reply_markup=await make_alert_candidates_kb(cands))
+    await message.answer(
+        append_delayed_warning("Нашел варианты. Выберите инструмент для алерта:"),
+        reply_markup=await make_alert_candidates_kb(cands),
+    )
 
 
 async def on_alert_pick(call: CallbackQuery, state: FSMContext):
@@ -1050,7 +1060,7 @@ async def on_alert_pick(call: CallbackQuery, state: FSMContext):
     name_line = f"{shortname} ({secid})" if shortname else secid
     await safe_edit_text(
         call.message,
-        f"Выбран инструмент: {name_line}\n\nВведи целевую цену (например 92.5):",
+        f"✅ Инструмент выбран: {name_line}\n\nВведите целевую цену (например 92.5):",
     )
     await call.answer()
 
@@ -1067,7 +1077,7 @@ async def on_alert_target_price(message: Message, state: FSMContext):
     await state.update_data(target_price=target_price)
     await state.set_state(PriceTargetAlertFlow.waiting_range_confirm)
     await message.answer(
-        "Сообщить, когда цена будет в диапазоне от -5% до +5% от указанной?",
+        "Применить диапазон срабатывания ±5% от целевой цены?",
         reply_markup=await make_alert_range_confirm_kb(),
     )
 
@@ -1120,12 +1130,13 @@ async def on_alert_range_confirm(call: CallbackQuery, state: FSMContext):
     await safe_edit_text(
         call.message,
         (
-            "Алерт сохранен.\n"
+            "✅ Алерт сохранен\n\n"
             f"Инструмент: {shortname} ({secid})\n"
             f"Целевая цена: {money(float(target_price))}\n"
             f"Диапазон: {range_line}\n"
-            f"Антиспам: не чаще 1 раза в {TARGET_ALERT_ANTISPAM_MIN} минут."
+            f"Антиспам: 1 сообщение в {TARGET_ALERT_ANTISPAM_MIN} минут."
         ),
+        reply_markup=None,
     )
     await state.clear()
     await call.answer()
@@ -1140,7 +1151,7 @@ async def cmd_alerts_list(message: Message):
     if not alerts:
         await message.answer("У вас нет активных ценовых алертов. Добавьте через /alert.")
         return
-    await message.answer("Ваши активные ценовые алерты:", reply_markup=await make_alerts_list_kb(alerts))
+    await message.answer("📌 Активные ценовые алерты:", reply_markup=await make_alerts_list_kb(alerts))
 
 
 async def on_alerts_list_refresh(call: CallbackQuery):
@@ -1153,7 +1164,7 @@ async def on_alerts_list_refresh(call: CallbackQuery):
         await safe_edit_text(call.message, "У вас нет активных ценовых алертов. Добавьте через /alert.")
         await call.answer()
         return
-    await safe_edit_text(call.message, "Ваши активные ценовые алерты:", reply_markup=await make_alerts_list_kb(alerts))
+    await safe_edit_text(call.message, "📌 Активные ценовые алерты:", reply_markup=await make_alerts_list_kb(alerts))
     await call.answer()
 
 
@@ -1183,9 +1194,9 @@ async def on_alert_pick_to_disable(call: CallbackQuery):
     await safe_edit_text(
         call.message,
         (
-            f"Отключить алерт?\n\n"
+            "Отключить этот алерт?\n\n"
             f"Инструмент: {label}\n"
-            f"Цена: {money(target_price)}\n"
+            f"Целевая цена: {money(target_price)}\n"
             f"Диапазон: {range_line}"
         ),
         reply_markup=await make_alert_disable_confirm_kb(alert_id),
@@ -1216,7 +1227,7 @@ async def on_alert_disable_confirm(call: CallbackQuery):
         return
     await safe_edit_text(
         call.message,
-        "Алерт отключен. Оставшиеся активные алерты:",
+        "✅ Алерт отключен.\n\nОставшиеся активные алерты:",
         reply_markup=await make_alerts_list_kb(alerts),
     )
     await call.answer("Отключено")
@@ -1953,7 +1964,9 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
             await bot.send_message(
                 user_id,
                 append_delayed_warning(
-                    f"Цена инструмента {shortname} ({secid}) достигла {money(current)}"
+                    "🔔 Сработал ценовой алерт\n"
+                    f"Инструмент: {shortname} ({secid})\n"
+                    f"Текущая цена: {money(current)}"
                 ),
             )
             await update_price_target_alert_last_sent(DB_DSN, int(alert["id"]), now_utc.isoformat())
