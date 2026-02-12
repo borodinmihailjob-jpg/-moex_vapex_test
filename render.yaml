@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: moex-portfolio-bot
     runtime: python
     plan: free

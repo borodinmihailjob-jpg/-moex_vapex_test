@@ -27,6 +27,7 @@ Telegram-бот для учета сделок, оценки портфеля и
 | `/market_reports_off` | Выключить отчеты торгового дня |
 | `/alerts_status` | Показать статус всех уведомлений |
 | `/why_invest` | Показать обучающие/информационные тексты |
+| `/miniapp` | Открыть Mini App интерфейс |
 
 ## Расширенное описание функций
 
@@ -224,6 +225,7 @@ Telegram-бот для учета сделок, оценки портфеля и
 - `BOT_TOKEN`
 - `DATABASE_URL`
 - `ALGOPACK_API_KEY` (рекомендуется)
+- `MINIAPP_URL` (обязательно для открытия Mini App, например `https://your-domain/miniapp`)
 
 3. Запустить:
 `python main.py`
@@ -237,6 +239,27 @@ Telegram-бот для учета сделок, оценки портфеля и
 Опционально:
 - с проверкой БД (нужен `DATABASE_URL`): `./.venv/bin/python scripts/smoke_check.py --with-db`
 - с live-проверкой MOEX API: `./.venv/bin/python scripts/smoke_check.py --with-network`
+
+## Mini App (Telegram Web App)
+
+Что реализовано:
+- фронтенд Mini App: `miniapp/index.html`, `miniapp/app.js`, `miniapp/styles.css`;
+- backend API и валидация `initData`: `miniapp.py`;
+- маршруты:
+  - `GET /miniapp`
+  - `GET /api/miniapp/me`
+  - `GET /api/miniapp/portfolio`
+  - `GET /api/miniapp/search?q=...&asset_type=stock|metal|fiat`
+  - `GET /api/miniapp/alerts`
+  - `POST /api/miniapp/alerts`
+  - `DELETE /api/miniapp/alerts/{id}`
+
+Что нужно от вас:
+1. В BotFather:
+ - `Menu Button` -> `Configure Mini App` -> укажите URL `https://<ваш-домен>/miniapp`.
+2. В окружении Render:
+ - установить `MINIAPP_URL=https://<ваш-домен>/miniapp`.
+3. Открывать интерфейс командой `/miniapp`.
 
 ## Демо генератор карты портфеля
 

@@ -14,7 +14,16 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.filters import Command, StateFilter
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
+from aiogram.types import (
+    CallbackQuery,
+    Message,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    BufferedInputFile,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    WebAppInfo,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -73,6 +82,7 @@ from moex_iss import (
     search_securities,
 )
 from broker_report_xml import parse_broker_report_xml
+from miniapp import attach_miniapp_routes
 
 load_dotenv()
 
@@ -150,6 +160,11 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = _env("BOT_TOKEN") or _env("TELEGRAM_BOT_TOKEN")
 DB_DSN = _env("DATABASE_URL") or _env("DB_DSN") or _env("DB_PATH")
+MINIAPP_URL = _env("MINIAPP_URL")
+if not MINIAPP_URL:
+    ext = (_env("RENDER_EXTERNAL_URL") or "").rstrip("/")
+    if ext:
+        MINIAPP_URL = f"{ext}/miniapp"
 
 class AddTradeFlow(StatesGroup):
     waiting_date_mode = State()
@@ -906,6 +921,7 @@ async def cmd_start(message: Message):
         "/usd_rub — текущий курс USD/RUB (MOEX)\n"
         "/alert — поставить ценовой алерт по акции/металлу/фиату\n"
         "/alerts_list — список и отключение ценовых алертов\n"
+        "/miniapp — открыть Mini App интерфейс\n"
         "🔔 Отчёты дня\n"
         "/trading_day_on — включить отчёт по итогам торгов (открытие/закрытие)\n"
         "/trading_day_off — выключить отчёт\n"
@@ -964,6 +980,21 @@ async def cmd_usd_rub(message: Message):
         f"Время (МСК): {now_msk}"
     )
     await message.answer(append_delayed_warning(text), parse_mode="HTML")
+
+
+async def cmd_miniapp(message: Message):
+    if not MINIAPP_URL:
+        await message.answer(
+            "Mini App URL не настроен.\n"
+            "Установите переменную окружения MINIAPP_URL, например https://<ваш-домен>/miniapp"
+        )
+        return
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📱 Открыть Mini App", web_app=WebAppInfo(url=MINIAPP_URL))]
+        ]
+    )
+    await message.answer("Открой интерфейс бота в Mini App:", reply_markup=kb)
 
 
 def _alert_query_prompt(asset_type: str) -> str:
@@ -2007,6 +2038,10 @@ async def start_health_server():
     app = web.Application()
     app.router.add_get("/", healthz)
     app.router.add_get("/healthz", healthz)
+    if BOT_TOKEN and DB_DSN:
+        attach_miniapp_routes(app, DB_DSN, BOT_TOKEN)
+    else:
+        logger.warning("Mini App routes are disabled: BOT_TOKEN/DB_DSN is missing")
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -2545,6 +2580,7 @@ async def main():
     dp.message.register(cmd_portfolio_map, Command("portfolio_map"), StateFilter("*"))
     dp.message.register(cmd_top_movers, Command("top_movers"), StateFilter("*"))
     dp.message.register(cmd_usd_rub, Command("usd_rub"), StateFilter("*"))
+    dp.message.register(cmd_miniapp, Command("miniapp"), StateFilter("*"))
     dp.message.register(cmd_alert, Command("alert"), StateFilter("*"))
     dp.message.register(cmd_alerts_list, Command("alerts_list"), StateFilter("*"))
     dp.message.register(cmd_clear_portfolio, Command("clear_portfolio"), StateFilter("*"))
