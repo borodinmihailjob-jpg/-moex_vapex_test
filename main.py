@@ -706,7 +706,13 @@ def build_portfolio_share_card_png(
     header_y = cy
     draw.text((col1_x, header_y), "Название актива", fill=(166, 191, 225), font=ticker_font)
     draw.text((col2_x, header_y), "Доля актива в портфеле", fill=(166, 191, 225), font=ticker_font)
-    draw.text((col3_x, header_y), "Изм. за месяц", fill=(166, 191, 225), font=ticker_font)
+    change_header = _fit_line(
+        draw,
+        "Изменение стоимости актива на бирже за месяц",
+        ticker_font,
+        pad + card_w - 32 - col3_x,
+    )
+    draw.text((col3_x, header_y), change_header, fill=(166, 191, 225), font=ticker_font)
     draw.line((pad + 28, header_y + 38, pad + card_w - 28, header_y + 38), fill=(55, 80, 116), width=2)
     cy = header_y + 50
 
