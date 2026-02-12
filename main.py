@@ -23,6 +23,7 @@ from aiogram.fsm.context import FSMContext
 from db import (
     acquire_single_instance_lock,
     release_single_instance_lock,
+    close_pools,
     clear_user_portfolio,
     init_db,
     upsert_instrument,
@@ -43,7 +44,7 @@ from db import (
     get_price_alert_state,
     set_price_alert_state,
     list_active_position_instruments,
-    upsert_price_cache,
+    upsert_price_cache_bulk,
     get_price_cache_map,
     get_active_app_text,
     list_active_app_texts,
@@ -84,6 +85,7 @@ MOEX_EVENT_WINDOW_MIN = 5
 MAX_BROKER_XML_SIZE_BYTES = 5 * 1024 * 1024
 PRICE_FETCH_CONCURRENCY = 20
 PRICE_FETCH_BATCH_SIZE = 100
+USER_ALERTS_CONCURRENCY = 10
 BTN_ADD_TRADE = "Добавить сделку"
 BTN_PORTFOLIO = "Стоимость портфеля"
 BTN_ALERTS = "Настройки уведомлений"
@@ -795,12 +797,13 @@ async def refresh_price_cache_once() -> None:
         return
 
     priced = await _fetch_prices_limited(instruments)
-
     now_utc = datetime.now(timezone.utc)
-    for row, last in priced:
-        if last is None:
-            continue
-        await upsert_price_cache(DB_DSN, int(row["instrument_id"]), float(last), now_utc)
+    cache_rows = [
+        (int(row["instrument_id"]), float(last))
+        for row, last in priced
+        if last is not None
+    ]
+    await upsert_price_cache_bulk(DB_DSN, cache_rows, now_utc)
 
 async def _load_prices_for_positions(positions: list[dict]) -> dict[int, float | None]:
     now_utc = datetime.now(timezone.utc)
@@ -823,12 +826,13 @@ async def _load_prices_for_positions(positions: list[dict]) -> dict[int, float |
         return prices
 
     loaded = await _fetch_prices_limited(missing_positions)
-
+    cache_rows: list[tuple[int, float]] = []
     for pos, last in loaded:
         iid = int(pos["id"])
         prices[iid] = last
         if last is not None:
-            await upsert_price_cache(DB_DSN, iid, float(last), now_utc)
+            cache_rows.append((iid, float(last)))
+    await upsert_price_cache_bulk(DB_DSN, cache_rows, now_utc)
     return prices
 
 async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[dict]]:
@@ -1409,42 +1413,33 @@ async def cmd_drop_alert_off(message: Message):
     await set_drop_alert(DB_DSN, user_id, False, None)
     await message.answer("Алерт падения выключен.")
 
-async def cmd_market_reports_on(message: Message):
+async def _set_trading_day_report_mode(message: Message, enabled: bool, reply_text: str) -> None:
     user_id = message.from_user.id if message.from_user else None
     if not user_id:
         await message.answer("Не удалось определить пользователя.")
         return
-    await set_open_close_alert(DB_DSN, user_id, True)
-    await message.answer("Отчеты на открытии и закрытии биржи включены (время МСК).")
+    await set_open_close_alert(DB_DSN, user_id, enabled)
+    await message.answer(reply_text)
+
+
+async def cmd_market_reports_on(message: Message):
+    await _set_trading_day_report_mode(message, True, "Отчеты на открытии и закрытии биржи включены (время МСК).")
 
 async def cmd_market_reports_off(message: Message):
-    user_id = message.from_user.id if message.from_user else None
-    if not user_id:
-        await message.answer("Не удалось определить пользователя.")
-        return
-    await set_open_close_alert(DB_DSN, user_id, False)
-    await message.answer("Отчеты на открытии и закрытии биржи выключены.")
+    await _set_trading_day_report_mode(message, False, "Отчеты на открытии и закрытии биржи выключены.")
 
 
 async def cmd_trading_day_on(message: Message):
-    user_id = message.from_user.id if message.from_user else None
-    if not user_id:
-        await message.answer("Не удалось определить пользователя.")
-        return
-    await set_open_close_alert(DB_DSN, user_id, True)
-    await message.answer(
+    await _set_trading_day_report_mode(
+        message,
+        True,
         "Дневной отчет включен.\n"
         "Я пришлю баланс портфеля на открытии и на закрытии торгов, а также результат за торговый день."
     )
 
 
 async def cmd_trading_day_off(message: Message):
-    user_id = message.from_user.id if message.from_user else None
-    if not user_id:
-        await message.answer("Не удалось определить пользователя.")
-        return
-    await set_open_close_alert(DB_DSN, user_id, False)
-    await message.answer("Дневной отчет выключен.")
+    await _set_trading_day_report_mode(message, False, "Дневной отчет выключен.")
 
 async def cmd_alerts_status(message: Message):
     user_id = message.from_user.id if message.from_user else None
@@ -1675,9 +1670,6 @@ async def cmd_portfolio_map(message: Message):
         caption=caption,
     )
 
-async def build_portfolio_snapshot(user_id: int) -> tuple[str, float | None, list[dict]]:
-    return await build_portfolio_report(user_id)
-
 def _parse_iso_utc(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -1701,45 +1693,40 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
         last = _parse_iso_utc(settings.get("periodic_last_sent_at"))
         due = (last is None) or ((now_utc - last).total_seconds() >= settings["periodic_interval_min"] * 60)
         if due:
-            text, _, _ = await build_portfolio_snapshot(user_id)
+            text, _, _ = await build_portfolio_report(user_id)
             await bot.send_message(user_id, f"Периодический отчет:\n\n{text}", parse_mode="HTML")
             await update_periodic_last_sent_at(DB_DSN, user_id, now_utc.isoformat())
 
     if settings["drop_alert_enabled"]:
         drop_percent = settings["drop_percent"]
-        async with aiohttp.ClientSession() as session:
-            for pos in positions:
-                avg = pos.get("avg_price") or 0.0
-                if avg <= 0:
-                    continue
-                reset_data_source_flags()
-                last = await get_last_price_by_asset_type(
-                    session,
-                    pos["secid"],
-                    pos.get("boardid"),
-                    pos.get("asset_type") or ASSET_TYPE_STOCK,
+        reset_data_source_flags()
+        prices = await _load_prices_for_positions(positions)
+        for pos in positions:
+            avg = pos.get("avg_price") or 0.0
+            if avg <= 0:
+                continue
+            last = prices.get(int(pos["id"]))
+            if last is None:
+                continue
+            threshold = avg * (1 - drop_percent / 100.0)
+            is_below = last <= threshold
+            prev_below = await get_price_alert_state(DB_DSN, user_id, pos["id"])
+            if is_below and not prev_below:
+                fall_pct = (1 - (last / avg)) * 100
+                company = pos.get("shortname") or pos["secid"]
+                await bot.send_message(
+                    user_id,
+                    append_delayed_warning(
+                        f"⚠️ Сильное падение цены\n"
+                        f"{company} ({pos['secid']})\n"
+                        f"Текущая цена: {money(last)} RUB\n"
+                        f"Средняя цена: {money(avg)} RUB\n"
+                        f"Падение: {fall_pct:.2f}% (порог {drop_percent:g}%)"
+                    ),
                 )
-                if last is None:
-                    continue
-                threshold = avg * (1 - drop_percent / 100.0)
-                is_below = last <= threshold
-                prev_below = await get_price_alert_state(DB_DSN, user_id, pos["id"])
-                if is_below and not prev_below:
-                    fall_pct = (1 - (last / avg)) * 100
-                    company = pos.get("shortname") or pos["secid"]
-                    await bot.send_message(
-                        user_id,
-                        append_delayed_warning(
-                            f"⚠️ Сильное падение цены\n"
-                            f"{company} ({pos['secid']})\n"
-                            f"Текущая цена: {money(last)} RUB\n"
-                            f"Средняя цена: {money(avg)} RUB\n"
-                            f"Падение: {fall_pct:.2f}% (порог {drop_percent:g}%)"
-                        ),
-                    )
-                    await set_price_alert_state(DB_DSN, user_id, pos["id"], True, now_utc.isoformat())
-                elif (not is_below) and prev_below:
-                    await set_price_alert_state(DB_DSN, user_id, pos["id"], False, None)
+                await set_price_alert_state(DB_DSN, user_id, pos["id"], True, now_utc.isoformat())
+            elif (not is_below) and prev_below:
+                await set_price_alert_state(DB_DSN, user_id, pos["id"], False, None)
 
     if settings["open_close_enabled"]:
         now_msk = now_utc.astimezone(MSK_TZ)
@@ -1752,7 +1739,7 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
                 open_min_of_day <= now_min_of_day < open_min_of_day + MOEX_EVENT_WINDOW_MIN
                 and settings.get("open_last_sent_date") != today
             ):
-                text, open_value, _ = await build_portfolio_snapshot(user_id)
+                text, open_value, _ = await build_portfolio_report(user_id)
                 await bot.send_message(
                     user_id,
                     (
@@ -1768,7 +1755,7 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
                 close_min_of_day <= now_min_of_day < close_min_of_day + MOEX_EVENT_WINDOW_MIN
                 and settings.get("close_last_sent_date") != today
             ):
-                text, close_value, _ = await build_portfolio_snapshot(user_id)
+                text, close_value, _ = await build_portfolio_report(user_id)
                 open_value = settings.get("day_open_value")
                 open_date = settings.get("day_open_value_date")
                 if open_value is not None and open_date == today and close_value is not None:
@@ -1796,11 +1783,16 @@ async def notifications_worker(bot: Bot):
         try:
             await refresh_price_cache_once()
             users = await list_users_with_alerts(DB_DSN)
-            for uid in users:
-                try:
-                    await process_user_alerts(bot, uid, now_utc)
-                except Exception:
-                    logger.exception("Failed processing alerts user=%s", uid)
+            sem = asyncio.Semaphore(USER_ALERTS_CONCURRENCY)
+
+            async def run_user(uid: int) -> None:
+                async with sem:
+                    try:
+                        await process_user_alerts(bot, uid, now_utc)
+                    except Exception:
+                        logger.exception("Failed processing alerts user=%s", uid)
+
+            await asyncio.gather(*(run_user(uid) for uid in users))
         except Exception:
             logger.exception("Notifications worker loop failed")
         await asyncio.sleep(60)
@@ -2428,6 +2420,7 @@ async def main():
             pass
         if health_runner is not None:
             await health_runner.cleanup()
+        await close_pools()
 
 if __name__ == "__main__":
     try:

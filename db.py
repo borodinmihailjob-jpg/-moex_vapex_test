@@ -820,25 +820,37 @@ async def list_active_app_texts(db_path: str) -> list[dict[str, str]]:
         raise
 
 
-async def upsert_price_cache(db_path: str, instrument_id: int, last_price: float, updated_at: datetime | None = None) -> None:
+async def upsert_price_cache_bulk(
+    db_path: str,
+    rows: list[tuple[int, float]],
+    updated_at: datetime | None = None,
+) -> None:
+    if not rows:
+        return
     try:
         pool = await _get_pool(db_path)
         ts = updated_at or datetime.now(timezone.utc)
+        dedup: dict[int, float] = {}
+        for instrument_id, last_price in rows:
+            dedup[int(instrument_id)] = float(last_price)
+        instrument_ids = list(dedup.keys())
+        last_prices = [dedup[iid] for iid in instrument_ids]
         async with pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO price_cache (instrument_id, last_price, updated_at)
-                VALUES ($1, $2, $3)
+                SELECT x.instrument_id, x.last_price, $3
+                FROM UNNEST($1::bigint[], $2::double precision[]) AS x(instrument_id, last_price)
                 ON CONFLICT (instrument_id) DO UPDATE
                 SET last_price = EXCLUDED.last_price,
                     updated_at = EXCLUDED.updated_at
                 """,
-                int(instrument_id),
-                float(last_price),
+                instrument_ids,
+                last_prices,
                 ts,
             )
     except Exception:
-        logger.exception("Failed upsert_price_cache instrument=%s", instrument_id)
+        logger.exception("Failed upsert_price_cache_bulk rows=%s", len(rows))
         raise
 
 
