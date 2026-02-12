@@ -2545,6 +2545,7 @@ async def on_done(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 async def main():
+    health_runner = await start_health_server()
     if not BOT_TOKEN:
         raise RuntimeError(
             "Не найден токен бота в переменных окружения. "
@@ -2572,7 +2573,6 @@ async def main():
     bot = Bot(BOT_TOKEN)
     dp = Dispatcher()
     worker_task = asyncio.create_task(notifications_worker(bot))
-    health_runner = await start_health_server()
 
     dp.message.register(cmd_start, Command("start"), StateFilter("*"))
     dp.message.register(cmd_add_trade, Command("add_trade"), StateFilter("*"))
