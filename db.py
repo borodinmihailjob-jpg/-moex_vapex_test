@@ -106,6 +106,20 @@ CREATE TABLE IF NOT EXISTS price_alert_state (
   PRIMARY KEY (user_id, instrument_id)
 );
 
+CREATE TABLE IF NOT EXISTS price_target_alerts (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+  instrument_id BIGINT NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+  target_price DOUBLE PRECISION NOT NULL,
+  range_percent DOUBLE PRECISION NOT NULL DEFAULT 5,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  last_sent_at TEXT,
+  last_sent_at_ts TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, instrument_id, target_price, range_percent)
+);
+
 CREATE TABLE IF NOT EXISTS app_texts (
   id BIGSERIAL PRIMARY KEY,
   text_code TEXT NOT NULL UNIQUE,
@@ -145,6 +159,13 @@ MIGRATION_SQL = [
     "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS close_last_sent_on DATE",
     "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS day_open_value_on DATE",
     "ALTER TABLE price_alert_state ADD COLUMN IF NOT EXISTS last_alert_at_ts TIMESTAMPTZ",
+    "CREATE TABLE IF NOT EXISTS price_target_alerts (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, instrument_id BIGINT NOT NULL REFERENCES instruments(id) ON DELETE CASCADE, target_price DOUBLE PRECISION NOT NULL, range_percent DOUBLE PRECISION NOT NULL DEFAULT 5, enabled BOOLEAN NOT NULL DEFAULT TRUE, last_sent_at TEXT, last_sent_at_ts TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "ALTER TABLE price_target_alerts ADD COLUMN IF NOT EXISTS user_ref_id BIGINT",
+    "ALTER TABLE price_target_alerts ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE",
+    "ALTER TABLE price_target_alerts ADD COLUMN IF NOT EXISTS last_sent_at TEXT",
+    "ALTER TABLE price_target_alerts ADD COLUMN IF NOT EXISTS last_sent_at_ts TIMESTAMPTZ",
+    "ALTER TABLE price_target_alerts ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+    "ALTER TABLE price_target_alerts ADD COLUMN IF NOT EXISTS range_percent DOUBLE PRECISION NOT NULL DEFAULT 5",
     "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
 ]
 
@@ -156,6 +177,9 @@ POST_MIGRATION_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS ix_price_alert_state_user_ref_instrument ON price_alert_state (user_ref_id, instrument_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_app_texts_text_code ON app_texts (text_code)",
     "CREATE INDEX IF NOT EXISTS ix_app_texts_button_name_active ON app_texts (button_name, active)",
+    "CREATE INDEX IF NOT EXISTS ix_price_target_alerts_user_enabled ON price_target_alerts (user_id, enabled)",
+    "CREATE INDEX IF NOT EXISTS ix_price_target_alerts_instr_enabled ON price_target_alerts (instrument_id, enabled)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_price_target_alerts_unique ON price_target_alerts (user_id, instrument_id, target_price, range_percent)",
 ]
 
 _pools: dict[str, asyncpg.Pool] = {}
@@ -346,6 +370,14 @@ async def _backfill_user_links(conn: asyncpg.Connection) -> None:
     )
     await conn.execute(
         """
+        INSERT INTO users (telegram_user_id)
+        SELECT DISTINCT user_id FROM price_target_alerts
+        WHERE user_id IS NOT NULL
+        ON CONFLICT (telegram_user_id) DO NOTHING
+        """
+    )
+    await conn.execute(
+        """
         INSERT INTO portfolios (user_id, name)
         SELECT u.id, 'Основной'
         FROM users u
@@ -384,6 +416,15 @@ async def _backfill_user_links(conn: asyncpg.Connection) -> None:
     await conn.execute(
         """
         UPDATE price_alert_state s
+        SET user_ref_id = u.id
+        FROM users u
+        WHERE s.user_ref_id IS NULL
+          AND u.telegram_user_id = s.user_id
+        """
+    )
+    await conn.execute(
+        """
+        UPDATE price_target_alerts s
         SET user_ref_id = u.id
         FROM users u
         WHERE s.user_ref_id IS NULL
@@ -459,6 +500,15 @@ async def _backfill_user_links(conn: asyncpg.Connection) -> None:
         WHERE last_alert_at_ts IS NULL
           AND last_alert_at IS NOT NULL
           AND last_alert_at ~ '^\\d{4}-\\d{2}-\\d{2}T'
+        """
+    )
+    await conn.execute(
+        """
+        UPDATE price_target_alerts
+        SET last_sent_at_ts = last_sent_at::timestamptz
+        WHERE last_sent_at_ts IS NULL
+          AND last_sent_at IS NOT NULL
+          AND last_sent_at ~ '^\\d{4}-\\d{2}-\\d{2}T'
         """
     )
 
@@ -1235,6 +1285,10 @@ async def list_users_with_alerts(db_path: str):
                 SELECT DISTINCT user_id
                 FROM user_alert_settings
                 WHERE periodic_enabled=TRUE OR drop_alert_enabled=TRUE OR open_close_enabled=TRUE
+                UNION
+                SELECT DISTINCT user_id
+                FROM price_target_alerts
+                WHERE enabled=TRUE
                 """
             )
         return [int(r["user_id"]) for r in rows]
@@ -1489,4 +1543,114 @@ async def set_price_alert_states_bulk(
             )
     except Exception:
         logger.exception("Failed set_price_alert_states_bulk user=%s count=%s", user_id, len(updates))
+        raise
+
+
+async def create_price_target_alert(
+    db_path: str,
+    user_id: int,
+    instrument_id: int,
+    target_price: float,
+    range_percent: float = 5.0,
+) -> int:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                user_ref_id, _ = await _ensure_user_context(conn, int(user_id))
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO price_target_alerts (
+                      user_id, user_ref_id, instrument_id, target_price, range_percent, enabled, last_sent_at, last_sent_at_ts
+                    )
+                    VALUES ($1, $2, $3, $4, $5, TRUE, NULL, NULL)
+                    ON CONFLICT (user_id, instrument_id, target_price, range_percent)
+                    DO UPDATE SET enabled = TRUE
+                    RETURNING id
+                    """,
+                    int(user_id),
+                    user_ref_id,
+                    int(instrument_id),
+                    float(target_price),
+                    float(range_percent),
+                )
+        return int(row["id"])
+    except Exception:
+        logger.exception(
+            "Failed create_price_target_alert user=%s instrument=%s target=%s range=%s",
+            user_id,
+            instrument_id,
+            target_price,
+            range_percent,
+        )
+        raise
+
+
+async def list_active_price_target_alerts(db_path: str, user_id: int) -> list[dict[str, Any]]:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                  a.id,
+                  a.user_id,
+                  a.instrument_id,
+                  a.target_price,
+                  a.range_percent,
+                  a.last_sent_at,
+                  a.last_sent_at_ts,
+                  i.secid,
+                  i.boardid,
+                  i.shortname,
+                  COALESCE(i.asset_type, 'stock') AS asset_type
+                FROM price_target_alerts a
+                JOIN instruments i ON i.id = a.instrument_id
+                WHERE a.user_id = $1
+                  AND a.enabled = TRUE
+                ORDER BY a.id
+                """,
+                int(user_id),
+            )
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            ts = row["last_sent_at_ts"]
+            out.append(
+                {
+                    "id": int(row["id"]),
+                    "user_id": int(row["user_id"]),
+                    "instrument_id": int(row["instrument_id"]),
+                    "target_price": float(row["target_price"]),
+                    "range_percent": float(row["range_percent"]),
+                    "last_sent_at": ts.isoformat() if ts is not None else row["last_sent_at"],
+                    "secid": row["secid"],
+                    "boardid": row["boardid"],
+                    "shortname": row["shortname"],
+                    "asset_type": row["asset_type"],
+                }
+            )
+        return out
+    except Exception:
+        logger.exception("Failed list_active_price_target_alerts user=%s", user_id)
+        raise
+
+
+async def update_price_target_alert_last_sent(db_path: str, alert_id: int, iso_ts: str) -> None:
+    try:
+        pool = await _get_pool(db_path)
+        dt = _parse_iso_utc(iso_ts)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE price_target_alerts
+                SET last_sent_at = $1,
+                    last_sent_at_ts = $2
+                WHERE id = $3
+                """,
+                iso_ts,
+                dt,
+                int(alert_id),
+            )
+    except Exception:
+        logger.exception("Failed update_price_target_alert_last_sent alert=%s", alert_id)
         raise

@@ -49,9 +49,13 @@ from db import (
     get_price_cache_map,
     get_active_app_text,
     list_active_app_texts,
+    create_price_target_alert,
+    list_active_price_target_alerts,
+    update_price_target_alert_last_sent,
 )
 from portfolio_cards import build_portfolio_map_png, build_portfolio_share_card_png
 from moex_iss import (
+    ASSET_TYPE_FIAT,
     ASSET_TYPE_METAL,
     ASSET_TYPE_STOCK,
     DELAYED_WARNING_TEXT,
@@ -60,8 +64,10 @@ from moex_iss import (
     get_stock_movers_by_date,
     get_history_prices_by_asset_type,
     get_last_price_by_asset_type,
+    get_last_price_fiat,
     get_usd_rub_rate,
     reset_data_source_flags,
+    search_fiat,
     search_metals,
     search_securities,
 )
@@ -101,6 +107,7 @@ CB_PORTFOLIO_MAP_SELF = "pmap:self"
 CB_PORTFOLIO_MAP_SHARE = "pmap:share"
 TRADE_SIDE_BUY = "buy"
 TRADE_SIDE_SELL = "sell"
+TARGET_ALERT_ANTISPAM_MIN = 75
 
 
 def get_trading_day_main_close_time(now_msk: datetime) -> tuple[int, int]:
@@ -160,6 +167,14 @@ class AssetLookupFlow(StatesGroup):
     waiting_asset_type = State()
     waiting_query = State()
     waiting_pick = State()
+
+
+class PriceTargetAlertFlow(StatesGroup):
+    waiting_asset_type = State()
+    waiting_query = State()
+    waiting_pick = State()
+    waiting_target_price = State()
+    waiting_range_confirm = State()
 
 def money(x: float) -> str:
     return f"{x:,.2f}".replace(",", " ")
@@ -345,6 +360,49 @@ async def make_lookup_asset_type_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="📈 Акции", callback_data=f"latype:{ASSET_TYPE_STOCK}")
     kb.button(text="🥇 Металл", callback_data=f"latype:{ASSET_TYPE_METAL}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def make_alert_asset_type_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📈 Акции", callback_data=f"aatype:{ASSET_TYPE_STOCK}")
+    kb.button(text="🥇 Металлы", callback_data=f"aatype:{ASSET_TYPE_METAL}")
+    kb.button(text="💵 Фиат", callback_data=f"aatype:{ASSET_TYPE_FIAT}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def make_alert_search_back_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="aaback:asset_type")
+    return kb.as_markup()
+
+
+async def make_alert_candidates_kb(cands: list[dict]):
+    kb = InlineKeyboardBuilder()
+    for i, c in enumerate(cands):
+        secid = (c.get("secid") or "").strip()
+        boardid = (c.get("boardid") or "").strip()
+        display_name = (c.get("shortname") or c.get("name") or "").strip()
+        if display_name and boardid:
+            title = f"{secid} - {display_name} ({boardid})"
+        elif display_name:
+            title = f"{secid} - {display_name}"
+        elif boardid:
+            title = f"{secid} ({boardid})"
+        else:
+            title = secid
+        kb.button(text=title[:64], callback_data=f"aapick:{i}")
+    kb.button(text="⬅️ Назад", callback_data="aaback:query")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def make_alert_range_confirm_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Да, ±5%", callback_data="aarange:yes")
+    kb.button(text="Только точное значение", callback_data="aarange:no")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -813,6 +871,7 @@ async def cmd_start(message: Message):
         "🚀 Рынок сегодня\n"
         "/top_movers — лидеры роста и падения за выбранную сессию\n"
         "/usd_rub — текущий курс USD/RUB (MOEX)\n"
+        "/alert — поставить ценовой алерт по акции/металлу/фиату\n"
         "🔔 Отчёты дня\n"
         "/trading_day_on — включить отчёт по итогам торгов (открытие/закрытие)\n"
         "/trading_day_off — выключить отчёт\n"
@@ -871,6 +930,178 @@ async def cmd_usd_rub(message: Message):
         f"Время (МСК): {now_msk}"
     )
     await message.answer(append_delayed_warning(text), parse_mode="HTML")
+
+
+def _alert_query_prompt(asset_type: str) -> str:
+    if asset_type == ASSET_TYPE_METAL:
+        return "Введи тикер или название металла (например: GLDRUB_TOM):"
+    if asset_type == ASSET_TYPE_FIAT:
+        return "Введи валюту или тикер пары (например: доллар, USD000UTSTOM):"
+    return "Введи тикер, ISIN или название компании:"
+
+
+async def cmd_alert(message: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(PriceTargetAlertFlow.waiting_asset_type)
+    await message.answer(
+        "На что поставить алерт?",
+        reply_markup=await make_alert_asset_type_kb(),
+    )
+
+
+async def on_alert_asset_type_pick(call: CallbackQuery, state: FSMContext):
+    asset_type = (call.data or "").split(":", 1)[1] if ":" in (call.data or "") else ""
+    if asset_type not in {ASSET_TYPE_STOCK, ASSET_TYPE_METAL, ASSET_TYPE_FIAT}:
+        await call.answer("Неизвестный тип инструмента", show_alert=True)
+        return
+    await state.update_data(asset_type=asset_type, cands=None, chosen=None, target_price=None)
+    await state.set_state(PriceTargetAlertFlow.waiting_query)
+    await safe_edit_text(call.message, _alert_query_prompt(asset_type), reply_markup=await make_alert_search_back_kb())
+    await call.answer()
+
+
+async def on_alert_back_to_asset_type(call: CallbackQuery, state: FSMContext):
+    await state.update_data(cands=None, chosen=None, target_price=None)
+    await state.set_state(PriceTargetAlertFlow.waiting_asset_type)
+    await safe_edit_text(call.message, "На что поставить алерт?", reply_markup=await make_alert_asset_type_kb())
+    await call.answer()
+
+
+async def on_alert_back_to_query(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    asset_type = data.get("asset_type")
+    if asset_type not in {ASSET_TYPE_STOCK, ASSET_TYPE_METAL, ASSET_TYPE_FIAT}:
+        await state.set_state(PriceTargetAlertFlow.waiting_asset_type)
+        await safe_edit_text(call.message, "На что поставить алерт?", reply_markup=await make_alert_asset_type_kb())
+        await call.answer()
+        return
+    await state.update_data(cands=None, chosen=None, target_price=None)
+    await state.set_state(PriceTargetAlertFlow.waiting_query)
+    await safe_edit_text(call.message, _alert_query_prompt(asset_type), reply_markup=await make_alert_search_back_kb())
+    await call.answer()
+
+
+async def on_alert_query(message: Message, state: FSMContext):
+    q = (message.text or "").strip()
+    if not q:
+        await message.answer("Введи запрос текстом.")
+        return
+    data = await state.get_data()
+    asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
+    reset_data_source_flags()
+    async with aiohttp.ClientSession() as session:
+        if asset_type == ASSET_TYPE_METAL:
+            cands = await search_metals(session, q)
+        elif asset_type == ASSET_TYPE_FIAT:
+            cands = await search_fiat(session, q)
+        else:
+            cands = await search_securities(session, q)
+    if not cands:
+        await message.answer("Ничего не найдено. Попробуй другой запрос.", reply_markup=await make_alert_search_back_kb())
+        return
+    await state.update_data(cands=cands)
+    await state.set_state(PriceTargetAlertFlow.waiting_pick)
+    await message.answer(append_delayed_warning("Выбери инструмент:"), reply_markup=await make_alert_candidates_kb(cands))
+
+
+async def on_alert_pick(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    cands = data.get("cands") or []
+    try:
+        idx = int((call.data or "").split(":")[1])
+    except (TypeError, ValueError):
+        await call.answer("Некорректный выбор", show_alert=True)
+        return
+    if idx < 0 or idx >= len(cands):
+        await call.answer("Инструмент не найден", show_alert=True)
+        return
+    chosen = cands[idx]
+    await state.update_data(chosen=chosen)
+    await state.set_state(PriceTargetAlertFlow.waiting_target_price)
+    secid = chosen.get("secid") or "?"
+    shortname = (chosen.get("shortname") or chosen.get("name") or "").strip()
+    name_line = f"{shortname} ({secid})" if shortname else secid
+    await safe_edit_text(
+        call.message,
+        f"Выбран инструмент: {name_line}\n\nВведи целевую цену (например 92.5):",
+    )
+    await call.answer()
+
+
+async def on_alert_target_price(message: Message, state: FSMContext):
+    raw = (message.text or "").replace(",", ".").strip()
+    try:
+        target_price = float(raw)
+        if target_price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Цена должна быть числом больше 0, например 92.5")
+        return
+    await state.update_data(target_price=target_price)
+    await state.set_state(PriceTargetAlertFlow.waiting_range_confirm)
+    await message.answer(
+        "Сообщить, когда цена будет в диапазоне от -5% до +5% от указанной?",
+        reply_markup=await make_alert_range_confirm_kb(),
+    )
+
+
+async def on_alert_range_confirm(call: CallbackQuery, state: FSMContext):
+    mode = (call.data or "").split(":", 1)[1] if ":" in (call.data or "") else ""
+    if mode not in {"yes", "no"}:
+        await call.answer("Некорректный выбор", show_alert=True)
+        return
+    data = await state.get_data()
+    chosen = data.get("chosen") or {}
+    target_price = data.get("target_price")
+    asset_type = data.get("asset_type") or ASSET_TYPE_STOCK
+    user_id = call.from_user.id if call.from_user else None
+    if not user_id or not chosen or target_price is None:
+        await state.clear()
+        await safe_edit_text(call.message, "Не удалось сохранить алерт. Попробуй снова: /alert")
+        await call.answer()
+        return
+
+    secid = str(chosen.get("secid") or "").strip()
+    if not secid:
+        await state.clear()
+        await safe_edit_text(call.message, "Не удалось определить тикер. Попробуй снова: /alert")
+        await call.answer()
+        return
+
+    boardid = (chosen.get("boardid") or "").strip()
+    if asset_type == ASSET_TYPE_FIAT and not boardid:
+        boardid = "CETS"
+    range_percent = 5.0 if mode == "yes" else 0.0
+    shortname = (chosen.get("shortname") or chosen.get("name") or "").strip() or secid
+
+    instrument_id = await upsert_instrument(
+        DB_DSN,
+        secid=secid,
+        isin=chosen.get("isin"),
+        boardid=boardid,
+        shortname=shortname,
+        asset_type=asset_type,
+    )
+    await create_price_target_alert(
+        DB_DSN,
+        user_id=user_id,
+        instrument_id=instrument_id,
+        target_price=float(target_price),
+        range_percent=range_percent,
+    )
+    range_line = "±5%" if range_percent > 0 else "точное значение"
+    await safe_edit_text(
+        call.message,
+        (
+            "Алерт сохранен.\n"
+            f"Инструмент: {shortname} ({secid})\n"
+            f"Целевая цена: {money(float(target_price))}\n"
+            f"Диапазон: {range_line}\n"
+            f"Антиспам: не чаще 1 раза в {TARGET_ALERT_ANTISPAM_MIN} минут."
+        ),
+    )
+    await state.clear()
+    await call.answer()
 
 
 async def on_top_movers_date_pick(call: CallbackQuery):
@@ -1430,10 +1661,8 @@ def _parse_iso_utc(value: str | None) -> datetime | None:
 async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
     settings = await get_user_alert_settings(DB_DSN, user_id)
     positions = await get_user_positions(DB_DSN, user_id)
-    if not positions:
-        return
 
-    if settings["periodic_enabled"]:
+    if settings["periodic_enabled"] and positions:
         last = _parse_iso_utc(settings.get("periodic_last_sent_at"))
         due = (last is None) or ((now_utc - last).total_seconds() >= settings["periodic_interval_min"] * 60)
         if due:
@@ -1441,7 +1670,7 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
             await bot.send_message(user_id, f"Периодический отчет:\n\n{text}", parse_mode="HTML")
             await update_periodic_last_sent_at(DB_DSN, user_id, now_utc.isoformat())
 
-    if settings["drop_alert_enabled"]:
+    if settings["drop_alert_enabled"] and positions:
         drop_percent = settings["drop_percent"]
         reset_data_source_flags()
         prices = await _load_prices_for_positions(positions)
@@ -1477,7 +1706,7 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
                 state_updates.append((instrument_id, False, None))
         await set_price_alert_states_bulk(DB_DSN, user_id, state_updates)
 
-    if settings["open_close_enabled"]:
+    if settings["open_close_enabled"] and positions:
         now_msk = now_utc.astimezone(MSK_TZ)
         if now_msk.weekday() < 5:
             today = now_msk.date().isoformat()
@@ -1557,6 +1786,51 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
                     )
                 await bot.send_message(user_id, close_header + text, parse_mode="HTML")
                 await update_close_sent_date(DB_DSN, user_id, today)
+
+    target_alerts = await list_active_price_target_alerts(DB_DSN, user_id)
+    if not target_alerts:
+        return
+
+    reset_data_source_flags()
+    async with aiohttp.ClientSession() as session:
+        for alert in target_alerts:
+            secid = alert["secid"]
+            boardid = alert.get("boardid")
+            shortname = (alert.get("shortname") or secid).strip()
+            asset_type = alert.get("asset_type") or ASSET_TYPE_STOCK
+            try:
+                if asset_type == ASSET_TYPE_FIAT:
+                    current = await get_last_price_fiat(session, secid, boardid or "CETS")
+                else:
+                    current = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
+            except Exception:
+                logger.exception("Failed to load target alert price user=%s secid=%s", user_id, secid)
+                continue
+            if current is None:
+                continue
+
+            target_price = float(alert["target_price"])
+            range_percent = float(alert.get("range_percent") or 0.0)
+            if range_percent <= 0:
+                in_range = abs(current - target_price) <= 1e-12
+            else:
+                low = target_price * (1 - range_percent / 100.0)
+                high = target_price * (1 + range_percent / 100.0)
+                in_range = low <= current <= high
+            if not in_range:
+                continue
+
+            last_sent = _parse_iso_utc(alert.get("last_sent_at"))
+            if last_sent is not None and (now_utc - last_sent).total_seconds() < TARGET_ALERT_ANTISPAM_MIN * 60:
+                continue
+
+            await bot.send_message(
+                user_id,
+                append_delayed_warning(
+                    f"Цена инструмента {shortname} ({secid}) достигла {money(current)}"
+                ),
+            )
+            await update_price_target_alert_last_sent(DB_DSN, int(alert["id"]), now_utc.isoformat())
 
 async def notifications_worker(bot: Bot):
     logger.info("Notifications worker started")
@@ -2132,6 +2406,7 @@ async def main():
     dp.message.register(cmd_portfolio_map, Command("portfolio_map"), StateFilter("*"))
     dp.message.register(cmd_top_movers, Command("top_movers"), StateFilter("*"))
     dp.message.register(cmd_usd_rub, Command("usd_rub"), StateFilter("*"))
+    dp.message.register(cmd_alert, Command("alert"), StateFilter("*"))
     dp.message.register(cmd_clear_portfolio, Command("clear_portfolio"), StateFilter("*"))
     dp.message.register(cmd_asset_lookup, Command("asset_lookup"), StateFilter("*"))
     dp.message.register(cmd_import_broker_xml, Command("import_broker_xml"), StateFilter("*"))
@@ -2165,6 +2440,30 @@ async def main():
     dp.message.register(on_lookup_query, AssetLookupFlow.waiting_query)
     dp.callback_query.register(on_lookup_pick, AssetLookupFlow.waiting_pick, F.data.startswith("lpick:"))
     dp.callback_query.register(on_article_pick, StateFilter("*"), F.data.startswith("article:"))
+    dp.callback_query.register(
+        on_alert_asset_type_pick,
+        PriceTargetAlertFlow.waiting_asset_type,
+        F.data.startswith("aatype:"),
+    )
+    dp.callback_query.register(
+        on_alert_back_to_asset_type,
+        PriceTargetAlertFlow.waiting_query,
+        F.data == "aaback:asset_type",
+    )
+    dp.callback_query.register(
+        on_alert_back_to_asset_type,
+        PriceTargetAlertFlow.waiting_pick,
+        F.data == "aaback:asset_type",
+    )
+    dp.callback_query.register(
+        on_alert_back_to_query,
+        PriceTargetAlertFlow.waiting_pick,
+        F.data == "aaback:query",
+    )
+    dp.message.register(on_alert_query, PriceTargetAlertFlow.waiting_query)
+    dp.callback_query.register(on_alert_pick, PriceTargetAlertFlow.waiting_pick, F.data.startswith("aapick:"))
+    dp.message.register(on_alert_target_price, PriceTargetAlertFlow.waiting_target_price)
+    dp.callback_query.register(on_alert_range_confirm, PriceTargetAlertFlow.waiting_range_confirm, F.data.startswith("aarange:"))
 
     dp.callback_query.register(on_trade_side_pick, AddTradeFlow.waiting_side, F.data.startswith("side:"))
     dp.callback_query.register(on_asset_type_pick, AddTradeFlow.waiting_asset_type, F.data.startswith("atype:"))
