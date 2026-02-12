@@ -104,23 +104,6 @@ CREATE TABLE IF NOT EXISTS app_texts (
   active BOOLEAN NOT NULL DEFAULT TRUE
 );
 
-CREATE TABLE IF NOT EXISTS user_strategy_profiles (
-  user_id BIGINT PRIMARY KEY,
-  user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-  risk_profile TEXT NOT NULL DEFAULT 'balanced',
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS user_watchlist (
-  user_id BIGINT NOT NULL,
-  user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-  secid TEXT NOT NULL,
-  boardid TEXT NOT NULL DEFAULT 'TQBR',
-  asset_type TEXT NOT NULL DEFAULT 'stock',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (user_id, secid, boardid, asset_type)
-);
-
 """
 
 MIGRATION_SQL = [
@@ -136,8 +119,6 @@ MIGRATION_SQL = [
     "ALTER TABLE app_texts ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
     "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS day_open_value DOUBLE PRECISION",
     "ALTER TABLE user_alert_settings ADD COLUMN IF NOT EXISTS day_open_value_date TEXT",
-    "CREATE TABLE IF NOT EXISTS user_strategy_profiles (user_id BIGINT PRIMARY KEY, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, risk_profile TEXT NOT NULL DEFAULT 'balanced', updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
-    "CREATE TABLE IF NOT EXISTS user_watchlist (user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, secid TEXT NOT NULL, boardid TEXT NOT NULL DEFAULT 'TQBR', asset_type TEXT NOT NULL DEFAULT 'stock', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (user_id, secid, boardid, asset_type))",
 ]
 
 POST_MIGRATION_INDEX_SQL = [
@@ -148,8 +129,6 @@ POST_MIGRATION_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS ix_price_alert_state_user_ref_instrument ON price_alert_state (user_ref_id, instrument_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_app_texts_text_code ON app_texts (text_code)",
     "CREATE INDEX IF NOT EXISTS ix_app_texts_button_name_active ON app_texts (button_name, active)",
-    "CREATE INDEX IF NOT EXISTS ix_user_watchlist_user ON user_watchlist (user_id)",
-    "CREATE INDEX IF NOT EXISTS ix_user_strategy_profiles_user_ref ON user_strategy_profiles (user_ref_id)",
 ]
 
 _pools: dict[str, asyncpg.Pool] = {}
@@ -1138,149 +1117,4 @@ async def set_price_alert_state(db_path: str, user_id: int, instrument_id: int, 
             )
     except Exception:
         logger.exception("Failed set_price_alert_state user=%s instrument=%s", user_id, instrument_id)
-        raise
-
-
-async def ensure_user_strategy_profile(db_path: str, user_id: int) -> None:
-    try:
-        pool = await _get_pool(db_path)
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                user_ref_id, _ = await _ensure_user_context(conn, int(user_id))
-                await conn.execute(
-                    """
-                    INSERT INTO user_strategy_profiles (user_id, user_ref_id, risk_profile, updated_at)
-                    VALUES ($1, $2, 'balanced', NOW())
-                    ON CONFLICT(user_id) DO UPDATE
-                    SET user_ref_id = EXCLUDED.user_ref_id
-                    """,
-                    int(user_id),
-                    user_ref_id,
-                )
-    except Exception:
-        logger.exception("Failed ensure_user_strategy_profile user=%s", user_id)
-        raise
-
-
-async def set_user_risk_profile(db_path: str, user_id: int, risk_profile: str) -> None:
-    profile = str(risk_profile or "").strip().lower()
-    if profile not in {"conservative", "balanced", "aggressive"}:
-        raise ValueError("invalid risk profile")
-    try:
-        await ensure_user_strategy_profile(db_path, user_id)
-        pool = await _get_pool(db_path)
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                UPDATE user_strategy_profiles
-                SET risk_profile = $1,
-                    updated_at = NOW()
-                WHERE user_id = $2
-                """,
-                profile,
-                int(user_id),
-            )
-    except Exception:
-        logger.exception("Failed set_user_risk_profile user=%s profile=%s", user_id, profile)
-        raise
-
-
-async def get_user_risk_profile(db_path: str, user_id: int) -> str:
-    try:
-        await ensure_user_strategy_profile(db_path, user_id)
-        pool = await _get_pool(db_path)
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT risk_profile FROM user_strategy_profiles WHERE user_id = $1",
-                int(user_id),
-            )
-        if not row:
-            return "balanced"
-        value = str(row["risk_profile"] or "").strip().lower()
-        return value if value in {"conservative", "balanced", "aggressive"} else "balanced"
-    except Exception:
-        logger.exception("Failed get_user_risk_profile user=%s", user_id)
-        raise
-
-
-async def add_watchlist_item(db_path: str, user_id: int, secid: str, boardid: str = "TQBR", asset_type: str = "stock") -> None:
-    secid_n = str(secid or "").strip().upper()
-    boardid_n = str(boardid or "TQBR").strip().upper() or "TQBR"
-    asset_n = str(asset_type or "stock").strip().lower() or "stock"
-    if not secid_n:
-        raise ValueError("empty secid")
-    try:
-        pool = await _get_pool(db_path)
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                user_ref_id, _ = await _ensure_user_context(conn, int(user_id))
-                await conn.execute(
-                    """
-                    INSERT INTO user_watchlist (user_id, user_ref_id, secid, boardid, asset_type)
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT(user_id, secid, boardid, asset_type) DO UPDATE
-                    SET user_ref_id = EXCLUDED.user_ref_id
-                    """,
-                    int(user_id),
-                    user_ref_id,
-                    secid_n,
-                    boardid_n,
-                    asset_n,
-                )
-    except Exception:
-        logger.exception("Failed add_watchlist_item user=%s secid=%s", user_id, secid_n)
-        raise
-
-
-async def remove_watchlist_item(db_path: str, user_id: int, secid: str, boardid: str = "TQBR", asset_type: str = "stock") -> int:
-    secid_n = str(secid or "").strip().upper()
-    boardid_n = str(boardid or "TQBR").strip().upper() or "TQBR"
-    asset_n = str(asset_type or "stock").strip().lower() or "stock"
-    if not secid_n:
-        return 0
-    try:
-        pool = await _get_pool(db_path)
-        async with pool.acquire() as conn:
-            result = await conn.execute(
-                """
-                DELETE FROM user_watchlist
-                WHERE user_id = $1
-                  AND secid = $2
-                  AND boardid = $3
-                  AND asset_type = $4
-                """,
-                int(user_id),
-                secid_n,
-                boardid_n,
-                asset_n,
-            )
-        return int(str(result).split()[-1])
-    except Exception:
-        logger.exception("Failed remove_watchlist_item user=%s secid=%s", user_id, secid_n)
-        raise
-
-
-async def list_watchlist_items(db_path: str, user_id: int) -> list[dict[str, Any]]:
-    try:
-        pool = await _get_pool(db_path)
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT secid, boardid, asset_type
-                FROM user_watchlist
-                WHERE user_id = $1
-                ORDER BY asset_type, secid
-                """,
-                int(user_id),
-            )
-        return [
-            {
-                "secid": str(r["secid"]),
-                "boardid": str(r["boardid"] or "TQBR"),
-                "asset_type": str(r["asset_type"] or "stock"),
-            }
-            for r in rows
-        ]
-    except Exception:
-        logger.exception("Failed list_watchlist_items user=%s", user_id)
         raise
