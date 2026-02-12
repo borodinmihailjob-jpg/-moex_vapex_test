@@ -346,7 +346,7 @@ def build_portfolio_share_card_png(
     def weight_ratio(level: str) -> float:
         return {"high": 0.75, "mid": 0.5, "low": 0.25}.get(level, 0.25)
 
-    def draw_glass_card(rect: tuple[int, int, int, int], radius: int = 26) -> None:
+    def draw_glass_card(rect: tuple[int, int, int, int], radius: int = 34) -> None:
         _draw_drop_shadow(image, rect, radius=radius, blur=14, offset=(0, 6), color=(56, 72, 109, 45))
         draw.rounded_rectangle(rect, radius=radius, fill=alpha((250, 252, 255), 214), outline=alpha((255, 255, 255), 230), width=2)
         x1, y1, x2, y2 = rect
@@ -421,7 +421,7 @@ def build_portfolio_share_card_png(
     y += 132
 
     # 2) Состав портфеля
-    comp_h = 620
+    comp_h = 580
     comp_rect = (pad, y, pad + content_w, y + comp_h)
     draw_glass_card(comp_rect)
     cx1, cy1, cx2, cy2 = comp_rect
@@ -429,7 +429,7 @@ def build_portfolio_share_card_png(
     header_sep_y = cy1 + 66
     draw.line((cx1 + 22, header_sep_y, cx2 - 22, header_sep_y), fill=(220, 230, 244), width=1)
     list_y = header_sep_y + 12
-    row_h = 25
+    row_h = 24
     name_col_w = 430
     bar_col_w = 230
     month_col_x = cx2 - 120
@@ -464,7 +464,7 @@ def build_portfolio_share_card_png(
     # 3 + 4) Аллокация и Динамика
     left_w = int(content_w * 0.43)
     right_w = content_w - left_w - 20
-    block_h = 300
+    block_h = 280
     alloc_rect = (pad, y, pad + left_w, y + block_h)
     dyn_rect = (pad + left_w + 20, y, pad + left_w + 20 + right_w, y + block_h)
     draw_glass_card(alloc_rect)
@@ -519,41 +519,43 @@ def build_portfolio_share_card_png(
         ly += 42
 
     dx1, dy1, dx2, dy2 = dyn_rect
-    draw.text((dx1 + 20, dy1 + 18), "Динамика", fill=(39, 55, 90), font=card_title_font)
-    draw.text((dx1 + 20, dy1 + 64), "Топ 3 лучших активов", fill=(96, 112, 141), font=small_font)
-    ly = dy1 + 95
+    draw.text((dx1 + 20, dy1 + 16), "Динамика", fill=(39, 55, 90), font=card_title_font)
+    draw.text((dx1 + 20, dy1 + 56), "Топ 3 лучших активов", fill=(96, 112, 141), font=small_font)
+    dyn_row_h = 26
+    ly = dy1 + 84
     for item in top_gainers[:3]:
         name = str(item.get("shortname") or item.get("secid") or "UNKNOWN").strip()
         pct = float(item.get("pnl_pct") or 0.0)
-        pname = _fit_line(draw, name, row_font, right_w - 210)
+        pname = _fit_line(draw, name, row_font, right_w - 178)
         chip = f"▲ {pct_text(pct)}"
-        chip = _fit_line(draw, chip, pct_font, 140)
+        chip = _fit_line(draw, chip, pct_font, 128)
         c = tint_by_trend(pct)
         draw.text((dx1 + 20, ly), pname, fill=(54, 71, 103), font=row_font)
         tw = int(draw.textlength(chip, font=pct_font))
-        draw.text((dx2 - 18 - tw, ly), chip, fill=c, font=pct_font)
+        draw.text((dx2 - 16 - tw, ly), chip, fill=c, font=pct_font)
         public_texts.extend([name, pname, chip])
-        ly += 34
-    draw.line((dx1 + 20, ly + 4, dx2 - 20, ly + 4), fill=(226, 236, 248), width=1)
-    draw.text((dx1 + 20, ly + 14), "Топ 3 худших активов", fill=(96, 112, 141), font=small_font)
-    ly += 45
+        ly += dyn_row_h
+    divider_y = dy1 + 162
+    draw.line((dx1 + 20, divider_y, dx2 - 20, divider_y), fill=(226, 236, 248), width=1)
+    draw.text((dx1 + 20, divider_y + 10), "Топ 3 худших активов", fill=(96, 112, 141), font=small_font)
+    ly = divider_y + 38
     for item in top_losers[:3]:
         name = str(item.get("shortname") or item.get("secid") or "UNKNOWN").strip()
         pct = float(item.get("pnl_pct") or 0.0)
-        pname = _fit_line(draw, name, row_font, right_w - 210)
+        pname = _fit_line(draw, name, row_font, right_w - 178)
         chip = f"▼ {pct_text(-abs(pct))}"
-        chip = _fit_line(draw, chip, pct_font, 140)
+        chip = _fit_line(draw, chip, pct_font, 128)
         c = tint_by_trend(-abs(pct))
         draw.text((dx1 + 20, ly), pname, fill=(54, 71, 103), font=row_font)
         tw = int(draw.textlength(chip, font=pct_font))
-        draw.text((dx2 - 18 - tw, ly), chip, fill=c, font=pct_font)
+        draw.text((dx2 - 16 - tw, ly), chip, fill=c, font=pct_font)
         public_texts.extend([name, pname, chip])
-        ly += 34
+        ly += dyn_row_h
 
     y += block_h + 20
 
     # 5) Сравнение с индексом MOEX
-    cmp_h = 192
+    cmp_h = 210
     cmp_rect = (pad, y, pad + content_w, y + cmp_h)
     draw_glass_card(cmp_rect)
     kx1, ky1, kx2, ky2 = cmp_rect
