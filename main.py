@@ -697,29 +697,38 @@ def build_portfolio_share_card_png(
         draw.text((x + 28, top + 20), title, fill=(224, 236, 255), font=h_font)
         return top + 95
 
-    # Section 1: composition sorted by 30d return (best -> worst), max 20 rows.
+    # Section 1: composition table sorted by 30d return (best -> worst), max 20 rows.
     s1_h = 1120
     cy = block(pad, y, card_w, s1_h, "Состав портфеля")
+    col1_x = pad + 32
+    col2_x = pad + card_w - 640
+    col3_x = pad + card_w - 240
+    header_y = cy
+    draw.text((col1_x, header_y), "Название актива", fill=(166, 191, 225), font=ticker_font)
+    draw.text((col2_x, header_y), "Доля актива в портфеле", fill=(166, 191, 225), font=ticker_font)
+    draw.text((col3_x, header_y), "Изм. за месяц", fill=(166, 191, 225), font=ticker_font)
+    draw.line((pad + 28, header_y + 38, pad + card_w - 28, header_y + 38), fill=(55, 80, 116), width=2)
+    cy = header_y + 50
+
     rows = composition_rows[:20]
-    for i, item in enumerate(rows, 1):
+    for item in rows:
         share_pct = float(item.get("share_pct") or 0.0)
         secid = str(item.get("secid") or "UNKNOWN")
         name = str(item.get("name_ru") or "").strip() or secid
         ret_30 = item.get("ret_30d")
-        label = _fit_line(draw, f"{i}. {name}", text_font, card_w - 590)
-        draw.text((pad + 32, cy), label, fill=(222, 232, 246), font=text_font)
-        draw.text((pad + 44, cy + 34), _fit_line(draw, secid, ticker_font, 260), fill=(134, 157, 188), font=ticker_font)
+        asset_label = _fit_line(draw, f"{name} ({secid})", text_font, col2_x - col1_x - 26)
+        draw.text((col1_x, cy), asset_label, fill=(222, 232, 246), font=text_font)
 
         # Mini share bar for visual style without showing money.
-        bar_x = pad + card_w - 560
-        bar_y = cy + 12
+        bar_x = col2_x
+        bar_y = cy + 10
         bar_w = 220
         bar_h = 24
         fill_w = int(max(0.0, min(1.0, share_pct / 100.0)) * bar_w)
         draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), radius=12, fill=(43, 63, 92))
         if fill_w > 0:
             draw.rounded_rectangle((bar_x, bar_y, bar_x + fill_w, bar_y + bar_h), radius=12, fill=(86, 141, 215))
-        draw.text((bar_x + bar_w + 14, cy + 6), f"{share_pct:.1f}%", fill=(174, 205, 240), font=ticker_font)
+        draw.text((bar_x + bar_w + 14, cy + 5), f"{share_pct:.1f}%", fill=(174, 205, 240), font=ticker_font)
 
         if ret_30 is None:
             ret_text = "н/д"
@@ -728,7 +737,7 @@ def build_portfolio_share_card_png(
             ret_val = float(ret_30)
             ret_text = f"{ret_val:+.2f}%"
             ret_color = (163, 241, 194) if ret_val >= 0 else (255, 150, 166)
-        draw.text((pad + card_w - 190, cy), ret_text, fill=ret_color, font=text_font)
+        draw.text((col3_x, cy), ret_text, fill=ret_color, font=text_font)
         cy += 50
         if cy > y + s1_h - 62:
             break
