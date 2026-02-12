@@ -96,6 +96,7 @@ BTN_WHY_INVEST = "Зачем инвестировать"
 BTN_ASSET_LOOKUP = "Поиск цены"
 BTN_PORTFOLIO_MAP = "Карта портфеля"
 BTN_TOP_MOVERS = "Топ роста/падения"
+BTN_USD_RUB = "USD/RUB"
 CB_PORTFOLIO_MAP_SELF = "pmap:self"
 CB_PORTFOLIO_MAP_SHARE = "pmap:share"
 TRADE_SIDE_BUY = "buy"
@@ -404,7 +405,7 @@ def make_main_menu_kb() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=BTN_ADD_TRADE), KeyboardButton(text=BTN_PORTFOLIO)],
             [KeyboardButton(text=BTN_ASSET_LOOKUP), KeyboardButton(text=BTN_PORTFOLIO_MAP)],
-            [KeyboardButton(text=BTN_TOP_MOVERS)],
+            [KeyboardButton(text=BTN_TOP_MOVERS), KeyboardButton(text=BTN_USD_RUB)],
             [KeyboardButton(text=BTN_WHY_INVEST)],
             [KeyboardButton(text=BTN_ALERTS)],
         ],
@@ -853,8 +854,13 @@ async def cmd_top_movers(message: Message):
 
 async def cmd_usd_rub(message: Message):
     reset_data_source_flags()
-    async with aiohttp.ClientSession() as session:
-        rate = await get_usd_rub_rate(session)
+    try:
+        async with aiohttp.ClientSession() as session:
+            rate = await get_usd_rub_rate(session)
+    except Exception:
+        logger.exception("Failed to load USD/RUB rate")
+        await message.answer("Не удалось получить курс USD/RUB: временная ошибка сети MOEX. Попробуйте позже.")
+        return
     if rate is None:
         await message.answer("Не удалось получить курс USD/RUB с MOEX.")
         return
@@ -1063,6 +1069,9 @@ async def on_menu_alerts_status(message: Message):
 
 async def on_menu_top_movers(message: Message):
     await cmd_top_movers(message)
+
+async def on_menu_usd_rub(message: Message):
+    await cmd_usd_rub(message)
 
 async def cmd_why_invest(message: Message):
     try:
@@ -2145,6 +2154,7 @@ async def main():
     dp.message.register(on_menu_alerts_status, StateFilter("*"), F.text == BTN_ALERTS)
     dp.message.register(on_menu_asset_lookup, StateFilter("*"), F.text == BTN_ASSET_LOOKUP)
     dp.message.register(on_menu_top_movers, StateFilter("*"), F.text == BTN_TOP_MOVERS)
+    dp.message.register(on_menu_usd_rub, StateFilter("*"), F.text == BTN_USD_RUB)
     dp.message.register(cmd_why_invest, StateFilter("*"), F.text == BTN_WHY_INVEST)
     dp.message.register(on_broker_xml_document, StateFilter("*"), F.document)
 

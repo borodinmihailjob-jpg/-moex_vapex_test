@@ -288,38 +288,51 @@ async def get_last_price_metal(session: aiohttp.ClientSession, secid: str, board
     return price
 
 
-async def get_usd_rub_rate(session: aiohttp.ClientSession, secid: str = "USDRUB_TOM", boardid: str = "CETS") -> float | None:
+async def get_usd_rub_rate(session: aiohttp.ClientSession) -> float | None:
     """
-    Курс USD/RUB с валютного рынка MOEX (обычно USDRUB_TOM, board CETS).
+    Курс USD/RUB с валютного рынка MOEX.
+    Основной инструмент: USD000UTSTOM (alias: USDRUB_TOM), board CETS.
     """
-    path = f"/engines/currency/markets/selt/boards/{boardid}/securities/{secid}.json"
-
-    def parse_last(data: dict) -> float | None:
+    def parse_price(data: dict) -> float | None:
         md = data.get("marketdata", {})
         cols = md.get("columns", [])
         rows = md.get("data", [])
         if not rows:
             return None
         idx = {c: i for i, c in enumerate(cols)}
-        if "LAST" not in idx:
-            return None
-        last = rows[0][idx["LAST"]]
-        if last is None:
-            return None
-        return float(last)
-
-    data, delayed = await get_json_with_fallback_source(session, path, params={"iss.meta": "off"})
-    price = parse_last(data)
-    if price is None and not delayed:
-        logger.warning("ALGOPACK returned no USD/RUB LAST for secid=%s boardid=%s; retry via ISS", secid, boardid)
-        mark_delayed_data_used()
-        data = await iss_get_json(session, path, params={"iss.meta": "off"})
-        price = parse_last(data)
-    if price is None:
-        logger.warning("No USD/RUB LAST marketdata for secid=%s boardid=%s", secid, boardid)
+        for field in ("LAST", "LCURRENTPRICE", "MARKETPRICE", "WAPRICE"):
+            field_idx = idx.get(field)
+            if field_idx is None or field_idx >= len(rows[0]):
+                continue
+            raw = rows[0][field_idx]
+            if raw is None:
+                continue
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                continue
         return None
-    logger.debug("USD/RUB rate secid=%s boardid=%s last=%s", secid, boardid, price)
-    return price
+
+    candidates = [
+        ("CETS", "USD000UTSTOM"),
+        ("CETS", "USDRUB_TOM"),
+    ]
+
+    for boardid, secid in candidates:
+        path = f"/engines/currency/markets/selt/boards/{boardid}/securities/{secid}.json"
+        data, delayed = await get_json_with_fallback_source(session, path, params={"iss.meta": "off"})
+        price = parse_price(data)
+        if price is None and not delayed:
+            logger.warning("ALGOPACK returned no USD/RUB price for secid=%s boardid=%s; retry via ISS", secid, boardid)
+            mark_delayed_data_used()
+            data = await iss_get_json(session, path, params={"iss.meta": "off"})
+            price = parse_price(data)
+        if price is not None:
+            logger.debug("USD/RUB rate secid=%s boardid=%s price=%s", secid, boardid, price)
+            return price
+
+    logger.warning("No USD/RUB marketdata for all candidates")
+    return None
 
 
 async def get_last_price_by_asset_type(
