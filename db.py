@@ -1654,3 +1654,25 @@ async def update_price_target_alert_last_sent(db_path: str, alert_id: int, iso_t
     except Exception:
         logger.exception("Failed update_price_target_alert_last_sent alert=%s", alert_id)
         raise
+
+
+async def disable_price_target_alert(db_path: str, user_id: int, alert_id: int) -> bool:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE price_target_alerts
+                SET enabled = FALSE
+                WHERE id = $1
+                  AND user_id = $2
+                  AND enabled = TRUE
+                RETURNING id
+                """,
+                int(alert_id),
+                int(user_id),
+            )
+        return row is not None
+    except Exception:
+        logger.exception("Failed disable_price_target_alert user=%s alert=%s", user_id, alert_id)
+        raise

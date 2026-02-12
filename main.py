@@ -52,6 +52,7 @@ from db import (
     create_price_target_alert,
     list_active_price_target_alerts,
     update_price_target_alert_last_sent,
+    disable_price_target_alert,
 )
 from portfolio_cards import build_portfolio_map_png, build_portfolio_share_card_png
 from moex_iss import (
@@ -403,6 +404,31 @@ async def make_alert_range_confirm_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Да, ±5%", callback_data="aarange:yes")
     kb.button(text="Только точное значение", callback_data="aarange:no")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def make_alerts_list_kb(alerts: list[dict]):
+    kb = InlineKeyboardBuilder()
+    for alert in alerts:
+        secid = alert.get("secid") or "?"
+        shortname = (alert.get("shortname") or "").strip()
+        target_price = float(alert.get("target_price") or 0.0)
+        range_percent = float(alert.get("range_percent") or 0.0)
+        label = f"{shortname} ({secid})" if shortname else secid
+        if range_percent > 0:
+            text = f"{label}: {money(target_price)} ±{range_percent:g}%"
+        else:
+            text = f"{label}: {money(target_price)}"
+        kb.button(text=text[:64], callback_data=f"talert:{int(alert['id'])}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def make_alert_disable_confirm_kb(alert_id: int):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Отключить", callback_data=f"talertoff:{alert_id}")
+    kb.button(text="Отмена", callback_data="talertlist")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -872,6 +898,7 @@ async def cmd_start(message: Message):
         "/top_movers — лидеры роста и падения за выбранную сессию\n"
         "/usd_rub — текущий курс USD/RUB (MOEX)\n"
         "/alert — поставить ценовой алерт по акции/металлу/фиату\n"
+        "/alerts_list — список и отключение ценовых алертов\n"
         "🔔 Отчёты дня\n"
         "/trading_day_on — включить отчёт по итогам торгов (открытие/закрытие)\n"
         "/trading_day_off — выключить отчёт\n"
@@ -1102,6 +1129,97 @@ async def on_alert_range_confirm(call: CallbackQuery, state: FSMContext):
     )
     await state.clear()
     await call.answer()
+
+
+async def cmd_alerts_list(message: Message):
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        await message.answer("Не удалось определить пользователя.")
+        return
+    alerts = await list_active_price_target_alerts(DB_DSN, user_id)
+    if not alerts:
+        await message.answer("У вас нет активных ценовых алертов. Добавьте через /alert.")
+        return
+    await message.answer("Ваши активные ценовые алерты:", reply_markup=await make_alerts_list_kb(alerts))
+
+
+async def on_alerts_list_refresh(call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else None
+    if not user_id:
+        await call.answer("Не удалось определить пользователя", show_alert=True)
+        return
+    alerts = await list_active_price_target_alerts(DB_DSN, user_id)
+    if not alerts:
+        await safe_edit_text(call.message, "У вас нет активных ценовых алертов. Добавьте через /alert.")
+        await call.answer()
+        return
+    await safe_edit_text(call.message, "Ваши активные ценовые алерты:", reply_markup=await make_alerts_list_kb(alerts))
+    await call.answer()
+
+
+async def on_alert_pick_to_disable(call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else None
+    if not user_id:
+        await call.answer("Не удалось определить пользователя", show_alert=True)
+        return
+    raw_id = (call.data or "").split(":", 1)[1] if ":" in (call.data or "") else ""
+    try:
+        alert_id = int(raw_id)
+    except ValueError:
+        await call.answer("Некорректный алерт", show_alert=True)
+        return
+    alerts = await list_active_price_target_alerts(DB_DSN, user_id)
+    selected = next((a for a in alerts if int(a["id"]) == alert_id), None)
+    if selected is None:
+        await safe_edit_text(call.message, "Алерт уже отключен или не найден.")
+        await call.answer()
+        return
+    secid = selected.get("secid") or "?"
+    shortname = (selected.get("shortname") or "").strip()
+    target_price = float(selected.get("target_price") or 0.0)
+    range_percent = float(selected.get("range_percent") or 0.0)
+    label = f"{shortname} ({secid})" if shortname else secid
+    range_line = f"±{range_percent:g}%" if range_percent > 0 else "точное значение"
+    await safe_edit_text(
+        call.message,
+        (
+            f"Отключить алерт?\n\n"
+            f"Инструмент: {label}\n"
+            f"Цена: {money(target_price)}\n"
+            f"Диапазон: {range_line}"
+        ),
+        reply_markup=await make_alert_disable_confirm_kb(alert_id),
+    )
+    await call.answer()
+
+
+async def on_alert_disable_confirm(call: CallbackQuery):
+    user_id = call.from_user.id if call.from_user else None
+    if not user_id:
+        await call.answer("Не удалось определить пользователя", show_alert=True)
+        return
+    raw_id = (call.data or "").split(":", 1)[1] if ":" in (call.data or "") else ""
+    try:
+        alert_id = int(raw_id)
+    except ValueError:
+        await call.answer("Некорректный алерт", show_alert=True)
+        return
+    was_disabled = await disable_price_target_alert(DB_DSN, user_id, alert_id)
+    if not was_disabled:
+        await safe_edit_text(call.message, "Алерт уже отключен или не найден.")
+        await call.answer()
+        return
+    alerts = await list_active_price_target_alerts(DB_DSN, user_id)
+    if not alerts:
+        await safe_edit_text(call.message, "Алерт отключен. Активных алертов больше нет.")
+        await call.answer("Отключено")
+        return
+    await safe_edit_text(
+        call.message,
+        "Алерт отключен. Оставшиеся активные алерты:",
+        reply_markup=await make_alerts_list_kb(alerts),
+    )
+    await call.answer("Отключено")
 
 
 async def on_top_movers_date_pick(call: CallbackQuery):
@@ -2407,6 +2525,7 @@ async def main():
     dp.message.register(cmd_top_movers, Command("top_movers"), StateFilter("*"))
     dp.message.register(cmd_usd_rub, Command("usd_rub"), StateFilter("*"))
     dp.message.register(cmd_alert, Command("alert"), StateFilter("*"))
+    dp.message.register(cmd_alerts_list, Command("alerts_list"), StateFilter("*"))
     dp.message.register(cmd_clear_portfolio, Command("clear_portfolio"), StateFilter("*"))
     dp.message.register(cmd_asset_lookup, Command("asset_lookup"), StateFilter("*"))
     dp.message.register(cmd_import_broker_xml, Command("import_broker_xml"), StateFilter("*"))
@@ -2421,6 +2540,9 @@ async def main():
     dp.message.register(cmd_market_reports_off, Command("market_reports_off"), StateFilter("*"))
     dp.message.register(cmd_alerts_status, Command("alerts_status"), StateFilter("*"))
     dp.callback_query.register(on_top_movers_date_pick, StateFilter("*"), F.data.startswith("tmdate:"))
+    dp.callback_query.register(on_alerts_list_refresh, StateFilter("*"), F.data == "talertlist")
+    dp.callback_query.register(on_alert_pick_to_disable, StateFilter("*"), F.data.startswith("talert:"))
+    dp.callback_query.register(on_alert_disable_confirm, StateFilter("*"), F.data.startswith("talertoff:"))
     dp.callback_query.register(on_portfolio_map_self, StateFilter("*"), F.data == CB_PORTFOLIO_MAP_SELF)
     dp.callback_query.register(on_portfolio_map_share, StateFilter("*"), F.data == CB_PORTFOLIO_MAP_SHARE)
     dp.message.register(on_menu_add_trade, StateFilter("*"), F.text == BTN_ADD_TRADE)
