@@ -12,6 +12,7 @@ const state = {
   selectedTrade: null,
   selectedLookup: null,
   selectedAlert: null,
+  searchControllers: {},
 };
 
 const el = {
@@ -28,6 +29,7 @@ const el = {
   tradeAssetType: document.getElementById("tradeAssetType"),
   tradeDate: document.getElementById("tradeDate"),
   tradeSearch: document.getElementById("tradeSearch"),
+  tradeSearchClear: document.getElementById("tradeSearchClear"),
   tradeSearchResults: document.getElementById("tradeSearchResults"),
   tradeSelected: document.getElementById("tradeSelected"),
   tradeQty: document.getElementById("tradeQty"),
@@ -37,6 +39,7 @@ const el = {
 
   lookupAssetType: document.getElementById("lookupAssetType"),
   lookupSearch: document.getElementById("lookupSearch"),
+  lookupSearchClear: document.getElementById("lookupSearchClear"),
   lookupSearchResults: document.getElementById("lookupSearchResults"),
   lookupSelected: document.getElementById("lookupSelected"),
   lookupBtn: document.getElementById("lookupBtn"),
@@ -48,6 +51,7 @@ const el = {
 
   alertAssetType: document.getElementById("alertAssetType"),
   alertSearch: document.getElementById("alertSearch"),
+  alertSearchClear: document.getElementById("alertSearchClear"),
   alertSearchResults: document.getElementById("alertSearchResults"),
   alertSelected: document.getElementById("alertSelected"),
   alertTargetPrice: document.getElementById("alertTargetPrice"),
@@ -167,24 +171,58 @@ function renderSearchList(container, items, onPick) {
   });
 }
 
-function bindSearch(inputEl, typeEl, resultEl, onPick) {
+function bindSearch({ inputEl, clearEl, typeEl, resultEl, selectedEl, getSelected, setSelected }) {
+  const showClear = (show) => {
+    if (!clearEl) return;
+    clearEl.classList.toggle("show", !!show);
+  };
+
+  const clearSelection = ({ focus = false } = {}) => {
+    setSelected(null);
+    inputEl.value = "";
+    resultEl.innerHTML = "";
+    selectedEl.textContent = "Инструмент не выбран";
+    showClear(false);
+    if (focus) {
+      inputEl.focus();
+    }
+  };
+
+  if (clearEl) {
+    clearEl.addEventListener("click", () => clearSelection({ focus: true }));
+  }
+
   let timer = null;
   inputEl.addEventListener("input", () => {
     clearTimeout(timer);
     timer = setTimeout(async () => {
       const q = inputEl.value.trim();
+      const selected = getSelected();
+      if (selected && q !== String(selected.secid || "").trim()) {
+        setSelected(null);
+        selectedEl.textContent = "Инструмент не выбран";
+        showClear(false);
+      }
       if (!q) {
         resultEl.innerHTML = "";
         return;
       }
       try {
         const data = await api(`/api/miniapp/search?q=${encodeURIComponent(q)}&asset_type=${encodeURIComponent(typeEl.value)}`);
-        renderSearchList(resultEl, data || [], onPick);
+        renderSearchList(resultEl, data || [], (picked, label) => {
+          setSelected(picked);
+          inputEl.value = String(picked.secid || "").trim() || label;
+          selectedEl.textContent = `Выбрано: ${label}`;
+          resultEl.innerHTML = "";
+          showClear(true);
+        });
       } catch (e) {
         renderEmpty(resultEl, "Ошибка поиска");
       }
     }, 300);
   });
+
+  return { clearSelection };
 }
 
 function renderPositions(rows) {
@@ -337,10 +375,7 @@ async function saveTrade() {
   el.tradeQty.value = "";
   el.tradePrice.value = "";
   el.tradeCommission.value = "0";
-  el.tradeSearch.value = "";
-  el.tradeSearchResults.innerHTML = "";
-  state.selectedTrade = null;
-  el.tradeSelected.textContent = "Инструмент не выбран";
+  state.searchControllers.trade?.clearSelection();
   toast("Сделка сохранена");
   await loadPortfolio();
 }
@@ -350,18 +385,36 @@ function setupEvents() {
     btn.addEventListener("click", () => setTab(btn.dataset.tab));
   });
 
-  bindSearch(el.tradeSearch, el.tradeAssetType, el.tradeSearchResults, (s, label) => {
-    state.selectedTrade = s;
-    el.tradeSelected.textContent = `Выбрано: ${label}`;
+  state.searchControllers.trade = bindSearch({
+    inputEl: el.tradeSearch,
+    clearEl: el.tradeSearchClear,
+    typeEl: el.tradeAssetType,
+    resultEl: el.tradeSearchResults,
+    selectedEl: el.tradeSelected,
+    getSelected: () => state.selectedTrade,
+    setSelected: (s) => { state.selectedTrade = s; },
   });
-  bindSearch(el.lookupSearch, el.lookupAssetType, el.lookupSearchResults, (s, label) => {
-    state.selectedLookup = s;
-    el.lookupSelected.textContent = `Выбрано: ${label}`;
+  state.searchControllers.lookup = bindSearch({
+    inputEl: el.lookupSearch,
+    clearEl: el.lookupSearchClear,
+    typeEl: el.lookupAssetType,
+    resultEl: el.lookupSearchResults,
+    selectedEl: el.lookupSelected,
+    getSelected: () => state.selectedLookup,
+    setSelected: (s) => { state.selectedLookup = s; },
   });
-  bindSearch(el.alertSearch, el.alertAssetType, el.alertSearchResults, (s, label) => {
-    state.selectedAlert = s;
-    el.alertSelected.textContent = `Выбрано: ${label}`;
+  state.searchControllers.alert = bindSearch({
+    inputEl: el.alertSearch,
+    clearEl: el.alertSearchClear,
+    typeEl: el.alertAssetType,
+    resultEl: el.alertSearchResults,
+    selectedEl: el.alertSelected,
+    getSelected: () => state.selectedAlert,
+    setSelected: (s) => { state.selectedAlert = s; },
   });
+  el.tradeAssetType.addEventListener("change", () => state.searchControllers.trade?.clearSelection());
+  el.lookupAssetType.addEventListener("change", () => state.searchControllers.lookup?.clearSelection());
+  el.alertAssetType.addEventListener("change", () => state.searchControllers.alert?.clearSelection());
 
   el.tradeDate.value = todayDdmmyyyy();
   el.refreshBtn.addEventListener("click", async () => {
@@ -443,10 +496,7 @@ function setupEvents() {
       });
       el.alertTargetPrice.value = "";
       el.alertRange.value = "5";
-      el.alertSearch.value = "";
-      el.alertSearchResults.innerHTML = "";
-      state.selectedAlert = null;
-      el.alertSelected.textContent = "Инструмент не выбран";
+      state.searchControllers.alert?.clearSelection();
       await loadAlerts();
       toast("Алерт создан");
     } catch (_) {

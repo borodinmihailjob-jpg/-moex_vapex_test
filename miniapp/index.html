@@ -61,7 +61,10 @@
               <input id="tradeDate" type="text" placeholder="dd.mm.yyyy" />
             </label>
             <label>Поиск инструмента
-              <input id="tradeSearch" type="text" placeholder="SBER / GLDRUB_TOM / доллар" />
+              <div class="search-control">
+                <button id="tradeSearchClear" class="search-clear" type="button" aria-label="Очистить поиск">×</button>
+                <input id="tradeSearch" type="text" placeholder="SBER / GLDRUB_TOM / доллар" />
+              </div>
             </label>
           </div>
           <div id="tradeSearchResults" class="list compact"></div>
@@ -93,7 +96,10 @@
               </select>
             </label>
             <label>Поиск
-              <input id="lookupSearch" type="text" placeholder="Тикер или название" />
+              <div class="search-control">
+                <button id="lookupSearchClear" class="search-clear" type="button" aria-label="Очистить поиск">×</button>
+                <input id="lookupSearch" type="text" placeholder="Тикер или название" />
+              </div>
             </label>
           </div>
           <div id="lookupSearchResults" class="list compact"></div>
@@ -137,7 +143,10 @@
               </select>
             </label>
             <label>Поиск
-              <input id="alertSearch" type="text" placeholder="Тикер или название" />
+              <div class="search-control">
+                <button id="alertSearchClear" class="search-clear" type="button" aria-label="Очистить поиск">×</button>
+                <input id="alertSearch" type="text" placeholder="Тикер или название" />
+              </div>
             </label>
           </div>
           <div id="alertSearchResults" class="list compact"></div>
