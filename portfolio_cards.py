@@ -2,9 +2,14 @@ import io
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from PIL import Image, ImageDraw, ImageFont
+import squarify
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 MSK_TZ = ZoneInfo("Europe/Moscow")
+MAP_CARD_SIZES = {
+    "share": (1200, 630),
+    "square": (1080, 1080),
+}
 
 
 def money(x: float) -> str:
@@ -34,9 +39,9 @@ def _blend(c1: tuple[int, int, int], c2: tuple[int, int, int], t: float) -> tupl
 
 
 def _tile_color_by_pnl_pct(pnl_pct: float | None) -> tuple[int, int, int]:
-    neutral = (45, 57, 70)
-    green = (0, 200, 83)
-    red = (255, 23, 68)
+    neutral = (87, 104, 132)
+    green = (39, 181, 133)
+    red = (207, 64, 105)
     if pnl_pct is None:
         return neutral
     norm = max(-8.0, min(8.0, float(pnl_pct))) / 8.0
@@ -49,39 +54,6 @@ def _tile_color_by_pnl_pct(pnl_pct: float | None) -> tuple[int, int, int]:
 def _text_color_for_bg(bg: tuple[int, int, int]) -> tuple[int, int, int]:
     lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
     return (20, 20, 20) if lum > 150 else (245, 245, 245)
-
-
-def _treemap_partition(
-    items: list[dict],
-    x: float,
-    y: float,
-    w: float,
-    h: float,
-) -> list[tuple[dict, tuple[int, int, int, int]]]:
-    if not items or w <= 0 or h <= 0:
-        return []
-    if len(items) == 1:
-        return [(items[0], (int(x), int(y), int(x + w), int(y + h)))]
-
-    total = sum(max(1e-9, float(i["weight"])) for i in items)
-    acc = 0.0
-    split_idx = 1
-    half = total / 2.0
-    for i, item in enumerate(items, 1):
-        acc += max(1e-9, float(item["weight"]))
-        if acc >= half:
-            split_idx = i
-            break
-    left = items[:split_idx]
-    right = items[split_idx:] or items[-1:]
-    left_sum = sum(max(1e-9, float(i["weight"])) for i in left)
-    ratio = left_sum / total if total > 0 else 0.5
-
-    if w >= h:
-        left_w = w * ratio
-        return _treemap_partition(left, x, y, left_w, h) + _treemap_partition(right, x + left_w, y, w - left_w, h)
-    top_h = h * ratio
-    return _treemap_partition(left, x, y, w, top_h) + _treemap_partition(right, x, y + top_h, w, h - top_h)
 
 
 def _fit_line(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> str:
@@ -98,94 +70,221 @@ def _text_height(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont
     return max(1, int(bottom - top))
 
 
-def build_portfolio_map_png(tiles: list[dict]) -> bytes:
-    width = 2800
-    height = 1700
-    pad = 16
-    gap = 4
-    bg = (242, 244, 247)
-    image = Image.new("RGB", (width, height), color=bg)
-    draw = ImageDraw.Draw(image)
+def _build_treemap_layout(
+    items: list[dict],
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    gap: int = 6,
+) -> list[tuple[dict, tuple[int, int, int, int]]]:
+    if not items or w <= 0 or h <= 0:
+        return []
+    ordered = sorted(items, key=lambda t: float(t.get("value_rub") or 0.0), reverse=True)
+    sizes = [max(1e-9, float(t.get("value_rub") or 0.0)) for t in ordered]
+    norm = squarify.normalize_sizes(sizes, w, h)
+    if hasattr(squarify, "padded_squarify"):
+        raw = squarify.padded_squarify(norm, x, y, w, h)
+    else:
+        raw = squarify.squarify(norm, x, y, w, h)
 
-    title_font = _load_font(66, bold=True)
-    small_title_font = _load_font(34, bold=True)
-    secid_font = _load_font(42, bold=True)
-    name_font = _load_font(29, bold=False)
-    value_font = _load_font(42, bold=True)
-    stat_font = _load_font(30, bold=True)
+    out: list[tuple[dict, tuple[int, int, int, int]]] = []
+    for item, rect in zip(ordered, raw):
+        rx = int(rect["x"]) + gap // 2
+        ry = int(rect["y"]) + gap // 2
+        rw = int(rect["dx"]) - gap
+        rh = int(rect["dy"]) - gap
+        if rw < 2 or rh < 2:
+            continue
+        out.append((item, (rx, ry, rx + rw, ry + rh)))
+    return out
 
-    total_value = sum(float(t["value"]) for t in tiles)
-    header_h = 145
-    draw.text((pad, 12), "Карта портфеля", fill=(32, 36, 40), font=title_font)
+
+def _draw_drop_shadow(
+    canvas: Image.Image,
+    rect: tuple[int, int, int, int],
+    radius: int,
+    offset: tuple[int, int] = (0, 8),
+    blur: int = 18,
+    color: tuple[int, int, int, int] = (38, 61, 97, 62),
+) -> None:
+    shadow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(shadow)
+    x1, y1, x2, y2 = rect
+    ox, oy = offset
+    d.rounded_rectangle((x1 + ox, y1 + oy, x2 + ox, y2 + oy), radius=radius, fill=color)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(blur))
+    canvas.alpha_composite(shadow)
+
+
+def _draw_soft_background(draw: ImageDraw.ImageDraw, w: int, h: int) -> None:
+    top = (226, 236, 250)
+    bottom = (204, 219, 240)
+    for y in range(h):
+        t = y / max(1, h - 1)
+        c = _blend(top, bottom, t)
+        draw.line((0, y, w, y), fill=c)
+    draw.ellipse((-int(w * 0.2), -int(h * 0.3), int(w * 0.35), int(h * 0.4)), fill=(236, 242, 252))
+    draw.ellipse((int(w * 0.55), -int(h * 0.22), int(w * 1.15), int(h * 0.45)), fill=(220, 235, 248))
+
+
+def _to_payload_from_tiles(tiles: list[dict], mode: str = "share") -> dict:
+    positions = []
+    for t in tiles:
+        value = float(t.get("value") or t.get("value_rub") or 0.0)
+        pnl_pct = t.get("pnl_pct")
+        pnl_rub = None
+        if pnl_pct is not None:
+            try:
+                pnl_rub = value * float(pnl_pct) / 100.0
+            except (TypeError, ValueError):
+                pnl_rub = None
+        positions.append(
+            {
+                "ticker": str(t.get("secid") or t.get("ticker") or "UNKNOWN"),
+                "name": str(t.get("shortname") or t.get("name") or "").strip(),
+                "value_rub": value,
+                "pnl_pct": (float(pnl_pct) if pnl_pct is not None else None),
+                "pnl_rub": pnl_rub,
+            }
+        )
+    total = sum(float(p["value_rub"]) for p in positions)
+    return {
+        "positions": positions,
+        "meta": {
+            "as_of": datetime.now(MSK_TZ).strftime("%d.%m.%Y %H:%M МСК"),
+            "total_value": total,
+            "instruments_count": len(positions),
+            "mode": mode,
+        },
+    }
+
+
+def build_portfolio_map_card_png(payload: dict, mode: str = "share") -> bytes:
+    size = MAP_CARD_SIZES.get(mode, MAP_CARD_SIZES["share"])
+    width, height = size
+    canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+    _draw_soft_background(draw, width, height)
+
+    card_pad = int(min(width, height) * 0.04)
+    card_rect = (card_pad, card_pad, width - card_pad, height - card_pad)
+    card_radius = int(min(width, height) * 0.04)
+    _draw_drop_shadow(canvas, card_rect, radius=card_radius, blur=22)
+    draw.rounded_rectangle(card_rect, radius=card_radius, fill=(245, 247, 252), outline=(223, 231, 244), width=2)
+
+    title_font = _load_font(58 if mode == "share" else 52, bold=True)
+    subtitle_font = _load_font(24 if mode == "share" else 22, bold=False)
+    badge_title_font = _load_font(26 if mode == "share" else 24, bold=True)
+    badge_value_font = _load_font(58 if mode == "share" else 52, bold=True)
+    ticker_font = _load_font(22 if mode == "share" else 20, bold=True)
+    name_font = _load_font(17 if mode == "share" else 16, bold=False)
+    value_font = _load_font(22 if mode == "share" else 20, bold=True)
+    pnl_font = _load_font(16 if mode == "share" else 15, bold=True)
+    footer_font = _load_font(18 if mode == "share" else 17, bold=False)
+
+    meta = payload.get("meta", {})
+    positions = payload.get("positions", [])
+    total_value = float(meta.get("total_value") or sum(float(p.get("value_rub") or 0.0) for p in positions))
+    instruments_count = int(meta.get("instruments_count") or len(positions))
+    as_of = str(meta.get("as_of") or datetime.now(MSK_TZ).strftime("%d.%m.%Y %H:%M МСК"))
+    pnl_total = sum(float(p.get("pnl_rub") or 0.0) for p in positions)
+    pnl_pct = (pnl_total / total_value * 100.0) if abs(total_value) > 1e-12 else 0.0
+
+    x1, y1, x2, y2 = card_rect
+    header_h = int((y2 - y1) * (0.2 if mode == "share" else 0.22))
+    inner_pad = int(min(width, height) * 0.02)
+
+    draw.text((x1 + inner_pad, y1 + inner_pad - 2), "Карта портфеля", fill=(34, 45, 78), font=title_font)
+    sub = f"Инструментов: {instruments_count} • Общая стоимость: {money(total_value)} ₽ • {as_of}"
+    draw.text((x1 + inner_pad, y1 + inner_pad + int(title_font.size * 1.15)), sub, fill=(96, 112, 143), font=subtitle_font)
+
+    badge_w = int((x2 - x1) * (0.22 if mode == "share" else 0.3))
+    badge_h = int(header_h * 0.8)
+    badge_x2 = x2 - inner_pad
+    badge_x1 = badge_x2 - badge_w
+    badge_y1 = y1 + inner_pad
+    badge_y2 = badge_y1 + badge_h
+    badge_bg = (226, 243, 233) if pnl_pct >= 0 else (249, 231, 236)
+    badge_fg = (28, 133, 91) if pnl_pct >= 0 else (181, 52, 92)
+    draw.rounded_rectangle((badge_x1, badge_y1, badge_x2, badge_y2), radius=18, fill=badge_bg)
+    draw.text((badge_x1 + 20, badge_y1 + 12), "P&L сегодня", fill=badge_fg, font=badge_title_font)
+    draw.text((badge_x1 + 20, badge_y1 + int(badge_h * 0.42)), f"{pnl_pct:+.2f}%", fill=badge_fg, font=badge_value_font)
+
+    sep_y = y1 + header_h
+    draw.line((x1 + inner_pad, sep_y, x2 - inner_pad, sep_y), fill=(223, 231, 244), width=2)
+
+    treemap_x = x1 + inner_pad
+    treemap_y = sep_y + inner_pad // 2
+    footer_h = int((y2 - y1) * 0.08)
+    treemap_w = (x2 - x1) - inner_pad * 2
+    treemap_h = (y2 - y1) - header_h - footer_h - inner_pad
+
+    treemap_items = []
+    for p in positions:
+        treemap_items.append(
+            {
+                "ticker": str(p.get("ticker") or "UNKNOWN"),
+                "name": str(p.get("name") or "").strip(),
+                "value_rub": float(p.get("value_rub") or 0.0),
+                "pnl_pct": p.get("pnl_pct"),
+            }
+        )
+    placements = _build_treemap_layout(treemap_items, treemap_x, treemap_y, treemap_w, treemap_h, gap=6)
+
+    for item, rect in placements:
+        rx1, ry1, rx2, ry2 = rect
+        tw = rx2 - rx1
+        th = ry2 - ry1
+        fill = _tile_color_by_pnl_pct(item.get("pnl_pct"))
+        fg = _text_color_for_bg(fill)
+        radius = max(8, min(24, int(min(tw, th) * 0.12)))
+        draw.rounded_rectangle((rx1, ry1, rx2, ry2), radius=radius, fill=fill)
+        draw.rounded_rectangle((rx1, ry1, rx2, ry2), radius=radius, outline=(255, 255, 255, 120), width=2)
+
+        if tw < 80 or th < 55:
+            continue
+        px = rx1 + 10
+        py = ry1 + 8
+        ticker = _fit_line(draw, item["ticker"], ticker_font, tw - 20)
+        draw.text((px, py), ticker, fill=fg, font=ticker_font)
+        py += _text_height(draw, ticker, ticker_font) + 2
+
+        if th >= 92:
+            name = _fit_line(draw, item.get("name") or "", name_font, tw - 20)
+            if name:
+                draw.text((px, py), name, fill=fg, font=name_font)
+
+        val = _fit_line(draw, f"{money(float(item['value_rub']))} ₽", value_font, tw - 20)
+        draw.text((px, ry2 - _text_height(draw, val, value_font) - 10), val, fill=fg, font=value_font)
+
+        pnl = item.get("pnl_pct")
+        if pnl is not None and tw >= 165 and th >= 70:
+            ptxt = f"P&L {float(pnl):+,.2f}%".replace(",", " ")
+            ptxt = _fit_line(draw, ptxt, pnl_font, tw - 20)
+            pw = int(draw.textlength(ptxt, font=pnl_font))
+            draw.text((rx2 - pw - 10, ry1 + 8), ptxt, fill=fg, font=pnl_font)
+
     draw.text(
-        (pad, 86),
-        f"Инструментов: {len(tiles)}   Общая стоимость: {money(total_value)} RUB",
-        fill=(82, 90, 98),
-        font=small_title_font,
+        ((x1 + x2) // 2 - int(draw.textlength("@moex_vapex_bot", font=footer_font) // 2), y2 - footer_h + 8),
+        "@moex_vapex_bot",
+        fill=(101, 116, 145),
+        font=footer_font,
     )
 
-    chart_x = pad
-    chart_y = header_h
-    chart_w = width - pad * 2
-    chart_h = height - header_h - pad
+    out = io.BytesIO()
+    canvas.convert("RGB").save(out, format="PNG")
+    return out.getvalue()
 
-    sorted_tiles = sorted(tiles, key=lambda x: x["weight"], reverse=True)
-    placements = _treemap_partition(sorted_tiles, chart_x, chart_y, chart_w, chart_h)
 
-    for tile, rect in placements:
-        x1, y1, x2, y2 = rect
-        w0 = x2 - x1
-        h0 = y2 - y1
-        local_gap = gap if min(w0, h0) >= 20 else 1
-        x1 += local_gap
-        y1 += local_gap
-        x2 -= local_gap
-        y2 -= local_gap
-        if x2 <= x1 or y2 <= y1:
-            x2 = max(x2, x1 + 1)
-            y2 = max(y2, y1 + 1)
+def build_portfolio_map_png(tiles: list[dict]) -> bytes:
+    payload = _to_payload_from_tiles(tiles, mode="share")
+    return build_portfolio_map_card_png(payload, mode="share")
 
-        bg_color = _tile_color_by_pnl_pct(tile.get("pnl_pct"))
-        fg_color = _text_color_for_bg(bg_color)
-        draw.rectangle((x1, y1, x2, y2), fill=bg_color)
 
-        inner_w = x2 - x1
-        inner_h = y2 - y1
-        if inner_w < 70 or inner_h < 46:
-            continue
-        px = x1 + 10
-        py = y1 + 8
-
-        secid = _fit_line(draw, str(tile["secid"]), secid_font, inner_w - 20)
-        secid_h = _text_height(draw, secid, secid_font)
-        if inner_w >= 180 and inner_h >= max(70, secid_h + 18):
-            draw.text((px, py), secid, fill=fg_color, font=secid_font)
-            py += secid_h + 6
-        shortname = _fit_line(draw, str(tile.get("shortname") or ""), name_font, inner_w - 20)
-        name_h = _text_height(draw, shortname, name_font) if shortname else 0
-        if shortname and inner_w >= 220 and (y1 + inner_h - py) >= (name_h + 18):
-            draw.text((px, py), shortname, fill=fg_color, font=name_font)
-            py += name_h + 6
-
-        if inner_w >= 240 and inner_h >= 150:
-            val = f"{money(float(tile['value']))} RUB"
-            draw.text(
-                (px, max(py + 6, y1 + inner_h - 72)),
-                _fit_line(draw, val, value_font, inner_w - 20),
-                fill=fg_color,
-                font=value_font,
-            )
-
-        pnl_pct = tile.get("pnl_pct")
-        if inner_w >= 190 and inner_h >= 92:
-            stat = "P&L: н/д" if pnl_pct is None else f"P&L {pnl_pct:+.2f}%"
-            stat_w = int(draw.textlength(stat, font=stat_font))
-            if stat_w <= (inner_w - 24):
-                draw.text((x1 + inner_w - 12 - stat_w, y1 + 10), stat, fill=fg_color, font=stat_font)
-
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    return buf.getvalue()
+def build_portfolio_map_square_png(tiles: list[dict]) -> bytes:
+    payload = _to_payload_from_tiles(tiles, mode="square")
+    return build_portfolio_map_card_png(payload, mode="square")
 
 
 def build_portfolio_share_card_png(

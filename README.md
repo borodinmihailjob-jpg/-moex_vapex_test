@@ -238,6 +238,20 @@ Telegram-бот для учета сделок, оценки портфеля и
 - с проверкой БД (нужен `DATABASE_URL`): `./.venv/bin/python scripts/smoke_check.py --with-db`
 - с live-проверкой MOEX API: `./.venv/bin/python scripts/smoke_check.py --with-network`
 
+## Демо генератор карты портфеля
+
+Новый рендер карты портфеля (fintech treemap-обертка) поддерживает два формата:
+- `1200x630` (share),
+- `1080x1080` (square).
+
+Сгенерировать демо:
+
+`./.venv/bin/python scripts/generate_portfolio_map_demo.py --out-dir ./artifacts`
+
+С JSON-входом:
+
+`./.venv/bin/python scripts/generate_portfolio_map_demo.py --input-json ./payload.json --out-dir ./artifacts`
+
 ## Технические модули
 
 - `main.py` — Telegram-логика, команды, FSM, генерация карты портфеля, воркер уведомлений.
