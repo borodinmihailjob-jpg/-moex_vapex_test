@@ -395,10 +395,19 @@ async def get_last_price_fiat(session: aiohttp.ClientSession, secid: str, boardi
         return cached[0]
 
     candidates = [secid]
-    alias_map = {"USDRUB_TOM": "USD000UTSTOM"}
-    alias = alias_map.get(str(secid).upper())
-    if alias and alias not in candidates:
-        candidates.append(alias)
+    alias_map: dict[str, list[str]] = {
+        "USDRUB_TOM": ["USD000UTSTOM"],
+        "EURRUB_TOM": ["EUR_RUB__TOM", "EUR000UTSTOM"],
+        "CNYRUB_TOM": ["CNY000TOM", "CNYRUB_TOM"],
+        "BYNRUB_TOM": ["BYN_RUB__TOM", "BYNRUB_TOM"],
+        "KZTRUB_TOM": ["KZT000TOM", "KZTRUB_TOM"],
+        "TRYRUB_TOM": ["TRY000UTSTOM", "TRYRUB_TOM"],
+        "AEDRUB_TOM": ["AED000UTSTOM", "AEDRUB_TOM"],
+    }
+    aliases = alias_map.get(str(secid).upper(), [])
+    for alias in aliases:
+        if alias not in candidates:
+            candidates.append(alias)
 
     for candidate in candidates:
         path = f"/engines/currency/markets/selt/boards/{norm_boardid}/securities/{candidate}.json"

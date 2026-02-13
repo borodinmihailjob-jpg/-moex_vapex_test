@@ -17,6 +17,16 @@ const state = {
   usdLoaded: false,
 };
 
+const POPULAR_FIAT_ALERT_PAIRS = [
+  { secid: "USDRUB_TOM", boardid: "CETS", shortname: "Доллар США / Российский рубль" },
+  { secid: "EURRUB_TOM", boardid: "CETS", shortname: "Евро / Российский рубль" },
+  { secid: "CNYRUB_TOM", boardid: "CETS", shortname: "Китайский юань / Российский рубль" },
+  { secid: "BYNRUB_TOM", boardid: "CETS", shortname: "Белорусский рубль / Российский рубль" },
+  { secid: "KZTRUB_TOM", boardid: "CETS", shortname: "Казахстанский тенге / Российский рубль" },
+  { secid: "TRYRUB_TOM", boardid: "CETS", shortname: "Турецкая лира / Российский рубль" },
+  { secid: "AEDRUB_TOM", boardid: "CETS", shortname: "Дирхам ОАЭ / Российский рубль" },
+];
+
 const el = {
   app: document.getElementById("app"),
   content: document.getElementById("content"),
@@ -228,7 +238,8 @@ function fiatPrettyName(candidate) {
 function buildCandidateLabel(candidate, assetType) {
   const secid = String(candidate?.secid || "").trim();
   if (assetType === "fiat") {
-    return `${fiatPrettyName(candidate)} (${secid})`;
+    const name = String(candidate?.shortname || "").trim() || fiatPrettyName(candidate);
+    return `${name} (${secid})`;
   }
   return `${candidate.shortname || candidate.name || secid} (${secid})`;
 }
@@ -241,7 +252,19 @@ async function loadCurrentPrice({ secid, boardid, asset_type }) {
   });
 }
 
-function bindSearch({ inputEl, clearEl, typeEl, resultEl, selectedEl, getSelected, setSelected, onSelected, onCleared }) {
+function bindSearch({
+  inputEl,
+  clearEl,
+  typeEl,
+  resultEl,
+  selectedEl,
+  getSelected,
+  setSelected,
+  onSelected,
+  onCleared,
+  searchFn,
+  alwaysShowWhenEmpty,
+}) {
   const showClear = (show) => {
     if (!clearEl) return;
     clearEl.classList.toggle("show", !!show);
@@ -277,12 +300,14 @@ function bindSearch({ inputEl, clearEl, typeEl, resultEl, selectedEl, getSelecte
         showClear(false);
         if (onCleared) onCleared();
       }
-      if (!q) {
+      if (!q && !(alwaysShowWhenEmpty && typeEl.value === "fiat")) {
         resultEl.innerHTML = "";
         return;
       }
       try {
-        const data = await api(`/api/miniapp/search?q=${encodeURIComponent(q)}&asset_type=${encodeURIComponent(typeEl.value)}`);
+        const data = searchFn
+          ? await searchFn(q, typeEl.value)
+          : await api(`/api/miniapp/search?q=${encodeURIComponent(q)}&asset_type=${encodeURIComponent(typeEl.value)}`);
         renderSearchList(resultEl, data || [], (picked) => {
           const label = buildCandidateLabel(picked, typeEl.value);
           setSelected(picked);
@@ -296,6 +321,11 @@ function bindSearch({ inputEl, clearEl, typeEl, resultEl, selectedEl, getSelecte
         renderEmpty(resultEl, "Ошибка поиска");
       }
     }, 300);
+  });
+
+  inputEl.addEventListener("focus", () => {
+    if (!alwaysShowWhenEmpty) return;
+    inputEl.dispatchEvent(new Event("input"));
   });
 
   return { clearSelection };
@@ -493,6 +523,19 @@ function setupEvents() {
     selectedEl: el.alertSelected,
     getSelected: () => state.selectedAlert,
     setSelected: (s) => { state.selectedAlert = s; },
+    searchFn: async (q, assetType) => {
+      if (assetType !== "fiat") {
+        if (!q.trim()) return [];
+        return api(`/api/miniapp/search?q=${encodeURIComponent(q)}&asset_type=${encodeURIComponent(assetType)}`);
+      }
+      const needle = q.trim().toLowerCase();
+      if (!needle) return POPULAR_FIAT_ALERT_PAIRS;
+      return POPULAR_FIAT_ALERT_PAIRS.filter((row) => {
+        const label = `${row.shortname} ${row.secid}`.toLowerCase();
+        return label.includes(needle);
+      });
+    },
+    alwaysShowWhenEmpty: true,
     onSelected: async (picked) => {
       try {
         const data = await loadCurrentPrice({
