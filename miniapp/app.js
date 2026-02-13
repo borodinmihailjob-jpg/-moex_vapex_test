@@ -90,10 +90,19 @@ const el = {
 };
 
 function toast(msg) {
-  el.toast.textContent = msg;
+  const text = String(msg || "").trim();
+  if (!text) {
+    el.toast.textContent = "";
+    el.toast.classList.remove("show");
+    return;
+  }
+  el.toast.textContent = text;
   el.toast.classList.add("show");
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => el.toast.classList.remove("show"), 2300);
+  toast._t = setTimeout(() => {
+    el.toast.classList.remove("show");
+    el.toast.textContent = "";
+  }, 1000);
 }
 
 const LOADER_SHOW_DELAY_MS = 140;
