@@ -159,10 +159,12 @@ const el = {
   expenseRentDateInput: document.getElementById("expenseRentDateInput"),
   expenseRentAmountInput: document.getElementById("expenseRentAmountInput"),
   expenseMortgageStartInput: document.getElementById("expenseMortgageStartInput"),
+  expenseMortgageEndInput: document.getElementById("expenseMortgageEndInput"),
   expenseMortgagePrincipalInput: document.getElementById("expenseMortgagePrincipalInput"),
   expenseMortgageMonthsInput: document.getElementById("expenseMortgageMonthsInput"),
   expenseMortgagePaymentTypeInput: document.getElementById("expenseMortgagePaymentTypeInput"),
   expenseLoanStartInput: document.getElementById("expenseLoanStartInput"),
+  expenseLoanEndInput: document.getElementById("expenseLoanEndInput"),
   expenseLoanPrincipalInput: document.getElementById("expenseLoanPrincipalInput"),
   expenseLoanMonthsInput: document.getElementById("expenseLoanMonthsInput"),
   expenseLoanPaymentTypeInput: document.getElementById("expenseLoanPaymentTypeInput"),
@@ -309,12 +311,31 @@ function addMonthsYmd(ymd, monthsToAdd) {
   const text = String(ymd || "").trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return "";
   const [y, m, d] = text.split("-").map((x) => Number(x));
-  const dt = new Date(y, m - 1, d);
+  const base = new Date(Date.UTC(y, m - 1, d));
+  if (Number.isNaN(base.getTime())) return "";
+  const shift = Number(monthsToAdd || 0);
+  const monthIndex = (m - 1) + shift;
+  const targetYear = y + Math.floor(monthIndex / 12);
+  const targetMonth = ((monthIndex % 12) + 12) % 12;
+  const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+  const day = Math.min(d, lastDay);
+  const result = new Date(Date.UTC(targetYear, targetMonth, day));
+  const yy = result.getUTCFullYear();
+  const mm = String(result.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(result.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
+function addDaysYmd(ymd, daysToAdd) {
+  const text = String(ymd || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return "";
+  const [y, m, d] = text.split("-").map((x) => Number(x));
+  const dt = new Date(Date.UTC(y, m - 1, d));
   if (Number.isNaN(dt.getTime())) return "";
-  dt.setMonth(dt.getMonth() + Number(monthsToAdd || 0));
-  const yy = dt.getFullYear();
-  const mm = String(dt.getMonth() + 1).padStart(2, "0");
-  const dd = String(dt.getDate()).padStart(2, "0");
+  dt.setUTCDate(dt.getUTCDate() + Number(daysToAdd || 0));
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getUTCDate()).padStart(2, "0");
   return `${yy}-${mm}-${dd}`;
 }
 
@@ -1014,11 +1035,75 @@ function showExpenseFields(kind) {
   show(el.expenseRatePeriodsCard, kind === "mortgage" || kind === "loan");
 }
 
+function getLoanRange(kind) {
+  const startDate = kind === "mortgage"
+    ? (el.expenseMortgageStartInput?.value || "")
+    : (el.expenseLoanStartInput?.value || "");
+  const months = Number(kind === "mortgage"
+    ? (el.expenseMortgageMonthsInput?.value || 0)
+    : (el.expenseLoanMonthsInput?.value || 0));
+  if (!startDate || !Number.isFinite(months) || months <= 0) {
+    return { startDate, months, endDate: "" };
+  }
+  return { startDate, months, endDate: addMonthsYmd(startDate, months - 1) };
+}
+
+function syncLoanEndDateFields() {
+  const mortgage = getLoanRange("mortgage");
+  const loan = getLoanRange("loan");
+  if (el.expenseMortgageEndInput) el.expenseMortgageEndInput.value = mortgage.endDate || "";
+  if (el.expenseLoanEndInput) el.expenseLoanEndInput.value = loan.endDate || "";
+
+  const activeKind = el.budgetExpenseTypeInput?.value || "rent";
+  if ((activeKind === "mortgage" || activeKind === "loan") && state.budget.expenseRateRows.length === 1) {
+    const row = state.budget.expenseRateRows[0];
+    const range = getLoanRange(activeKind);
+    if (row && row.auto_range && range.startDate && range.endDate) {
+      row.start_date = range.startDate;
+      row.end_date = range.endDate;
+      renderExpenseRateRows();
+    }
+  }
+}
+
+function normalizeAndValidateRatePeriods(rows, loanStart, loanEnd) {
+  const parsed = rows.map((row) => {
+    const annualRaw = String(row?.annual_rate ?? "").trim();
+    const startRaw = String(row?.start_date ?? "").trim();
+    const endRaw = String(row?.end_date ?? "").trim();
+    if (!annualRaw) throw new Error("Укажите ставку для каждого периода");
+    if (!startRaw || !endRaw) throw new Error("Укажите даты начала и конца для каждого периода ставки");
+    const annualRate = Number(annualRaw.replace(",", "."));
+    if (!Number.isFinite(annualRate) || annualRate < 0) throw new Error("Ставка должна быть числом от 0");
+    if (startRaw > endRaw) throw new Error("Дата начала периода не может быть позже даты конца");
+    return { annual_rate: annualRate, start_date: startRaw, end_date: endRaw };
+  }).sort((a, b) => a.start_date.localeCompare(b.start_date));
+
+  if (!parsed.length) throw new Error("Добавьте хотя бы одну ставку");
+  if (parsed[0].start_date > loanStart) throw new Error("Периоды ставок должны начинаться не позже даты старта кредита/ипотеки");
+  let prevEnd = "";
+  parsed.forEach((row, idx) => {
+    if (idx === 0) {
+      prevEnd = row.end_date;
+      return;
+    }
+    const expectedStart = addDaysYmd(prevEnd, 1);
+    if (row.start_date < expectedStart) throw new Error("Периоды ставок пересекаются");
+    if (row.start_date > expectedStart) throw new Error(`Есть разрыв между периодами ставок (${prevEnd} → ${row.start_date})`);
+    prevEnd = row.end_date;
+  });
+  if (prevEnd < loanEnd) {
+    throw new Error(`Периоды ставок должны покрывать срок до ${loanEnd}`);
+  }
+  return parsed;
+}
+
 function addExpenseRateRow(row = null) {
   state.budget.expenseRateRows.push({
     annual_rate: row?.annual_rate ?? "",
     start_date: row?.start_date ?? "",
     end_date: row?.end_date ?? "",
+    auto_range: !!row?.auto_range,
   });
   renderExpenseRateRows();
 }
@@ -1047,6 +1132,9 @@ function renderExpenseRateRows() {
         const field = input.dataset.rateField;
         if (Number.isNaN(i) || !field) return;
         state.budget.expenseRateRows[i][field] = input.value;
+        if (field === "start_date" || field === "end_date") {
+          state.budget.expenseRateRows[i].auto_range = false;
+        }
       });
     });
     wrap.querySelector("[data-rate-remove]")?.addEventListener("click", () => {
@@ -1068,10 +1156,12 @@ function clearExpenseForm() {
   if (el.expenseRentDateInput) el.expenseRentDateInput.value = "";
   if (el.expenseRentAmountInput) el.expenseRentAmountInput.value = "";
   if (el.expenseMortgageStartInput) el.expenseMortgageStartInput.value = "";
+  if (el.expenseMortgageEndInput) el.expenseMortgageEndInput.value = "";
   if (el.expenseMortgagePrincipalInput) el.expenseMortgagePrincipalInput.value = "";
   if (el.expenseMortgageMonthsInput) el.expenseMortgageMonthsInput.value = "";
   if (el.expenseMortgagePaymentTypeInput) el.expenseMortgagePaymentTypeInput.value = "annuity";
   if (el.expenseLoanStartInput) el.expenseLoanStartInput.value = "";
+  if (el.expenseLoanEndInput) el.expenseLoanEndInput.value = "";
   if (el.expenseLoanPrincipalInput) el.expenseLoanPrincipalInput.value = "";
   if (el.expenseLoanMonthsInput) el.expenseLoanMonthsInput.value = "";
   if (el.expenseLoanPaymentTypeInput) el.expenseLoanPaymentTypeInput.value = "annuity";
@@ -1083,6 +1173,7 @@ function clearExpenseForm() {
   if (el.budgetExpensesCalcResult) el.budgetExpensesCalcResult.textContent = "";
   showExpenseFields("rent");
   renderExpenseRateRows();
+  syncLoanEndDateFields();
 }
 
 function buildExpensePayloadFromForm() {
@@ -1130,30 +1221,12 @@ function buildExpensePayloadFromForm() {
   if (!base.start_date) throw new Error("Укажите дату начала");
   if (!Number.isFinite(base.months) || base.months <= 0) throw new Error("Укажите срок в месяцах");
   const loanEnd = addMonthsYmd(base.start_date, base.months - 1);
-  const rows = state.budget.expenseRateRows.map((row) => ({
-    annual_rate: String(row?.annual_rate ?? "").trim(),
-    start_date: String(row?.start_date ?? "").trim(),
-    end_date: String(row?.end_date ?? "").trim(),
-  }));
+  const rows = state.budget.expenseRateRows.map((row) => ({ ...row }));
   if (rows.length === 1) {
     if (!rows[0].start_date) rows[0].start_date = base.start_date;
     if (!rows[0].end_date) rows[0].end_date = loanEnd;
   }
-  const rate_periods = rows.map((row) => {
-    if (!row.annual_rate) throw new Error("Укажите ставку для каждого периода");
-    if (!row.start_date || !row.end_date) {
-      throw new Error("Укажите даты начала и конца для каждого периода ставки");
-    }
-    const annualRate = Number(row.annual_rate.replace(",", "."));
-    if (!Number.isFinite(annualRate) || annualRate < 0) {
-      throw new Error("Ставка должна быть числом от 0");
-    }
-    return {
-      annual_rate: annualRate,
-      start_date: row.start_date,
-      end_date: row.end_date,
-    };
-  });
+  const rate_periods = normalizeAndValidateRatePeriods(rows, base.start_date, loanEnd);
   return { kind, title, ...base, rate_periods };
 }
 
@@ -1183,17 +1256,32 @@ function fillExpenseFormFromRow(row) {
     el.expenseMortgageStartInput.value = payload.start_date || "";
     el.expenseMortgagePrincipalInput.value = String(Math.round(Number(payload.principal || 0)));
     el.expenseMortgageMonthsInput.value = String(Number(payload.months || 0) || "");
+    if (el.expenseMortgageEndInput) {
+      el.expenseMortgageEndInput.value = payload.start_date && payload.months
+        ? addMonthsYmd(payload.start_date, Number(payload.months) - 1)
+        : "";
+    }
     el.expenseMortgagePaymentTypeInput.value = payload.payment_type || "annuity";
-    state.budget.expenseRateRows = Array.isArray(payload.rate_periods) ? payload.rate_periods.map((x) => ({ ...x })) : [];
+    state.budget.expenseRateRows = Array.isArray(payload.rate_periods)
+      ? payload.rate_periods.map((x) => ({ ...x, auto_range: false }))
+      : [];
     renderExpenseRateRows();
   } else if (kind === "loan") {
     el.expenseLoanStartInput.value = payload.start_date || "";
     el.expenseLoanPrincipalInput.value = String(Math.round(Number(payload.principal || 0)));
     el.expenseLoanMonthsInput.value = String(Number(payload.months || 0) || "");
+    if (el.expenseLoanEndInput) {
+      el.expenseLoanEndInput.value = payload.start_date && payload.months
+        ? addMonthsYmd(payload.start_date, Number(payload.months) - 1)
+        : "";
+    }
     el.expenseLoanPaymentTypeInput.value = payload.payment_type || "annuity";
-    state.budget.expenseRateRows = Array.isArray(payload.rate_periods) ? payload.rate_periods.map((x) => ({ ...x })) : [];
+    state.budget.expenseRateRows = Array.isArray(payload.rate_periods)
+      ? payload.rate_periods.map((x) => ({ ...x, auto_range: false }))
+      : [];
     renderExpenseRateRows();
   }
+  syncLoanEndDateFields();
 }
 
 function renderBudgetExpenses(items) {
@@ -1999,16 +2087,44 @@ function setupEvents() {
     }
     showExpenseFields(kind);
     if ((kind === "mortgage" || kind === "loan") && !state.budget.expenseRateRows.length) {
-      state.budget.expenseRateRows = [{ annual_rate: "", start_date: "", end_date: "" }];
+      const range = getLoanRange(kind);
+      state.budget.expenseRateRows = [{
+        annual_rate: "",
+        start_date: range.startDate || "",
+        end_date: range.endDate || "",
+        auto_range: true,
+      }];
       renderExpenseRateRows();
     }
+    syncLoanEndDateFields();
   });
   el.budgetExpenseTitleInput?.addEventListener("input", () => {
     if (!el.budgetExpenseTitleInput) return;
     const expected = expenseKindLabel(el.budgetExpenseTypeInput?.value || "rent");
     el.budgetExpenseTitleInput.dataset.autoTitle = el.budgetExpenseTitleInput.value.trim() === expected ? "1" : "0";
   });
-  el.expenseAddRateBtn?.addEventListener("click", () => addExpenseRateRow());
+  el.expenseMortgageStartInput?.addEventListener("change", syncLoanEndDateFields);
+  el.expenseMortgageMonthsInput?.addEventListener("input", syncLoanEndDateFields);
+  el.expenseLoanStartInput?.addEventListener("change", syncLoanEndDateFields);
+  el.expenseLoanMonthsInput?.addEventListener("input", syncLoanEndDateFields);
+  el.expenseAddRateBtn?.addEventListener("click", () => {
+    const kind = el.budgetExpenseTypeInput?.value || "rent";
+    const range = getLoanRange(kind);
+    let start = "";
+    let end = range.endDate || "";
+    if (state.budget.expenseRateRows.length) {
+      const sorted = state.budget.expenseRateRows
+        .map((x) => ({ ...x }))
+        .filter((x) => String(x.end_date || "").trim())
+        .sort((a, b) => String(a.end_date).localeCompare(String(b.end_date)));
+      const last = sorted[sorted.length - 1];
+      if (last?.end_date) {
+        start = addDaysYmd(String(last.end_date), 1);
+      }
+    }
+    if (!start) start = range.startDate || "";
+    addExpenseRateRow({ annual_rate: "", start_date: start, end_date: end, auto_range: false });
+  });
   el.budgetExpensesCancelEditBtn?.addEventListener("click", () => clearExpenseForm());
   el.budgetResetBtn?.addEventListener("click", async () => {
     if (!window.confirm("Удалить текущий бюджет? Это полностью удалит все данные бюджета, включая цели.")) return;

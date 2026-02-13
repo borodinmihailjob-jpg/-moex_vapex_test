@@ -1,4 +1,5 @@
 import asyncio
+import calendar
 import logging
 import os
 from datetime import date, datetime, timedelta
@@ -221,7 +222,8 @@ def _parse_date_ymd(raw: str | None) -> date:
 def _add_months(d: date, months: int) -> date:
     y = d.year + (d.month - 1 + months) // 12
     m = (d.month - 1 + months) % 12 + 1
-    return date(y, m, 1)
+    day = min(d.day, calendar.monthrange(y, m)[1])
+    return date(y, m, day)
 
 
 def _annuity_payment(principal: float, annual_rate: float, months: int) -> float:
