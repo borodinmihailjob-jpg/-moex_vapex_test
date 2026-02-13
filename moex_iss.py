@@ -35,6 +35,20 @@ _last_price_cache: dict[tuple[str, str, str], tuple[float, float]] = {}
 LAST_PRICE_CACHE_TTL_SEC = max(5, int((os.getenv("LAST_PRICE_CACHE_TTL_SEC") or "300").strip() or "300"))
 
 
+def _norm_secid(secid: str | None) -> str:
+    return str(secid or "").strip().upper()
+
+
+def _norm_boardid(boardid: str | None, default: str | None = None) -> str | None:
+    value = str(boardid or default or "").strip().upper()
+    return value or None
+
+
+def _board_for_path(boardid: str | None, default: str) -> str:
+    # Path segment is normalized to lowercase for stable compatibility with ALGOPACK OpenAPI examples.
+    return (_norm_boardid(boardid, default) or default).lower()
+
+
 def reset_data_source_flags() -> None:
     _data_source_flags_var.set(DataSourceFlags())
 
@@ -292,10 +306,9 @@ async def get_last_price_stock_shares(session: aiohttp.ClientSession, secid: str
     """
     Для MVP: берём marketdata.LAST для рынка shares (акции).
     """
-    if boardid:
-        path = f"/engines/stock/markets/shares/boards/{boardid}/securities/{secid}.json"
-    else:
-        path = f"/engines/stock/markets/shares/securities/{secid}.json"
+    secid_norm = _norm_secid(secid)
+    boardid_norm = _norm_boardid(boardid, "TQBR")
+    path = f"/engines/stock/markets/shares/boards/{_board_for_path(boardid_norm, 'TQBR')}/securities/{secid_norm}.json"
 
     def parse_last(data: dict) -> float | None:
         md = data.get("marketdata", {})
@@ -311,7 +324,7 @@ async def get_last_price_stock_shares(session: aiohttp.ClientSession, secid: str
             return None
         return float(last)
 
-    cache_key = (ASSET_TYPE_STOCK, str(secid).upper(), str(boardid or "").upper())
+    cache_key = (ASSET_TYPE_STOCK, secid_norm, boardid_norm or "")
     now_ts = asyncio.get_running_loop().time()
     cached = _last_price_cache.get(cache_key)
     if cached and (now_ts - cached[1] <= LAST_PRICE_CACHE_TTL_SEC):
@@ -320,25 +333,24 @@ async def get_last_price_stock_shares(session: aiohttp.ClientSession, secid: str
     data, delayed = await get_json_with_fallback_source(session, path, params={"iss.meta": "off"})
     price = parse_last(data)
     if price is None and not delayed:
-        logger.warning("ALGOPACK returned no LAST for secid=%s boardid=%s; retry via ISS", secid, boardid)
+        logger.warning("ALGOPACK returned no LAST for secid=%s boardid=%s; retry via ISS", secid_norm, boardid_norm)
         mark_delayed_data_used()
         data = await iss_get_json(session, path, params={"iss.meta": "off"})
         price = parse_last(data)
     if price is None:
-        logger.warning("No LAST marketdata for secid=%s boardid=%s", secid, boardid)
+        logger.warning("No LAST marketdata for secid=%s boardid=%s", secid_norm, boardid_norm)
         return None
     _last_price_cache[cache_key] = (price, now_ts)
-    logger.debug("Last price secid=%s boardid=%s last=%s", secid, boardid, price)
+    logger.debug("Last price secid=%s boardid=%s last=%s", secid_norm, boardid_norm, price)
     return price
 
 async def get_last_price_metal(session: aiohttp.ClientSession, secid: str, boardid: str | None = None) -> float | None:
     """
     Для металлов (currency_metal) берём marketdata.LAST на engine=currency, market=selt.
     """
-    if boardid:
-        path = f"/engines/currency/markets/selt/boards/{boardid}/securities/{secid}.json"
-    else:
-        path = f"/engines/currency/markets/selt/securities/{secid}.json"
+    secid_norm = _norm_secid(secid)
+    boardid_norm = _norm_boardid(boardid, "CETS")
+    path = f"/engines/currency/markets/selt/boards/{_board_for_path(boardid_norm, 'CETS')}/securities/{secid_norm}.json"
 
     def parse_last(data: dict) -> float | None:
         md = data.get("marketdata", {})
@@ -354,7 +366,7 @@ async def get_last_price_metal(session: aiohttp.ClientSession, secid: str, board
             return None
         return float(last)
 
-    cache_key = (ASSET_TYPE_METAL, str(secid).upper(), str(boardid or "").upper())
+    cache_key = (ASSET_TYPE_METAL, secid_norm, boardid_norm or "")
     now_ts = asyncio.get_running_loop().time()
     cached = _last_price_cache.get(cache_key)
     if cached and (now_ts - cached[1] <= LAST_PRICE_CACHE_TTL_SEC):
@@ -368,18 +380,18 @@ async def get_last_price_metal(session: aiohttp.ClientSession, secid: str, board
             logger.info(
                 "Skip ISS fallback for metal before %02d:00 MSK secid=%s",
                 ISS_FALLBACK_FROM_HOUR_MSK,
-                secid,
+                secid_norm,
             )
             return None
-        logger.warning("ALGOPACK returned no metal LAST for secid=%s boardid=%s; retry via ISS", secid, boardid)
+        logger.warning("ALGOPACK returned no metal LAST for secid=%s boardid=%s; retry via ISS", secid_norm, boardid_norm)
         mark_delayed_data_used()
         data = await iss_get_json(session, path, params={"iss.meta": "off"})
         price = parse_last(data)
     if price is None:
-        logger.warning("No metal LAST marketdata for secid=%s boardid=%s", secid, boardid)
+        logger.warning("No metal LAST marketdata for secid=%s boardid=%s", secid_norm, boardid_norm)
         return None
     _last_price_cache[cache_key] = (price, now_ts)
-    logger.debug("Last metal price secid=%s boardid=%s last=%s", secid, boardid, price)
+    logger.debug("Last metal price secid=%s boardid=%s last=%s", secid_norm, boardid_norm, price)
     return price
 
 
@@ -392,8 +404,9 @@ async def get_last_price_fiat(
     """
     Цена валютной пары на валютном рынке MOEX.
     """
-    norm_boardid = (boardid or "CETS").strip() or "CETS"
-    cache_key = (ASSET_TYPE_FIAT, str(secid).upper(), norm_boardid.upper())
+    secid_norm = _norm_secid(secid)
+    norm_boardid = _norm_boardid(boardid, "CETS") or "CETS"
+    cache_key = (ASSET_TYPE_FIAT, secid_norm, norm_boardid)
     now_ts = asyncio.get_running_loop().time()
     cached = _last_price_cache.get(cache_key)
     if cached and (now_ts - cached[1] <= LAST_PRICE_CACHE_TTL_SEC):
@@ -409,15 +422,16 @@ async def get_last_price_fiat(
         "TRYRUB_TOM": ["TRY000UTSTOM", "TRYRUB_TOM"],
         "AEDRUB_TOM": ["AED000UTSTOM", "AEDRUB_TOM"],
     }
-    aliases = alias_map.get(str(secid).upper(), [])
+    aliases = alias_map.get(secid_norm, [])
     for alias in aliases:
-        if alias not in candidates:
-            candidates.append(alias)
-    if secid not in candidates:
-        candidates.append(secid)
+        alias_norm = _norm_secid(alias)
+        if alias_norm and alias_norm not in candidates:
+            candidates.append(alias_norm)
+    if secid_norm and secid_norm not in candidates:
+        candidates.append(secid_norm)
 
     for candidate in candidates:
-        path = f"/engines/currency/markets/selt/boards/{norm_boardid}/securities/{candidate}.json"
+        path = f"/engines/currency/markets/selt/boards/{_board_for_path(norm_boardid, 'CETS')}/securities/{candidate}.json"
         try:
             data, delayed = await get_json_with_fallback_source(session, path, params={"iss.meta": "off"})
         except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
@@ -462,7 +476,7 @@ async def get_last_price_fiat(
             _last_price_cache[cache_key] = (price, now_ts)
             logger.debug("Last fiat price secid=%s boardid=%s last=%s", candidate, norm_boardid, price)
             return price
-    logger.warning("No fiat marketdata for secid=%s boardid=%s", secid, norm_boardid)
+    logger.warning("No fiat marketdata for secid=%s boardid=%s", secid_norm, norm_boardid)
     return None
 
 
@@ -492,7 +506,8 @@ async def get_stock_day_movers(session: aiohttp.ClientSession, boardid: str = "T
     Возвращает список акций с изменением за текущую торговую сессию:
     OPEN (цена открытия) -> LAST (последняя цена).
     """
-    path = f"/engines/stock/markets/shares/boards/{boardid}/securities.json"
+    boardid_norm = _norm_boardid(boardid, "TQBR") or "TQBR"
+    path = f"/engines/stock/markets/shares/boards/{_board_for_path(boardid_norm, 'TQBR')}/securities.json"
     out: list[dict] = []
     params = {
         "iss.meta": "off",
@@ -507,7 +522,7 @@ async def get_stock_day_movers(session: aiohttp.ClientSession, boardid: str = "T
     md_cols = md.get("columns", [])
     md_rows = md.get("data", [])
     if not md_rows and not delayed:
-        logger.warning("ALGOPACK movers response is empty for board=%s; retry via ISS", boardid)
+        logger.warning("ALGOPACK movers response is empty for board=%s; retry via ISS", boardid_norm)
         mark_delayed_data_used()
         data = await iss_get_json(session, path, params=params)
         sec = data.get("securities", {})
@@ -603,7 +618,8 @@ async def get_stock_movers_by_date(
     if trade_date >= datetime.now(MSK_TZ).date():
         return await get_stock_day_movers(session, boardid=boardid)
 
-    path = f"/history/engines/stock/markets/shares/boards/{boardid}/securities.json"
+    boardid_norm = _norm_boardid(boardid, "TQBR") or "TQBR"
+    path = f"/history/engines/stock/markets/shares/boards/{_board_for_path(boardid_norm, 'TQBR')}/securities.json"
     out: list[dict] = []
     start = 0
     use_iss_only = False
@@ -729,7 +745,7 @@ async def get_stock_movers_by_date(
     missing = [x for x in out if not str(x.get("shortname") or "").strip() or str(x.get("shortname")).strip() == str(x.get("secid")).strip()]
     if missing:
         try:
-            names_map = await _load_board_shortnames(session, boardid)
+            names_map = await _load_board_shortnames(session, boardid_norm)
             for row in out:
                 secid = str(row.get("secid") or "").strip()
                 if not secid:
@@ -738,7 +754,7 @@ async def get_stock_movers_by_date(
                 if not shortname or shortname == secid:
                     row["shortname"] = names_map.get(secid) or shortname or secid
         except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError):
-            logger.warning("Failed enriching shortnames for board=%s", boardid)
+            logger.warning("Failed enriching shortnames for board=%s", boardid_norm)
 
     return out
 
@@ -748,7 +764,9 @@ async def get_stock_snapshot(
     secid: str,
     boardid: str = "TQBR",
 ) -> dict | None:
-    path = f"/engines/stock/markets/shares/boards/{boardid}/securities/{secid}.json"
+    secid_norm = _norm_secid(secid)
+    boardid_norm = _norm_boardid(boardid, "TQBR") or "TQBR"
+    path = f"/engines/stock/markets/shares/boards/{_board_for_path(boardid_norm, 'TQBR')}/securities/{secid_norm}.json"
     params = {
         "iss.meta": "off",
         "securities.columns": "SECID,SHORTNAME,NAME",
@@ -799,9 +817,9 @@ async def get_stock_snapshot(
             shortname = str(sec_row[ni] or "").strip() or None
 
     return {
-        "secid": secid,
-        "boardid": boardid,
-        "shortname": shortname or secid,
+        "secid": secid_norm,
+        "boardid": boardid_norm,
+        "shortname": shortname or secid_norm,
         "open": pick_float(md_idx.get("OPEN")),
         "last": pick_float(md_idx.get("LAST")),
         "bid": pick_float(md_idx.get("BID")),
@@ -817,7 +835,9 @@ async def get_stock_avg_daily_volume(
     boardid: str = "TQBR",
     days: int = 20,
 ) -> float | None:
-    path = f"/history/engines/stock/markets/shares/boards/{boardid}/securities/{secid}.json"
+    secid_norm = _norm_secid(secid)
+    boardid_norm = _norm_boardid(boardid, "TQBR") or "TQBR"
+    path = f"/history/engines/stock/markets/shares/boards/{_board_for_path(boardid_norm, 'TQBR')}/securities/{secid_norm}.json"
     till = date.today()
     from_dt = till.fromordinal(till.toordinal() - max(5, int(days * 2)))
     params = {
@@ -862,7 +882,8 @@ async def get_stock_avg_daily_volume(
 
 
 async def _load_board_shortnames(session: aiohttp.ClientSession, boardid: str) -> dict[str, str]:
-    path = f"/engines/stock/markets/shares/boards/{boardid}/securities.json"
+    boardid_norm = _norm_boardid(boardid, "TQBR") or "TQBR"
+    path = f"/engines/stock/markets/shares/boards/{_board_for_path(boardid_norm, 'TQBR')}/securities.json"
     params = {
         "iss.meta": "off",
         "securities.columns": "SECID,SHORTNAME,NAME",
@@ -896,13 +917,12 @@ async def _load_board_shortnames(session: aiohttp.ClientSession, boardid: str) -
     return out
 
 def _history_path_by_asset_type(secid: str, boardid: str | None, asset_type: str) -> str:
+    secid_norm = _norm_secid(secid)
     if asset_type == ASSET_TYPE_METAL:
-        if boardid:
-            return f"/history/engines/currency/markets/selt/boards/{boardid}/securities/{secid}.json"
-        return f"/history/engines/currency/markets/selt/securities/{secid}.json"
-    if boardid:
-        return f"/history/engines/stock/markets/shares/boards/{boardid}/securities/{secid}.json"
-    return f"/history/engines/stock/markets/shares/securities/{secid}.json"
+        boardid_norm = _norm_boardid(boardid, "CETS") or "CETS"
+        return f"/history/engines/currency/markets/selt/boards/{_board_for_path(boardid_norm, 'CETS')}/securities/{secid_norm}.json"
+    boardid_norm = _norm_boardid(boardid, "TQBR") or "TQBR"
+    return f"/history/engines/stock/markets/shares/boards/{_board_for_path(boardid_norm, 'TQBR')}/securities/{secid_norm}.json"
 
 async def get_history_prices_by_asset_type(
     session: aiohttp.ClientSession,
