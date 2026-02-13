@@ -123,7 +123,7 @@ const el = {
   budgetExpensesCard: document.getElementById("budgetExpensesCard"),
   budgetFundsCard: document.getElementById("budgetFundsCard"),
   budgetMonthCloseCard: document.getElementById("budgetMonthCloseCard"),
-  budgetLoanCalcCard: document.getElementById("budgetLoanCalcCard"),
+  budgetSavingsCard: document.getElementById("budgetSavingsCard"),
   budgetSettingsCard: document.getElementById("budgetSettingsCard"),
   budgetWizardTitle: document.getElementById("budgetWizardTitle"),
   budgetStepProgress: document.getElementById("budgetStepProgress"),
@@ -179,6 +179,12 @@ const el = {
   budgetExpensesList: document.getElementById("budgetExpensesList"),
   budgetExpensesSaveBtn: document.getElementById("budgetExpensesSaveBtn"),
   budgetFundsList: document.getElementById("budgetFundsList"),
+  budgetSavingTypeInput: document.getElementById("budgetSavingTypeInput"),
+  budgetSavingTitleInput: document.getElementById("budgetSavingTitleInput"),
+  budgetSavingAmountInput: document.getElementById("budgetSavingAmountInput"),
+  budgetSavingAddBtn: document.getElementById("budgetSavingAddBtn"),
+  budgetSavingsList: document.getElementById("budgetSavingsList"),
+  budgetHistoryList: document.getElementById("budgetHistoryList"),
   addGoalBtn: document.getElementById("addGoalBtn"),
   goalDetailCard: document.getElementById("goalDetailCard"),
   goalTitleInput: document.getElementById("goalTitleInput"),
@@ -203,12 +209,6 @@ const el = {
   monthCloseSubmitBtn: document.getElementById("monthCloseSubmitBtn"),
   monthCloseCancelBtn: document.getElementById("monthCloseCancelBtn"),
   monthCloseBody: document.getElementById("monthCloseBody"),
-  loanAmountInput: document.getElementById("loanAmountInput"),
-  loanRateInput: document.getElementById("loanRateInput"),
-  loanMonthsInput: document.getElementById("loanMonthsInput"),
-  loanTypeInput: document.getElementById("loanTypeInput"),
-  loanCalcBtn: document.getElementById("loanCalcBtn"),
-  loanCalcResult: document.getElementById("loanCalcResult"),
 };
 
 function toast(msg) {
@@ -500,7 +500,7 @@ function setBudgetTab(tab) {
     show(el.goalDetailCard, false);
   }
   show(el.budgetMonthCloseCard, tab === "close");
-  show(el.budgetLoanCalcCard, tab === "loans");
+  show(el.budgetSavingsCard, tab === "savings");
   show(el.budgetSettingsCard, tab === "settings");
   if (tab === "income") {
     loadBudgetIncomes().catch(() => {});
@@ -510,6 +510,10 @@ function setBudgetTab(tab) {
   }
   if (tab === "funds") {
     renderBudgetGoalsList(getBudgetGoals());
+  }
+  if (tab === "savings") {
+    loadBudgetSavings().catch(() => {});
+    loadBudgetHistory().catch(() => {});
   }
   if (tab === "settings") {
     loadBudgetNotificationSettings().catch(() => {});
@@ -819,6 +823,7 @@ async function loadBudgetDashboard() {
   renderBudgetOverviewGoals(getBudgetGoals());
   renderBudgetFunds(getBudgetGoals());
   resetIncomeForm();
+  resetSavingForm();
   if (el.budgetExpensesCalcResult) {
     el.budgetExpensesCalcResult.textContent = "";
   }
@@ -903,6 +908,17 @@ function incomeKindLabel(kind) {
   return map[String(kind || "").toLowerCase()] || "Другое";
 }
 
+function savingKindLabel(kind) {
+  const map = {
+    deposit: "Депозит",
+    stocks: "Акции",
+    crypto: "Крипта",
+    cash: "Наличные",
+    other: "Другое",
+  };
+  return map[String(kind || "").toLowerCase()] || "Другое";
+}
+
 function resetIncomeForm() {
   if (el.budgetIncomeTypeInput && !el.budgetIncomeTypeInput.value) {
     el.budgetIncomeTypeInput.value = "salary";
@@ -914,6 +930,176 @@ function resetIncomeForm() {
   if (el.budgetIncomeInput) {
     el.budgetIncomeInput.value = "";
   }
+}
+
+function resetSavingForm() {
+  if (el.budgetSavingTypeInput && !el.budgetSavingTypeInput.value) {
+    el.budgetSavingTypeInput.value = "deposit";
+  }
+  if (el.budgetSavingTitleInput) {
+    el.budgetSavingTitleInput.value = savingKindLabel(el.budgetSavingTypeInput?.value || "deposit");
+    el.budgetSavingTitleInput.dataset.autoTitle = "1";
+  }
+  if (el.budgetSavingAmountInput) {
+    el.budgetSavingAmountInput.value = "";
+  }
+}
+
+async function loadBudgetSavings() {
+  const data = await api("/api/miniapp/budget/savings", { skipLoader: true });
+  renderBudgetSavings(data.items || []);
+}
+
+function renderBudgetSavings(items) {
+  if (!el.budgetSavingsList) return;
+  el.budgetSavingsList.innerHTML = "";
+  if (!items.length) {
+    renderEmpty(el.budgetSavingsList, "Пока тут пусто");
+    return;
+  }
+  items.forEach((row) => {
+    const item = document.createElement("div");
+    item.className = "item";
+    item.innerHTML = `
+      <div class="left">
+        <div class="name">${row.title}</div>
+        <div class="sub">${savingKindLabel(row.kind)} • ${money(row.amount)}</div>
+      </div>
+      <div class="right">
+        <button class="btn ghost" data-saving-action="edit">Изменить</button>
+        <button class="btn ghost" data-saving-action="topup">Пополнить</button>
+        <button class="btn ghost" data-saving-action="spend">Потратить</button>
+        <button class="btn danger" data-saving-action="delete">Удалить</button>
+      </div>
+    `;
+    item.querySelector("[data-saving-action='edit']")?.addEventListener("click", async () => {
+      const nextKind = window.prompt("Тип (deposit/stocks/crypto/cash/other)", row.kind || "other");
+      if (nextKind === null) return;
+      const nextTitle = window.prompt("Название", row.title || "");
+      if (nextTitle === null) return;
+      try {
+        await api(`/api/miniapp/budget/savings/${row.id}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "edit", kind: String(nextKind).trim().toLowerCase(), title: String(nextTitle).trim() }),
+        });
+        toast("Накопление обновлено");
+        await loadBudgetDashboard();
+        await loadBudgetSavings();
+        await loadBudgetHistory();
+      } catch (e) {
+        toast(e?.message || "Не удалось обновить накопление");
+      }
+    });
+    item.querySelector("[data-saving-action='topup']")?.addEventListener("click", async () => {
+      const amountRaw = window.prompt("Сумма пополнения, ₽", "");
+      if (amountRaw === null) return;
+      try {
+        const amount = parseMoneyInput(amountRaw);
+        await api(`/api/miniapp/budget/savings/${row.id}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "topup", amount }),
+        });
+        toast("Накопление пополнено");
+        await loadBudgetDashboard();
+        await loadBudgetSavings();
+        await loadBudgetHistory();
+      } catch (e) {
+        toast(e?.message || "Не удалось пополнить накопление");
+      }
+    });
+    item.querySelector("[data-saving-action='spend']")?.addEventListener("click", async () => {
+      const amountRaw = window.prompt("Сумма списания, ₽", "");
+      if (amountRaw === null) return;
+      try {
+        const amount = parseMoneyInput(amountRaw);
+        await api(`/api/miniapp/budget/savings/${row.id}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "spend", amount }),
+        });
+        toast("Списание выполнено");
+        await loadBudgetDashboard();
+        await loadBudgetSavings();
+        await loadBudgetHistory();
+      } catch (e) {
+        toast(e?.message || "Не удалось списать накопление");
+      }
+    });
+    item.querySelector("[data-saving-action='delete']")?.addEventListener("click", async () => {
+      if (!window.confirm("Удалить это накопление?")) return;
+      try {
+        await api(`/api/miniapp/budget/savings/${row.id}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "delete" }),
+        });
+        toast("Накопление удалено");
+        await loadBudgetDashboard();
+        await loadBudgetSavings();
+        await loadBudgetHistory();
+      } catch (e) {
+        toast(e?.message || "Не удалось удалить накопление");
+      }
+    });
+    el.budgetSavingsList.appendChild(item);
+  });
+}
+
+function historyActionLabel(row) {
+  const map = {
+    create: "Создание",
+    edit: "Изменение",
+    delete: "Удаление",
+    topup: "Пополнение",
+    spend: "Списание",
+    close: "Закрытие месяца",
+    update: "Обновление",
+    reset: "Сброс бюджета",
+    paused: "Пауза",
+    deleted: "Удаление",
+    autopilot: "Автопилот",
+    notification_update: "Настройки уведомлений",
+  };
+  const entityMap = {
+    income: "доход",
+    expense: "расход",
+    saving: "накопление",
+    goal: "цель",
+    profile: "профиль",
+    month_close: "месяц",
+    settings: "настройки",
+    budget: "бюджет",
+    obligation: "обязательство",
+  };
+  return `${map[row.action] || row.action} · ${entityMap[row.entity] || row.entity}`;
+}
+
+async function loadBudgetHistory() {
+  const data = await api("/api/miniapp/budget/history?limit=120", { skipLoader: true });
+  renderBudgetHistory(data.items || []);
+}
+
+function renderBudgetHistory(items) {
+  if (!el.budgetHistoryList) return;
+  el.budgetHistoryList.innerHTML = "";
+  if (!items.length) {
+    renderEmpty(el.budgetHistoryList, "История пока пуста");
+    return;
+  }
+  items.forEach((row) => {
+    const item = document.createElement("div");
+    item.className = "item";
+    const dt = row.created_at ? new Date(row.created_at).toLocaleString("ru-RU") : "";
+    item.innerHTML = `
+      <div class="left">
+        <div class="name">${historyActionLabel(row)}</div>
+        <div class="sub">${dt}</div>
+      </div>
+    `;
+    el.budgetHistoryList.appendChild(item);
+  });
 }
 
 async function loadBudgetIncomes() {
@@ -2079,6 +2265,38 @@ function setupEvents() {
       toast(e?.message || "Не удалось добавить доход");
     }
   });
+  el.budgetSavingTypeInput?.addEventListener("change", () => {
+    if (!el.budgetSavingTitleInput) return;
+    if (el.budgetSavingTitleInput.dataset.autoTitle === "1" || !el.budgetSavingTitleInput.value.trim()) {
+      el.budgetSavingTitleInput.value = savingKindLabel(el.budgetSavingTypeInput?.value || "deposit");
+      el.budgetSavingTitleInput.dataset.autoTitle = "1";
+    }
+  });
+  el.budgetSavingTitleInput?.addEventListener("input", () => {
+    if (!el.budgetSavingTitleInput) return;
+    const expected = savingKindLabel(el.budgetSavingTypeInput?.value || "deposit");
+    el.budgetSavingTitleInput.dataset.autoTitle = el.budgetSavingTitleInput.value.trim() === expected ? "1" : "0";
+  });
+  el.budgetSavingAddBtn?.addEventListener("click", async () => {
+    try {
+      const kind = el.budgetSavingTypeInput?.value || "other";
+      const title = (el.budgetSavingTitleInput?.value || "").trim() || savingKindLabel(kind);
+      const amount = parseMoneyInput(el.budgetSavingAmountInput?.value || "");
+      await api("/api/miniapp/budget/savings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, title, amount }),
+      });
+      resetSavingForm();
+      toast("Накопление добавлено");
+      await loadBudgetDashboard();
+      await loadBudgetSavings();
+      await loadBudgetHistory();
+      setBudgetTab("savings");
+    } catch (e) {
+      toast(e?.message || "Не удалось добавить накопление");
+    }
+  });
   el.budgetExpenseTypeInput?.addEventListener("change", () => {
     const kind = el.budgetExpenseTypeInput.value || "rent";
     if (el.budgetExpenseTitleInput && (el.budgetExpenseTitleInput.dataset.autoTitle === "1" || !el.budgetExpenseTitleInput.value.trim())) {
@@ -2236,26 +2454,9 @@ function setupEvents() {
   el.monthCloseCancelBtn?.addEventListener("click", () => {
     el.monthCloseForm.style.display = "none";
   });
-  el.loanCalcBtn?.addEventListener("click", () => {
-    try {
-      const calc = calculateLoanMetrics({
-        amount: parseMoneyInput(el.loanAmountInput.value || ""),
-        annualRate: Number(el.loanRateInput.value || 0),
-        months: Number(el.loanMonthsInput.value || 0),
-        paymentType: el.loanTypeInput.value || "annuity",
-      });
-      el.loanCalcResult.textContent = [
-        calc.monthly_payment !== null ? `Ежемесячный платёж: ${money(calc.monthly_payment)}` : `Первый платёж: ${money(calc.first_payment)}`,
-        calc.monthly_payment === null ? `Последний платёж: ${money(calc.last_payment)}` : "",
-        `Переплата: ${money(calc.overpayment)}`,
-        `Итоговая выплата: ${money(calc.total_payment)}`,
-      ].filter(Boolean).join("\n");
-    } catch (e) {
-      toast(e?.message || "Ошибка расчёта");
-    }
-  });
   clearExpenseForm();
   resetIncomeForm();
+  resetSavingForm();
 
   state.searchControllers.trade = bindSearch({
     inputEl: el.tradeSearch,

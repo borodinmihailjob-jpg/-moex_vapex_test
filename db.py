@@ -193,7 +193,8 @@ CREATE TABLE IF NOT EXISTS budget_savings (
   title TEXT NOT NULL,
   amount DOUBLE PRECISION NOT NULL,
   active BOOLEAN NOT NULL DEFAULT TRUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS budget_funds (
@@ -232,6 +233,17 @@ CREATE TABLE IF NOT EXISTS budget_notification_settings (
   goal_deadline_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   month_close_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS budget_history (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+  entity TEXT NOT NULL,
+  entity_id BIGINT,
+  action TEXT NOT NULL,
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -277,11 +289,13 @@ MIGRATION_SQL = [
     "CREATE TABLE IF NOT EXISTS budget_incomes (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL DEFAULT 'other', title TEXT NOT NULL, amount_monthly DOUBLE PRECISION NOT NULL, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS budget_expenses (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL DEFAULT 'other', title TEXT NOT NULL, amount_monthly DOUBLE PRECISION NOT NULL, payload JSONB NOT NULL DEFAULT '{}'::jsonb, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS budget_obligations (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'other', amount_monthly DOUBLE PRECISION NOT NULL, debt_details JSONB NOT NULL DEFAULT '{}'::jsonb, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
-    "CREATE TABLE IF NOT EXISTS budget_savings (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL DEFAULT 'other', title TEXT NOT NULL, amount DOUBLE PRECISION NOT NULL, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS budget_savings (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL DEFAULT 'other', title TEXT NOT NULL, amount DOUBLE PRECISION NOT NULL, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "ALTER TABLE budget_savings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
     "CREATE TABLE IF NOT EXISTS budget_funds (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, target_amount DOUBLE PRECISION NOT NULL, already_saved DOUBLE PRECISION NOT NULL DEFAULT 0, target_month TEXT NOT NULL, payload JSONB NOT NULL DEFAULT '{}'::jsonb, priority TEXT NOT NULL DEFAULT 'medium', status TEXT NOT NULL DEFAULT 'active', autopilot_enabled BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "ALTER TABLE budget_funds ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb",
     "CREATE TABLE IF NOT EXISTS budget_month_closes (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, month_key TEXT NOT NULL, planned_expenses_base DOUBLE PRECISION NOT NULL DEFAULT 0, actual_expenses_base DOUBLE PRECISION NOT NULL DEFAULT 0, extra_income_total DOUBLE PRECISION NOT NULL DEFAULT 0, extra_income_items JSONB NOT NULL DEFAULT '[]'::jsonb, closed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (user_id, month_key))",
     "CREATE TABLE IF NOT EXISTS budget_notification_settings (user_id BIGINT PRIMARY KEY, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, budget_summary_enabled BOOLEAN NOT NULL DEFAULT TRUE, goal_deadline_enabled BOOLEAN NOT NULL DEFAULT TRUE, month_close_enabled BOOLEAN NOT NULL DEFAULT TRUE, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS budget_history (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, entity TEXT NOT NULL, entity_id BIGINT, action TEXT NOT NULL, payload JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
 ]
 
@@ -304,6 +318,7 @@ POST_MIGRATION_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS ix_budget_funds_user_status ON budget_funds (user_id, status)",
     "CREATE INDEX IF NOT EXISTS ix_budget_month_closes_user_month ON budget_month_closes (user_id, month_key)",
     "CREATE INDEX IF NOT EXISTS ix_budget_notification_settings_user_ref ON budget_notification_settings (user_ref_id)",
+    "CREATE INDEX IF NOT EXISTS ix_budget_history_user_created ON budget_history (user_id, created_at DESC)",
 ]
 
 _pools: dict[str, asyncpg.Pool] = {}
@@ -2428,6 +2443,10 @@ async def reset_budget_data(db_path: str, user_id: int) -> dict[str, int]:
                     "DELETE FROM budget_notification_settings WHERE user_id = $1",
                     int(user_id),
                 ))
+                history = _affected_count(await conn.execute(
+                    "DELETE FROM budget_history WHERE user_id = $1",
+                    int(user_id),
+                ))
         return {
             "incomes": incomes,
             "expenses": expenses,
@@ -2437,6 +2456,7 @@ async def reset_budget_data(db_path: str, user_id: int) -> dict[str, int]:
             "month_closes": month_closes,
             "profiles": profiles,
             "notification_settings": notification_settings,
+            "history": history,
         }
     except Exception:
         logger.exception("Failed reset_budget_data user=%s", user_id)
@@ -2510,8 +2530,8 @@ async def add_budget_saving(db_path: str, user_id: int, kind: str, title: str, a
                 user_ref_id, _ = await _ensure_user_context(conn, int(user_id))
                 row = await conn.fetchrow(
                     """
-                    INSERT INTO budget_savings (user_id, user_ref_id, kind, title, amount, active, created_at)
-                    VALUES ($1, $2, $3, $4, $5, TRUE, NOW())
+                    INSERT INTO budget_savings (user_id, user_ref_id, kind, title, amount, active, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, TRUE, NOW(), NOW())
                     RETURNING id
                     """,
                     int(user_id),
@@ -2523,6 +2543,186 @@ async def add_budget_saving(db_path: str, user_id: int, kind: str, title: str, a
         return int(row["id"])
     except Exception:
         logger.exception("Failed add_budget_saving user=%s title=%s", user_id, title)
+        raise
+
+
+async def update_budget_saving(
+    db_path: str,
+    user_id: int,
+    saving_id: int,
+    kind: str | None = None,
+    title: str | None = None,
+) -> bool:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT kind, title
+                FROM budget_savings
+                WHERE id = $1 AND user_id = $2 AND active = TRUE
+                """,
+                int(saving_id),
+                int(user_id),
+            )
+            if not row:
+                return False
+            new_kind = str(kind).strip() if kind is not None else str(row["kind"] or "other")
+            new_title = str(title).strip() if title is not None else str(row["title"] or "")
+            upd = await conn.fetchrow(
+                """
+                UPDATE budget_savings
+                SET kind = $1,
+                    title = $2,
+                    updated_at = NOW()
+                WHERE id = $3 AND user_id = $4 AND active = TRUE
+                RETURNING id
+                """,
+                new_kind,
+                new_title,
+                int(saving_id),
+                int(user_id),
+            )
+        return upd is not None
+    except Exception:
+        logger.exception("Failed update_budget_saving user=%s saving=%s", user_id, saving_id)
+        raise
+
+
+async def change_budget_saving_amount(db_path: str, user_id: int, saving_id: int, delta: float) -> dict[str, Any] | None:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, kind, title, amount
+                    FROM budget_savings
+                    WHERE id = $1 AND user_id = $2 AND active = TRUE
+                    FOR UPDATE
+                    """,
+                    int(saving_id),
+                    int(user_id),
+                )
+                if not row:
+                    return None
+                current = float(row["amount"] or 0.0)
+                next_amount = current + float(delta)
+                if next_amount < 0:
+                    raise ValueError("insufficient saving amount")
+                await conn.execute(
+                    """
+                    UPDATE budget_savings
+                    SET amount = $1,
+                        updated_at = NOW()
+                    WHERE id = $2 AND user_id = $3 AND active = TRUE
+                    """,
+                    float(next_amount),
+                    int(saving_id),
+                    int(user_id),
+                )
+        return {
+            "id": int(row["id"]),
+            "kind": row["kind"] or "other",
+            "title": row["title"],
+            "amount_before": current,
+            "amount_after": next_amount,
+        }
+    except Exception:
+        logger.exception("Failed change_budget_saving_amount user=%s saving=%s delta=%s", user_id, saving_id, delta)
+        raise
+
+
+async def disable_budget_saving(db_path: str, user_id: int, saving_id: int) -> bool:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE budget_savings
+                SET active = FALSE,
+                    updated_at = NOW()
+                WHERE id = $1 AND user_id = $2 AND active = TRUE
+                RETURNING id
+                """,
+                int(saving_id),
+                int(user_id),
+            )
+        return row is not None
+    except Exception:
+        logger.exception("Failed disable_budget_saving user=%s saving=%s", user_id, saving_id)
+        raise
+
+
+async def add_budget_history_event(
+    db_path: str,
+    user_id: int,
+    entity: str,
+    action: str,
+    entity_id: int | None = None,
+    payload: dict[str, Any] | None = None,
+) -> int:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                user_ref_id, _ = await _ensure_user_context(conn, int(user_id))
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO budget_history (user_id, user_ref_id, entity, entity_id, action, payload, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW())
+                    RETURNING id
+                    """,
+                    int(user_id),
+                    int(user_ref_id),
+                    str(entity).strip() or "budget",
+                    int(entity_id) if entity_id is not None else None,
+                    str(action).strip() or "unknown",
+                    json.dumps(payload or {}),
+                )
+        return int(row["id"])
+    except Exception:
+        logger.exception("Failed add_budget_history_event user=%s entity=%s action=%s", user_id, entity, action)
+        raise
+
+
+async def list_budget_history(db_path: str, user_id: int, limit: int = 100) -> list[dict[str, Any]]:
+    limit_val = max(1, min(int(limit), 500))
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, entity, entity_id, action, payload, created_at
+                FROM budget_history
+                WHERE user_id = $1
+                ORDER BY created_at DESC, id DESC
+                LIMIT $2
+                """,
+                int(user_id),
+                limit_val,
+            )
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            payload = row["payload"] or {}
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except ValueError:
+                    payload = {}
+            out.append(
+                {
+                    "id": int(row["id"]),
+                    "entity": row["entity"] or "budget",
+                    "entity_id": int(row["entity_id"]) if row["entity_id"] is not None else None,
+                    "action": row["action"] or "unknown",
+                    "payload": payload if isinstance(payload, dict) else {},
+                    "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                }
+            )
+        return out
+    except Exception:
+        logger.exception("Failed list_budget_history user=%s", user_id)
         raise
 
 

@@ -5,6 +5,7 @@ import os
 from datetime import date, datetime, timedelta
 from json import JSONDecodeError
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 from aiohttp import web
@@ -14,15 +15,18 @@ from common_utils import safe_float
 from db import (
     add_trade,
     add_budget_expense,
+    add_budget_history_event,
     add_budget_income,
     add_budget_obligation,
     add_budget_saving,
+    change_budget_saving_amount,
     clear_user_portfolio,
     close_budget_month,
     create_budget_fund,
     create_price_target_alert,
     disable_budget_expense,
     disable_budget_income,
+    disable_budget_saving,
     disable_price_target_alert,
     ensure_user_alert_settings,
     get_budget_dashboard,
@@ -39,6 +43,7 @@ from db import (
     list_budget_expenses,
     list_budget_incomes,
     list_budget_obligations,
+    list_budget_history,
     list_budget_savings,
     reset_budget_data,
     set_user_last_mode,
@@ -47,6 +52,7 @@ from db import (
     update_budget_income,
     update_budget_expense,
     update_budget_fund,
+    update_budget_saving,
     upsert_budget_profile,
     upsert_instrument,
 )
@@ -900,6 +906,19 @@ async def api_budget_profile(request: web.Request) -> web.Response:
         expenses_base=expenses_base,
         onboarding_completed=onboarding_completed,
     )
+    await add_budget_history_event(
+        db_dsn,
+        user_id=user_id,
+        entity="profile",
+        action="update",
+        payload={
+            "income_type": updated.get("income_type"),
+            "income_monthly": updated.get("income_monthly"),
+            "payday_day": updated.get("payday_day"),
+            "expenses_base": updated.get("expenses_base"),
+            "onboarding_completed": updated.get("onboarding_completed"),
+        },
+    )
     return _json_ok(updated)
 
 
@@ -931,6 +950,14 @@ async def api_budget_obligations(request: web.Request) -> web.Response:
         kind=kind,
         debt_details=debt_details if isinstance(debt_details, dict) else None,
     )
+    await add_budget_history_event(
+        db_dsn,
+        user_id=user_id,
+        entity="obligation",
+        entity_id=item_id,
+        action="create",
+        payload={"title": title, "kind": kind, "amount_monthly": amount},
+    )
     return _json_ok({"id": item_id})
 
 
@@ -950,7 +977,81 @@ async def api_budget_savings(request: web.Request) -> web.Response:
     except ValueError as exc:
         raise web.HTTPBadRequest(text="invalid amount") from exc
     item_id = await add_budget_saving(db_dsn, user_id, kind=kind, title=title, amount=amount)
+    await add_budget_history_event(
+        db_dsn,
+        user_id=user_id,
+        entity="saving",
+        entity_id=item_id,
+        action="create",
+        payload={"kind": kind, "title": title, "amount": amount},
+    )
     return _json_ok({"id": item_id})
+
+
+async def api_budget_saving_item(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    try:
+        saving_id = int(request.match_info["saving_id"])
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="invalid saving_id") from exc
+    payload = await _read_json(request)
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in {"edit", "delete", "topup", "spend"}:
+        raise web.HTTPBadRequest(text="invalid action")
+    if action == "delete":
+        ok = await disable_budget_saving(db_dsn, user_id, saving_id)
+        if ok:
+            await add_budget_history_event(
+                db_dsn,
+                user_id=user_id,
+                entity="saving",
+                entity_id=saving_id,
+                action="delete",
+                payload={},
+            )
+        return _json_ok({"deleted": ok})
+    if action == "edit":
+        kwargs: dict[str, Any] = {}
+        if payload.get("kind") is not None:
+            kwargs["kind"] = str(payload.get("kind") or "other").strip().lower()
+        if payload.get("title") is not None:
+            title = str(payload.get("title") or "").strip()
+            if not title:
+                raise web.HTTPBadRequest(text="title required")
+            kwargs["title"] = title
+        ok = await update_budget_saving(db_dsn, user_id=user_id, saving_id=saving_id, **kwargs)
+        if ok:
+            await add_budget_history_event(
+                db_dsn,
+                user_id=user_id,
+                entity="saving",
+                entity_id=saving_id,
+                action="edit",
+                payload=kwargs,
+            )
+        return _json_ok({"updated": ok})
+    try:
+        amount = _parse_money_text(payload.get("amount"))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text="invalid amount") from exc
+    delta = amount if action == "topup" else -amount
+    try:
+        result = await change_budget_saving_amount(db_dsn, user_id=user_id, saving_id=saving_id, delta=delta)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    if result is None:
+        raise web.HTTPNotFound(text="saving not found")
+    await add_budget_history_event(
+        db_dsn,
+        user_id=user_id,
+        entity="saving",
+        entity_id=saving_id,
+        action=action,
+        payload={"amount": amount, "before": result["amount_before"], "after": result["amount_after"]},
+    )
+    return _json_ok(result)
 
 
 async def api_budget_incomes(request: web.Request) -> web.Response:
@@ -971,6 +1072,14 @@ async def api_budget_incomes(request: web.Request) -> web.Response:
     except ValueError as exc:
         raise web.HTTPBadRequest(text="invalid amount_monthly") from exc
     item_id = await add_budget_income(db_dsn, user_id, kind=kind, title=title, amount_monthly=amount)
+    await add_budget_history_event(
+        db_dsn,
+        user_id=user_id,
+        entity="income",
+        entity_id=item_id,
+        action="create",
+        payload={"kind": kind, "title": title, "amount_monthly": amount},
+    )
     return _json_ok({"id": item_id})
 
 
@@ -988,6 +1097,15 @@ async def api_budget_income_item(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="invalid action")
     if action == "delete":
         ok = await disable_budget_income(db_dsn, user_id, income_id)
+        if ok:
+            await add_budget_history_event(
+                db_dsn,
+                user_id=user_id,
+                entity="income",
+                entity_id=income_id,
+                action="delete",
+                payload={},
+            )
         return _json_ok({"deleted": ok})
     kwargs = {}
     if payload.get("kind") is not None:
@@ -1003,6 +1121,15 @@ async def api_budget_income_item(request: web.Request) -> web.Response:
         except ValueError as exc:
             raise web.HTTPBadRequest(text="invalid amount_monthly") from exc
     ok = await update_budget_income(db_dsn, user_id, income_id, **kwargs)
+    if ok:
+        await add_budget_history_event(
+            db_dsn,
+            user_id=user_id,
+            entity="income",
+            entity_id=income_id,
+            action="edit",
+            payload=kwargs,
+        )
     return _json_ok({"updated": ok})
 
 
@@ -1093,6 +1220,14 @@ async def api_budget_expenses(request: web.Request) -> web.Response:
         amount_monthly=amount,
         payload=details,
     )
+    await add_budget_history_event(
+        db_dsn,
+        user_id=user_id,
+        entity="expense",
+        entity_id=item_id,
+        action="create",
+        payload={"kind": kind, "title": title, "amount_monthly": amount},
+    )
     return _json_ok({"id": item_id, "amount_monthly": amount, "details": details})
 
 
@@ -1110,6 +1245,15 @@ async def api_budget_expense_item(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="invalid action")
     if action == "delete":
         ok = await disable_budget_expense(db_dsn, user_id, expense_id)
+        if ok:
+            await add_budget_history_event(
+                db_dsn,
+                user_id=user_id,
+                entity="expense",
+                entity_id=expense_id,
+                action="delete",
+                payload={},
+            )
         return _json_ok({"deleted": ok})
     kind, title, amount, details = _build_expense_payload(payload)
     ok = await update_budget_expense(
@@ -1121,6 +1265,15 @@ async def api_budget_expense_item(request: web.Request) -> web.Response:
         amount_monthly=amount,
         payload=details,
     )
+    if ok:
+        await add_budget_history_event(
+            db_dsn,
+            user_id=user_id,
+            entity="expense",
+            entity_id=expense_id,
+            action="edit",
+            payload={"kind": kind, "title": title, "amount_monthly": amount},
+        )
     return _json_ok({"updated": ok, "amount_monthly": amount, "details": details})
 
 
@@ -1129,6 +1282,13 @@ async def api_budget_reset(request: web.Request) -> web.Response:
     db_dsn = request.app["db_dsn"]
     user_id = await _auth_user_id(request, bot_token)
     result = await reset_budget_data(db_dsn, user_id)
+    await add_budget_history_event(
+        db_dsn,
+        user_id=user_id,
+        entity="budget",
+        action="reset",
+        payload=result,
+    )
     return _json_ok(result)
 
 
@@ -1145,6 +1305,13 @@ async def api_budget_notification_settings(request: web.Request) -> web.Response
         budget_summary_enabled=payload.get("budget_summary_enabled"),
         goal_deadline_enabled=payload.get("goal_deadline_enabled"),
         month_close_enabled=payload.get("month_close_enabled"),
+    )
+    await add_budget_history_event(
+        db_dsn,
+        user_id=user_id,
+        entity="settings",
+        action="notification_update",
+        payload=updated,
     )
     return _json_ok(updated)
 
@@ -1300,6 +1467,14 @@ async def api_budget_funds(request: web.Request) -> web.Response:
         priority=priority,
         payload=fund_payload,
     )
+    await add_budget_history_event(
+        db_dsn,
+        user_id=user_id,
+        entity="goal",
+        entity_id=fund_id,
+        action="create",
+        payload={"title": title, "target_amount": target_amount, "target_month": target_month},
+    )
     return _json_ok({"id": fund_id})
 
 
@@ -1331,6 +1506,15 @@ async def api_budget_fund_item(request: web.Request) -> web.Response:
             fund_id=fund_id,
             already_saved=float(fund["already_saved"]) + amount,
         )
+        if ok:
+            await add_budget_history_event(
+                db_dsn,
+                user_id=user_id,
+                entity="goal",
+                entity_id=fund_id,
+                action="topup",
+                payload={"amount": amount},
+            )
         return _json_ok({"updated": ok})
 
     if action == "edit":
@@ -1368,15 +1552,42 @@ async def api_budget_fund_item(request: web.Request) -> web.Response:
                 "checklist": checklist,
             }
         ok = await update_budget_fund(db_dsn, user_id=user_id, fund_id=fund_id, **kwargs)
+        if ok:
+            await add_budget_history_event(
+                db_dsn,
+                user_id=user_id,
+                entity="goal",
+                entity_id=fund_id,
+                action="edit",
+                payload=kwargs,
+            )
         return _json_ok({"updated": ok})
 
     if action == "autopilot":
         enabled = bool(payload.get("enabled"))
         ok = await update_budget_fund(db_dsn, user_id=user_id, fund_id=fund_id, autopilot_enabled=enabled)
+        if ok:
+            await add_budget_history_event(
+                db_dsn,
+                user_id=user_id,
+                entity="goal",
+                entity_id=fund_id,
+                action="autopilot",
+                payload={"enabled": enabled},
+            )
         return _json_ok({"updated": ok, "autopilot_enabled": enabled})
 
     status = "paused" if action == "pause" else "deleted"
     ok = await update_budget_fund(db_dsn, user_id=user_id, fund_id=fund_id, status=status)
+    if ok:
+        await add_budget_history_event(
+            db_dsn,
+            user_id=user_id,
+            entity="goal",
+            entity_id=fund_id,
+            action=status,
+            payload={},
+        )
     return _json_ok({"updated": ok, "status": status})
 
 
@@ -1426,7 +1637,27 @@ async def api_budget_month_close(request: web.Request) -> web.Response:
         actual_expenses_base=actual_expenses_base,
         extra_income_items=clean_items,
     )
+    await add_budget_history_event(
+        db_dsn,
+        user_id=user_id,
+        entity="month_close",
+        action="close",
+        payload=result,
+    )
     return _json_ok(result)
+
+
+async def api_budget_history(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    limit_raw = (request.query.get("limit") or "").strip()
+    try:
+        limit = int(limit_raw) if limit_raw else 100
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="invalid limit") from exc
+    rows = await list_budget_history(db_dsn, user_id, limit=limit)
+    return _json_ok({"items": rows})
 
 
 def attach_miniapp_routes(app: web.Application, db_dsn: str, bot_token: str) -> None:
@@ -1464,6 +1695,7 @@ def attach_miniapp_routes(app: web.Application, db_dsn: str, bot_token: str) -> 
     app.router.add_post("/api/miniapp/budget/obligations", api_budget_obligations)
     app.router.add_get("/api/miniapp/budget/savings", api_budget_savings)
     app.router.add_post("/api/miniapp/budget/savings", api_budget_savings)
+    app.router.add_post("/api/miniapp/budget/savings/{saving_id}", api_budget_saving_item)
     app.router.add_get("/api/miniapp/budget/incomes", api_budget_incomes)
     app.router.add_post("/api/miniapp/budget/incomes", api_budget_incomes)
     app.router.add_post("/api/miniapp/budget/incomes/{income_id}", api_budget_income_item)
@@ -1478,3 +1710,4 @@ def attach_miniapp_routes(app: web.Application, db_dsn: str, bot_token: str) -> 
     app.router.add_post("/api/miniapp/budget/funds", api_budget_funds)
     app.router.add_post("/api/miniapp/budget/funds/{fund_id}", api_budget_fund_item)
     app.router.add_post("/api/miniapp/budget/month-close", api_budget_month_close)
+    app.router.add_get("/api/miniapp/budget/history", api_budget_history)

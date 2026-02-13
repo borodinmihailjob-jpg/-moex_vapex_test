@@ -475,30 +475,29 @@
           <div id="monthCloseBody" class="plain" style="display:none"></div>
         </article>
 
-        <article id="budgetLoanCalcCard" class="card" style="display:none">
-          <h2>Кредит / Ипотека</h2>
-          <p class="hint">Расчёт ежемесячного платежа, переплаты и итоговой суммы.</p>
+        <article id="budgetSavingsCard" class="card" style="display:none">
+          <h2>Накопления</h2>
           <div class="form-grid three">
-            <label>Сумма кредита, ₽
-              <input id="loanAmountInput" type="text" placeholder="Например: 3500000" />
+            <label>Тип накопления
+              <select id="budgetSavingTypeInput">
+                <option value="deposit">Депозит</option>
+                <option value="stocks">Акции</option>
+                <option value="crypto">Крипта</option>
+                <option value="cash">Наличные</option>
+                <option value="other">Другое</option>
+              </select>
             </label>
-            <label>Ставка, % годовых
-              <input id="loanRateInput" type="number" step="0.01" min="0" placeholder="Например: 14.9" />
+            <label>Название
+              <input id="budgetSavingTitleInput" type="text" placeholder="Например: брокерский счёт" />
             </label>
-            <label>Срок, месяцев
-              <input id="loanMonthsInput" type="number" step="1" min="1" placeholder="Например: 180" />
+            <label>Сумма, ₽
+              <input id="budgetSavingAmountInput" type="text" placeholder="Например: 250000" />
             </label>
           </div>
-          <label>Тип платежа
-            <select id="loanTypeInput">
-              <option value="annuity">Аннуитетный</option>
-              <option value="diff">Дифференцированный</option>
-            </select>
-          </label>
-          <div class="wizard-actions">
-            <button id="loanCalcBtn" class="btn primary">Рассчитать</button>
-          </div>
-          <div id="loanCalcResult" class="plain"></div>
+          <button id="budgetSavingAddBtn" class="btn primary">Добавить накопление</button>
+          <div id="budgetSavingsList" class="list"></div>
+          <h3>История бюджета</h3>
+          <div id="budgetHistoryList" class="list compact"></div>
         </article>
 
         <article id="budgetSettingsCard" class="card" style="display:none">
@@ -550,7 +549,7 @@
       <button class="tab-btn" data-budget-tab="income">Доходы</button>
       <button class="tab-btn" data-budget-tab="expenses">Расходы</button>
       <button class="tab-btn" data-budget-tab="funds">Цели</button>
-      <button class="tab-btn" data-budget-tab="loans">Кредиты</button>
+      <button class="tab-btn" data-budget-tab="savings">Накопления</button>
       <button class="tab-btn" data-budget-tab="close">Закрытие</button>
       <button class="tab-btn" data-budget-tab="settings">Настройки</button>
     </nav>
