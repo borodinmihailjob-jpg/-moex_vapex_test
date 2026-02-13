@@ -41,6 +41,11 @@ body {
   gap: 12px;
   padding: calc(12px + env(safe-area-inset-top, 0px)) 14px 8px;
 }
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .app-header h1 {
   margin: 0;
   font-size: 24px;
@@ -257,6 +262,24 @@ input:focus, select:focus {
   grid-template-columns: 1fr;
   gap: 12px;
 }
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+.mode-card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.6);
+}
+.wizard-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .row-between {
   display: flex;
   align-items: center;
@@ -326,7 +349,7 @@ input:focus, select:focus {
   bottom: 0;
   z-index: 30;
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(8, 1fr);
   gap: 4px;
   padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
   background: rgba(234, 241, 255, 0.92);
@@ -416,4 +439,5 @@ input:focus, select:focus {
 }
 @media (max-width: 720px) {
   .form-grid.two, .summary-grid { grid-template-columns: 1fr; }
+  .mode-grid { grid-template-columns: 1fr; }
 }

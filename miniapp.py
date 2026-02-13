@@ -16,12 +16,25 @@ from db import (
     create_price_target_alert,
     disable_price_target_alert,
     ensure_user_alert_settings,
+    get_budget_dashboard,
+    get_budget_profile,
     get_active_app_text,
+    get_user_last_mode,
     get_position_agg,
     get_user_alert_settings,
     get_user_positions,
     list_active_app_texts,
     list_active_price_target_alerts,
+    list_budget_funds,
+    list_budget_obligations,
+    list_budget_savings,
+    set_user_last_mode,
+    add_budget_obligation,
+    add_budget_saving,
+    upsert_budget_profile,
+    create_budget_fund,
+    close_budget_month,
+    update_budget_fund,
     upsert_instrument,
     set_open_close_alert,
 )
@@ -147,6 +160,43 @@ async def _load_prices_for_positions(positions: list[dict]) -> dict[int, float |
 
 def _json_ok(payload: dict | list) -> web.Response:
     return web.json_response({"ok": True, "data": payload})
+
+
+def _parse_money_text(raw: str | int | float | None) -> float:
+    if raw is None:
+        raise ValueError("empty amount")
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+    else:
+        text = str(raw).strip().lower().replace("₽", "")
+        text = text.replace("_", "").replace(" ", "").replace(",", ".")
+        mult = 1.0
+        if text.endswith("млн"):
+            text = text[:-3]
+            mult = 1_000_000.0
+        elif text.endswith("m"):
+            text = text[:-1]
+            mult = 1_000_000.0
+        if text.endswith("м"):
+            text = text[:-1]
+            mult = 1_000_000.0
+        value = float(text) * mult
+    if value <= 0:
+        raise ValueError("amount must be > 0")
+    return value
+
+
+def _parse_month_key(raw: str | None) -> str:
+    value = (raw or "").strip()
+    if len(value) == 7 and value[4] == "-":
+        try:
+            year = int(value[:4])
+            month = int(value[5:])
+            if 1 <= month <= 12 and 1970 <= year <= 3000:
+                return f"{year:04d}-{month:02d}"
+        except ValueError:
+            pass
+    raise ValueError("invalid month format, expected YYYY-MM")
 
 
 async def miniapp_index(request: web.Request) -> web.Response:
@@ -650,6 +700,350 @@ async def api_alerts_delete(request: web.Request) -> web.Response:
     return _json_ok({"disabled": bool(ok)})
 
 
+async def api_mode(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    if request.method == "GET":
+        mode = await get_user_last_mode(db_dsn, user_id)
+        return _json_ok({"last_mode": mode})
+    payload = await _read_json(request)
+    mode = str(payload.get("mode") or "").strip().lower()
+    if mode not in {"exchange", "budget"}:
+        raise web.HTTPBadRequest(text="mode must be exchange or budget")
+    saved = await set_user_last_mode(db_dsn, user_id, mode)
+    return _json_ok({"last_mode": saved})
+
+
+async def api_budget_dashboard(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    data = await get_budget_dashboard(db_dsn, user_id)
+    return _json_ok(data)
+
+
+async def api_budget_profile(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    if request.method == "GET":
+        return _json_ok(await get_budget_profile(db_dsn, user_id))
+    payload = await _read_json(request)
+    income_type = payload.get("income_type")
+    if income_type is not None:
+        income_type = str(income_type).strip().lower()
+        if income_type not in {"fixed", "irregular"}:
+            raise web.HTTPBadRequest(text="income_type must be fixed or irregular")
+    onboarding_mode = payload.get("onboarding_mode")
+    if onboarding_mode is not None:
+        onboarding_mode = str(onboarding_mode).strip().lower()
+        if onboarding_mode not in {"quick", "precise"}:
+            raise web.HTTPBadRequest(text="onboarding_mode must be quick or precise")
+    payday_day = payload.get("payday_day")
+    if payday_day is not None and str(payday_day).strip() != "":
+        try:
+            payday_day = int(payday_day)
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text="payday_day must be int") from exc
+        if payday_day < 1 or payday_day > 31:
+            raise web.HTTPBadRequest(text="payday_day out of bounds")
+    else:
+        payday_day = None
+    income_monthly = None
+    if payload.get("income_monthly") is not None:
+        try:
+            income_monthly = _parse_money_text(payload.get("income_monthly"))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text="invalid income_monthly") from exc
+    expenses_base = None
+    if payload.get("expenses_base") is not None:
+        try:
+            expenses_base = _parse_money_text(payload.get("expenses_base"))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text="invalid expenses_base") from exc
+    onboarding_completed = payload.get("onboarding_completed")
+    if onboarding_completed is not None:
+        onboarding_completed = bool(onboarding_completed)
+    updated = await upsert_budget_profile(
+        db_dsn,
+        user_id=user_id,
+        onboarding_mode=onboarding_mode,
+        income_type=income_type,
+        income_monthly=income_monthly,
+        payday_day=payday_day,
+        expenses_base=expenses_base,
+        onboarding_completed=onboarding_completed,
+    )
+    return _json_ok(updated)
+
+
+async def api_budget_obligations(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    if request.method == "GET":
+        rows = await list_budget_obligations(db_dsn, user_id)
+        total = sum(float(x.get("amount_monthly") or 0.0) for x in rows)
+        return _json_ok({"items": rows, "total": total})
+    payload = await _read_json(request)
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise web.HTTPBadRequest(text="title is required")
+    kind = str(payload.get("kind") or "other").strip().lower()
+    try:
+        amount = _parse_money_text(payload.get("amount_monthly"))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text="invalid amount_monthly") from exc
+    debt_details = payload.get("debt_details")
+    if debt_details is not None and not isinstance(debt_details, dict):
+        raise web.HTTPBadRequest(text="debt_details must be object")
+    item_id = await add_budget_obligation(
+        db_dsn,
+        user_id=user_id,
+        title=title,
+        amount_monthly=amount,
+        kind=kind,
+        debt_details=debt_details if isinstance(debt_details, dict) else None,
+    )
+    return _json_ok({"id": item_id})
+
+
+async def api_budget_savings(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    if request.method == "GET":
+        rows = await list_budget_savings(db_dsn, user_id)
+        total = sum(float(x.get("amount") or 0.0) for x in rows)
+        return _json_ok({"items": rows, "total": total})
+    payload = await _read_json(request)
+    kind = str(payload.get("kind") or "other").strip().lower()
+    title = str(payload.get("title") or kind or "Сбережения").strip()
+    try:
+        amount = _parse_money_text(payload.get("amount"))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text="invalid amount") from exc
+    item_id = await add_budget_saving(db_dsn, user_id, kind=kind, title=title, amount=amount)
+    return _json_ok({"id": item_id})
+
+
+def _calc_fund_strategy(
+    target_amount: float,
+    already_saved: float,
+    target_month: str,
+    income: float,
+    obligations_total: float,
+    expenses_base: float,
+) -> dict:
+    now = date.today()
+    target_dt = datetime.strptime(target_month + "-01", "%Y-%m-%d").date()
+    months_left = max(1, (target_dt.year - now.year) * 12 + (target_dt.month - now.month))
+    need = max(0.0, target_amount - already_saved)
+    required_per_month = need / months_left if need > 0 else 0.0
+    free = income - obligations_total - expenses_base
+    gap = max(0.0, required_per_month - free)
+    return {
+        "need": need,
+        "months_left": months_left,
+        "required_per_month": required_per_month,
+        "free": free,
+        "is_feasible": gap <= 1e-9,
+        "gap": gap,
+    }
+
+
+async def api_budget_fund_strategy(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    payload = await _read_json(request)
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise web.HTTPBadRequest(text="title required")
+    try:
+        target_amount = _parse_money_text(payload.get("target_amount"))
+        already_saved = float(payload.get("already_saved") or 0.0)
+    except (ValueError, TypeError) as exc:
+        raise web.HTTPBadRequest(text="invalid amounts") from exc
+    if already_saved < 0:
+        raise web.HTTPBadRequest(text="already_saved must be >= 0")
+    try:
+        target_month = _parse_month_key(str(payload.get("target_month") or ""))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+
+    dashboard = await get_budget_dashboard(db_dsn, user_id)
+    strategy = _calc_fund_strategy(
+        target_amount=target_amount,
+        already_saved=already_saved,
+        target_month=target_month,
+        income=float(dashboard["income"]),
+        obligations_total=float(dashboard["obligations_total"]),
+        expenses_base=float(dashboard["expenses_base"]),
+    )
+    return _json_ok(
+        {
+            "fund_title": title,
+            "target_amount": target_amount,
+            "already_saved": already_saved,
+            "target_month": target_month,
+            "priority": str(payload.get("priority") or "medium"),
+            "budget_now": {
+                "income": dashboard["income"],
+                "obligations_total": dashboard["obligations_total"],
+                "expenses_base": dashboard["expenses_base"],
+                "free": dashboard["free"],
+            },
+            **strategy,
+        }
+    )
+
+
+async def api_budget_funds(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    if request.method == "GET":
+        return _json_ok(await list_budget_funds(db_dsn, user_id))
+    payload = await _read_json(request)
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise web.HTTPBadRequest(text="title required")
+    try:
+        target_amount = _parse_money_text(payload.get("target_amount"))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text="invalid target_amount") from exc
+    try:
+        target_month = _parse_month_key(str(payload.get("target_month") or ""))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    already_saved_raw = payload.get("already_saved")
+    try:
+        already_saved = float(already_saved_raw or 0.0)
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="invalid already_saved") from exc
+    if already_saved < 0:
+        raise web.HTTPBadRequest(text="already_saved must be >= 0")
+    priority = str(payload.get("priority") or "medium").strip().lower()
+    if priority not in {"high", "medium", "low"}:
+        raise web.HTTPBadRequest(text="priority must be high|medium|low")
+    fund_id = await create_budget_fund(
+        db_dsn,
+        user_id=user_id,
+        title=title,
+        target_amount=target_amount,
+        already_saved=already_saved,
+        target_month=target_month,
+        priority=priority,
+    )
+    return _json_ok({"id": fund_id})
+
+
+async def api_budget_fund_item(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    try:
+        fund_id = int(request.match_info["fund_id"])
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="invalid fund_id") from exc
+    payload = await _read_json(request)
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in {"topup", "edit", "pause", "delete", "autopilot"}:
+        raise web.HTTPBadRequest(text="invalid action")
+
+    if action == "topup":
+        try:
+            amount = _parse_money_text(payload.get("amount"))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text="invalid amount") from exc
+        rows = await list_budget_funds(db_dsn, user_id)
+        fund = next((x for x in rows if int(x["id"]) == fund_id), None)
+        if not fund:
+            raise web.HTTPNotFound(text="fund not found")
+        ok = await update_budget_fund(
+            db_dsn,
+            user_id=user_id,
+            fund_id=fund_id,
+            already_saved=float(fund["already_saved"]) + amount,
+        )
+        return _json_ok({"updated": ok})
+
+    if action == "edit":
+        kwargs = {}
+        if payload.get("target_amount") is not None:
+            try:
+                kwargs["target_amount"] = _parse_money_text(payload.get("target_amount"))
+            except ValueError as exc:
+                raise web.HTTPBadRequest(text="invalid target_amount") from exc
+        if payload.get("target_month") is not None:
+            try:
+                kwargs["target_month"] = _parse_month_key(str(payload.get("target_month")))
+            except ValueError as exc:
+                raise web.HTTPBadRequest(text=str(exc)) from exc
+        ok = await update_budget_fund(db_dsn, user_id=user_id, fund_id=fund_id, **kwargs)
+        return _json_ok({"updated": ok})
+
+    if action == "autopilot":
+        enabled = bool(payload.get("enabled"))
+        ok = await update_budget_fund(db_dsn, user_id=user_id, fund_id=fund_id, autopilot_enabled=enabled)
+        return _json_ok({"updated": ok, "autopilot_enabled": enabled})
+
+    status = "paused" if action == "pause" else "deleted"
+    ok = await update_budget_fund(db_dsn, user_id=user_id, fund_id=fund_id, status=status)
+    return _json_ok({"updated": ok, "status": status})
+
+
+async def api_budget_month_close(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    payload = await _read_json(request)
+
+    month_raw = payload.get("month_key") or (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    try:
+        month_key = _parse_month_key(str(month_raw))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    planned_raw = payload.get("planned_expenses_base")
+    try:
+        planned_expenses_base = float(planned_raw or 0.0)
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="invalid planned_expenses_base") from exc
+    if planned_expenses_base < 0:
+        raise web.HTTPBadRequest(text="planned_expenses_base must be >= 0")
+    try:
+        actual_expenses_base = _parse_money_text(payload.get("actual_expenses_base"))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text="invalid actual_expenses_base") from exc
+    extra_income_items = payload.get("extra_income_items") or []
+    if not isinstance(extra_income_items, list):
+        raise web.HTTPBadRequest(text="extra_income_items must be list")
+    clean_items = []
+    for item in extra_income_items:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("type") or "Другое").strip() or "Другое"
+        amount_raw = item.get("amount")
+        try:
+            amount = _parse_money_text(amount_raw)
+        except ValueError:
+            continue
+        comment = str(item.get("comment") or "").strip()
+        clean_items.append({"type": label, "amount": amount, "comment": comment})
+
+    result = await close_budget_month(
+        db_dsn,
+        user_id=user_id,
+        month_key=month_key,
+        planned_expenses_base=planned_expenses_base,
+        actual_expenses_base=actual_expenses_base,
+        extra_income_items=clean_items,
+    )
+    return _json_ok(result)
+
+
 def attach_miniapp_routes(app: web.Application, db_dsn: str, bot_token: str) -> None:
     app["db_dsn"] = db_dsn
     app["bot_token"] = bot_token
@@ -675,3 +1069,18 @@ def attach_miniapp_routes(app: web.Application, db_dsn: str, bot_token: str) -> 
     app.router.add_get("/api/miniapp/alerts", api_alerts_get)
     app.router.add_post("/api/miniapp/alerts", api_alerts_post)
     app.router.add_delete("/api/miniapp/alerts/{alert_id}", api_alerts_delete)
+
+    app.router.add_get("/api/miniapp/mode", api_mode)
+    app.router.add_post("/api/miniapp/mode", api_mode)
+    app.router.add_get("/api/miniapp/budget/dashboard", api_budget_dashboard)
+    app.router.add_get("/api/miniapp/budget/profile", api_budget_profile)
+    app.router.add_post("/api/miniapp/budget/profile", api_budget_profile)
+    app.router.add_get("/api/miniapp/budget/obligations", api_budget_obligations)
+    app.router.add_post("/api/miniapp/budget/obligations", api_budget_obligations)
+    app.router.add_get("/api/miniapp/budget/savings", api_budget_savings)
+    app.router.add_post("/api/miniapp/budget/savings", api_budget_savings)
+    app.router.add_post("/api/miniapp/budget/funds/strategy", api_budget_fund_strategy)
+    app.router.add_get("/api/miniapp/budget/funds", api_budget_funds)
+    app.router.add_post("/api/miniapp/budget/funds", api_budget_funds)
+    app.router.add_post("/api/miniapp/budget/funds/{fund_id}", api_budget_fund_item)
+    app.router.add_post("/api/miniapp/budget/month-close", api_budget_month_close)

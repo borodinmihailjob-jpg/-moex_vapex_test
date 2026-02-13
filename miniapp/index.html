@@ -14,11 +14,35 @@
         <h1>MOEX Portfolio</h1>
         <p id="userLine">Загрузка…</p>
       </div>
-      <button id="refreshBtn" class="btn ghost">Обновить</button>
+      <div class="header-actions">
+        <button id="switchModeBtn" class="btn ghost">Режим</button>
+        <button id="refreshBtn" class="btn ghost">Обновить</button>
+      </div>
     </header>
 
     <main id="content" class="content">
-      <section id="tab-dashboard" class="tab-view active">
+      <section id="tab-mode" class="tab-view active">
+        <article class="card">
+          <h2>Выберите режим</h2>
+          <p class="hint">Бот умеет и в биржу, и в личный бюджет. Можно переключаться в любой момент.</p>
+          <div class="mode-grid">
+            <div class="mode-card">
+              <h3>Биржа</h3>
+              <p class="hint">Портфель, сделки, котировки и отчёты</p>
+              <button id="openExchangeBtn" class="btn primary">Открыть биржу</button>
+            </div>
+            <div class="mode-card">
+              <h3>Бюджет</h3>
+              <p class="hint">План на месяц, цели и “крупные траты”</p>
+              <button id="openBudgetBtn" class="btn primary">Открыть бюджет</button>
+            </div>
+          </div>
+          <p id="lastModeLine" class="hint"></p>
+          <button id="openLastModeBtn" class="btn ghost" style="display:none">Открыть как в прошлый раз</button>
+        </article>
+      </section>
+
+      <section id="tab-dashboard" class="tab-view">
         <article class="card summary-card">
           <h2>Портфель</h2>
           <div class="summary-grid">
@@ -210,14 +234,76 @@
           <button id="clearPortfolioBtn" class="btn danger">Очистить портфель</button>
         </article>
       </section>
+
+      <section id="tab-budget" class="tab-view">
+        <article id="budgetWelcomeCard" class="card">
+          <h2>Давайте соберём ваш бюджет</h2>
+          <p class="hint">Это займёт 5–10 минут. Вы увидите, сколько у вас <strong>свободно в месяц</strong> и что делать для целей.</p>
+          <div class="mode-grid">
+            <div class="mode-card">
+              <h3>Быстро (5 минут)</h3>
+              <p class="hint">Одна сумма расходов + обязательные платежи</p>
+              <button id="startQuickOnboardingBtn" class="btn primary">Начать быстро</button>
+            </div>
+            <div class="mode-card">
+              <h3>Точно (10 минут)</h3>
+              <p class="hint">Чуть больше деталей → точнее прогноз</p>
+              <button id="startPreciseOnboardingBtn" class="btn primary">Начать точно</button>
+            </div>
+          </div>
+          <p class="hint">Мы не просим доступ к банку. Всё вводится вручную и можно изменить в любой момент.</p>
+        </article>
+
+        <article id="budgetWizardCard" class="card" style="display:none">
+          <h2 id="budgetWizardTitle">Онбординг бюджета</h2>
+          <p id="budgetStepProgress" class="hint">Шаг 1 из 5</p>
+          <p id="budgetWizardSubtitle" class="hint"></p>
+          <div id="budgetWizardBody"></div>
+          <div class="wizard-actions">
+            <button id="budgetBackBtn" class="btn ghost">Назад</button>
+            <button id="budgetSkipBtn" class="btn ghost">Пропустить</button>
+            <button id="budgetNextBtn" class="btn primary">Дальше</button>
+          </div>
+        </article>
+
+        <article id="budgetResultCard" class="card" style="display:none">
+          <h2>Ваш бюджет на месяц</h2>
+          <div id="budgetResultBody" class="plain"></div>
+          <div id="budgetResultActions" class="chips"></div>
+        </article>
+
+        <article id="budgetDashboardCard" class="card" style="display:none">
+          <h2>Бюджет</h2>
+          <div id="budgetCurrentMonth" class="plain"></div>
+          <button id="editBudgetBtn" class="btn ghost">Изменить бюджет</button>
+        </article>
+
+        <article id="budgetFundsCard" class="card" style="display:none">
+          <h2>Фонды</h2>
+          <div id="budgetFundsList" class="list"></div>
+          <div class="chips">
+            <button id="planExpenseBtn" class="chip">Запланировать трату</button>
+            <button id="saveTargetBtn" class="chip">Накопить сумму</button>
+          </div>
+        </article>
+
+        <article id="budgetMonthCloseCard" class="card" style="display:none">
+          <h2>Закрыть прошлый месяц</h2>
+          <p class="hint">Добавьте фактические траты и доп. доходы — прогноз целей станет точнее.</p>
+          <button id="closeMonthOpenBtn" class="btn primary">Закрыть месяц</button>
+          <div id="monthCloseBody" class="plain" style="display:none"></div>
+        </article>
+      </section>
     </main>
 
     <nav class="tabbar" id="tabbar">
-      <button class="tab-btn active" data-tab="dashboard">Портфель</button>
+      <button class="tab-btn active" data-tab="mode">Режим</button>
+      <button class="tab-btn" data-tab="dashboard">Портфель</button>
       <button class="tab-btn" data-tab="trade">Сделка</button>
       <button class="tab-btn" data-tab="lookup">Поиск</button>
       <button class="tab-btn" data-tab="movers">Рынок</button>
       <button class="tab-btn" data-tab="alerts">Алерты</button>
+      <button class="tab-btn" data-tab="budget">Бюджет</button>
       <button class="tab-btn" data-tab="more">Ещё</button>
     </nav>
   </div>

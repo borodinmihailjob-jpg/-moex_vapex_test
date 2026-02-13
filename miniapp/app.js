@@ -9,6 +9,8 @@ if (tg) {
 
 const state = {
   initData: tg?.initData || "",
+  mode: "mode",
+  lastMode: null,
   selectedTrade: null,
   selectedLookup: null,
   selectedAlert: null,
@@ -18,6 +20,15 @@ const state = {
   loadingCount: 0,
   loadingShowTimer: null,
   loadingVisibleAt: 0,
+  budget: {
+    onboardingMode: null,
+    step: 1,
+    obligations: [],
+    savings: [],
+    profile: null,
+    dashboard: null,
+    strategyDraft: null,
+  },
 };
 
 const POPULAR_FIAT_ALERT_PAIRS = [
@@ -37,6 +48,7 @@ const el = {
   globalLoaderText: document.getElementById("globalLoaderText"),
   toast: document.getElementById("toast"),
   refreshBtn: document.getElementById("refreshBtn"),
+  switchModeBtn: document.getElementById("switchModeBtn"),
   userLine: document.getElementById("userLine"),
   totalValue: document.getElementById("totalValue"),
   totalPnl: document.getElementById("totalPnl"),
@@ -87,6 +99,35 @@ const el = {
   clearPortfolioBtn: document.getElementById("clearPortfolioBtn"),
   articles: document.getElementById("articles"),
   articleText: document.getElementById("articleText"),
+
+  openExchangeBtn: document.getElementById("openExchangeBtn"),
+  openBudgetBtn: document.getElementById("openBudgetBtn"),
+  openLastModeBtn: document.getElementById("openLastModeBtn"),
+  lastModeLine: document.getElementById("lastModeLine"),
+  startQuickOnboardingBtn: document.getElementById("startQuickOnboardingBtn"),
+  startPreciseOnboardingBtn: document.getElementById("startPreciseOnboardingBtn"),
+  budgetWelcomeCard: document.getElementById("budgetWelcomeCard"),
+  budgetWizardCard: document.getElementById("budgetWizardCard"),
+  budgetResultCard: document.getElementById("budgetResultCard"),
+  budgetDashboardCard: document.getElementById("budgetDashboardCard"),
+  budgetFundsCard: document.getElementById("budgetFundsCard"),
+  budgetMonthCloseCard: document.getElementById("budgetMonthCloseCard"),
+  budgetWizardTitle: document.getElementById("budgetWizardTitle"),
+  budgetStepProgress: document.getElementById("budgetStepProgress"),
+  budgetWizardSubtitle: document.getElementById("budgetWizardSubtitle"),
+  budgetWizardBody: document.getElementById("budgetWizardBody"),
+  budgetBackBtn: document.getElementById("budgetBackBtn"),
+  budgetSkipBtn: document.getElementById("budgetSkipBtn"),
+  budgetNextBtn: document.getElementById("budgetNextBtn"),
+  budgetResultBody: document.getElementById("budgetResultBody"),
+  budgetResultActions: document.getElementById("budgetResultActions"),
+  budgetCurrentMonth: document.getElementById("budgetCurrentMonth"),
+  editBudgetBtn: document.getElementById("editBudgetBtn"),
+  budgetFundsList: document.getElementById("budgetFundsList"),
+  planExpenseBtn: document.getElementById("planExpenseBtn"),
+  saveTargetBtn: document.getElementById("saveTargetBtn"),
+  closeMonthOpenBtn: document.getElementById("closeMonthOpenBtn"),
+  monthCloseBody: document.getElementById("monthCloseBody"),
 };
 
 function toast(msg) {
@@ -153,6 +194,31 @@ function endLoading() {
 function money(v) {
   const n = Number(v || 0);
   return n.toLocaleString("ru-RU", { maximumFractionDigits: 2 }) + " ₽";
+}
+
+function parseMoneyInput(raw) {
+  const value = String(raw ?? "").trim().toLowerCase().replace(/₽/g, "").replace(/\s+/g, "").replace(/_/g, "").replace(",", ".");
+  if (!value) throw new Error("Введите сумму числом. Например: 120000");
+  let text = value;
+  let mult = 1;
+  if (text.endsWith("млн")) {
+    text = text.slice(0, -3);
+    mult = 1_000_000;
+  } else if (text.endsWith("м") || text.endsWith("m")) {
+    text = text.slice(0, -1);
+    mult = 1_000_000;
+  }
+  const n = Number(text) * mult;
+  if (!Number.isFinite(n)) throw new Error("Введите сумму числом. Например: 120000");
+  if (n <= 0) throw new Error("Сумма должна быть больше 0");
+  return n;
+}
+
+function monthLabel(monthKey) {
+  const [y, m] = String(monthKey || "").split("-");
+  const d = new Date(Number(y), Number(m) - 1, 1);
+  if (Number.isNaN(d.getTime())) return monthKey || "";
+  return d.toLocaleString("ru-RU", { month: "long", year: "numeric" });
 }
 
 function formatQty(value, assetType) {
@@ -259,6 +325,7 @@ async function api(path, options = {}) {
 }
 
 function setTab(name) {
+  state.mode = name;
   document.querySelectorAll(".tab-view").forEach((x) => x.classList.remove("active"));
   document.querySelectorAll(".tab-btn").forEach((x) => x.classList.remove("active"));
   document.getElementById(`tab-${name}`)?.classList.add("active");
@@ -273,6 +340,9 @@ function setTab(name) {
     loadUsdRub().then(() => {
       state.usdLoaded = true;
     }).catch(() => {});
+  }
+  if (name === "budget") {
+    loadBudgetDashboard().catch(() => {});
   }
 }
 
@@ -527,6 +597,358 @@ async function loadArticles() {
   });
 }
 
+async function loadModePreference() {
+  const data = await api("/api/miniapp/mode");
+  state.lastMode = data.last_mode || null;
+  if (state.lastMode === "exchange") {
+    el.lastModeLine.textContent = "Последний режим: Биржа";
+    el.openLastModeBtn.style.display = "";
+  } else if (state.lastMode === "budget") {
+    el.lastModeLine.textContent = "Последний режим: Бюджет";
+    el.openLastModeBtn.style.display = "";
+  } else {
+    el.lastModeLine.textContent = "";
+    el.openLastModeBtn.style.display = "none";
+  }
+}
+
+async function setModePreference(mode) {
+  await api("/api/miniapp/mode", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  state.lastMode = mode;
+}
+
+async function loadBudgetDashboard() {
+  const data = await api("/api/miniapp/budget/dashboard", { loadingText: "Считаю…" });
+  state.budget.dashboard = data;
+  state.budget.profile = data.profile || {};
+
+  const onboardingCompleted = !!data.profile?.onboarding_completed;
+  el.budgetWelcomeCard.style.display = onboardingCompleted ? "none" : "";
+  el.budgetWizardCard.style.display = "none";
+  el.budgetResultCard.style.display = "none";
+  el.budgetDashboardCard.style.display = onboardingCompleted ? "" : "none";
+  el.budgetFundsCard.style.display = onboardingCompleted ? "" : "none";
+  el.budgetMonthCloseCard.style.display = onboardingCompleted && data.need_close_previous_month ? "" : "none";
+
+  if (onboardingCompleted) {
+    const free = Number(data.free || 0);
+    el.budgetCurrentMonth.textContent = [
+      `${monthLabel(data.month)}`,
+      `Доход: ${money(data.income)}`,
+      `Обязательные: ${money(data.obligations_total)}`,
+      `На жизнь (план): ${money(data.expenses_base)}`,
+      `${free >= 0 ? "Свободно" : "Дефицит"}: ${money(Math.abs(free))}/мес`,
+    ].join("\n");
+    renderBudgetFunds(data.funds || []);
+  }
+}
+
+function renderBudgetFunds(rows) {
+  el.budgetFundsList.innerHTML = "";
+  if (!rows.length) {
+    renderEmpty(el.budgetFundsList, "Пока нет фондов. Добавьте цель или крупную трату.");
+    return;
+  }
+  rows.forEach((fund) => {
+    const item = document.createElement("div");
+    item.className = "item";
+    const months = Number(fund.months_left || 0);
+    item.innerHTML = `<div class="left"><div class="name">${fund.title}</div><div class="sub">нужно ${money(fund.required_per_month)}/мес • осталось ${months} мес</div></div><div class="right"><button class="btn ghost">Пополнить</button></div>`;
+    item.querySelector("button").addEventListener("click", async () => {
+      const raw = window.prompt("Сумма пополнения, ₽");
+      if (!raw) return;
+      try {
+        const amount = parseMoneyInput(raw);
+        await api(`/api/miniapp/budget/funds/${fund.id}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "topup", amount }),
+        });
+        toast("Фонд пополнен");
+        await loadBudgetDashboard();
+      } catch (e) {
+        toast(e?.message || "Ошибка пополнения");
+      }
+    });
+    el.budgetFundsList.appendChild(item);
+  });
+}
+
+function openBudgetWizard(onboardingMode) {
+  state.budget.onboardingMode = onboardingMode;
+  state.budget.step = 1;
+  state.budget.obligations = [];
+  state.budget.savings = [];
+  el.budgetWelcomeCard.style.display = "none";
+  el.budgetWizardCard.style.display = "";
+  el.budgetResultCard.style.display = "none";
+  el.budgetDashboardCard.style.display = "none";
+  el.budgetFundsCard.style.display = "none";
+  el.budgetMonthCloseCard.style.display = "none";
+  renderBudgetWizardStep();
+}
+
+function renderBudgetWizardStep() {
+  const step = state.budget.step;
+  el.budgetStepProgress.textContent = `Шаг ${step} из 5`;
+  el.budgetBackBtn.style.display = step > 1 ? "" : "none";
+  el.budgetSkipBtn.style.display = step === 3 ? "" : "none";
+  el.budgetNextBtn.textContent = step === 5 ? "Сохранить" : "Дальше";
+
+  if (step === 1) {
+    const total = state.budget.obligations.reduce((acc, x) => acc + Number(x.amount_monthly || 0), 0);
+    el.budgetWizardTitle.textContent = "Обязательные платежи";
+    el.budgetWizardSubtitle.textContent = "Добавьте то, что вы платите каждый месяц в первую очередь.";
+    el.budgetWizardBody.innerHTML = `
+      <div class="chips">
+        <button class="chip" data-add-obligation="rent">Аренда</button>
+        <button class="chip" data-add-obligation="mortgage">Ипотека</button>
+        <button class="chip" data-add-obligation="loan">Кредит</button>
+        <button class="chip" data-add-obligation="installment">Рассрочка</button>
+        <button class="chip" data-add-obligation="alimony">Алименты/обязательные переводы</button>
+        <button class="chip" data-add-obligation="other">Другое</button>
+      </div>
+      <div id="wizardObligationsList" class="plain">${state.budget.obligations.length ? state.budget.obligations.map((x) => `• ${x.title}: ${money(x.amount_monthly)}`).join("\n") : "Пока ничего не добавили. Нажмите на пункт выше, чтобы добавить платёж."}</div>
+      <p class="hint">Сейчас обязательные платежи: <strong>${money(total)}/мес</strong></p>
+    `;
+    el.budgetWizardBody.querySelectorAll("[data-add-obligation]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const title = window.prompt("Название", btn.textContent.trim());
+        if (!title) return;
+        const raw = window.prompt("Сумма в месяц, ₽", "45000");
+        if (!raw) return;
+        try {
+          const amount = parseMoneyInput(raw);
+          await api("/api/miniapp/budget/obligations", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, kind: btn.dataset.addObligation, amount_monthly: amount }),
+          });
+          const listData = await api("/api/miniapp/budget/obligations");
+          state.budget.obligations = listData.items || [];
+          toast("Платёж добавлен ✅");
+          renderBudgetWizardStep();
+        } catch (e) {
+          toast(e?.message || "Ошибка добавления");
+        }
+      });
+    });
+    return;
+  }
+
+  if (step === 2) {
+    el.budgetWizardTitle.textContent = "Доход";
+    el.budgetWizardSubtitle.textContent = "Сколько денег приходит к вам в среднем за месяц?";
+    const currentType = state.budget.profile?.income_type || "fixed";
+    el.budgetWizardBody.innerHTML = `
+      <div class="form-grid two">
+        <label>Режим
+          <select id="wizardIncomeType">
+            <option value="fixed" ${currentType === "fixed" ? "selected" : ""}>Фиксированный</option>
+            <option value="irregular" ${currentType === "irregular" ? "selected" : ""}>Нерегулярный</option>
+          </select>
+        </label>
+        <label id="wizardPaydayWrap">День зарплаты
+          <input id="wizardPayday" type="number" min="1" max="31" placeholder="Например: 10" />
+        </label>
+      </div>
+      <label>${currentType === "fixed" ? "Доход в месяц, ₽" : "Средний доход, ₽/мес"}
+        <input id="wizardIncome" type="text" placeholder="Например: ${currentType === "fixed" ? "150000" : "120000"}" />
+      </label>
+      <p class="hint">${currentType === "fixed" ? "Нужно для “сколько можно тратить в день”." : "Мы будем считать бюджет по среднему, а премии/кэшбек учтём в конце месяца."}</p>
+    `;
+    return;
+  }
+
+  if (step === 3) {
+    const total = state.budget.savings.reduce((acc, x) => acc + Number(x.amount || 0), 0);
+    el.budgetWizardTitle.textContent = "Накопления";
+    el.budgetWizardSubtitle.textContent = "Это нужно только для оценки “запаса прочности”. Можно пропустить.";
+    el.budgetWizardBody.innerHTML = `
+      <div class="chips">
+        <button class="chip" data-add-saving="cash">Подушка (наличные/карта)</button>
+        <button class="chip" data-add-saving="deposit">Вклад</button>
+        <button class="chip" data-add-saving="investments">Инвестиции (акции/ОФЗ)</button>
+        <button class="chip" data-add-saving="crypto">Крипта</button>
+        <button class="chip" data-add-saving="other">Другое</button>
+      </div>
+      <div class="plain">${state.budget.savings.length ? state.budget.savings.map((x) => `• ${x.title}: ${money(x.amount)}`).join("\n") : "Нет накоплений"}</div>
+      <p class="hint">Всего накоплений: ${money(total)}</p>
+    `;
+    el.budgetWizardBody.querySelectorAll("[data-add-saving]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const title = window.prompt("Название", btn.textContent.trim());
+        if (!title) return;
+        const raw = window.prompt("Сумма, ₽", "100000");
+        if (!raw) return;
+        try {
+          const amount = parseMoneyInput(raw);
+          await api("/api/miniapp/budget/savings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ kind: btn.dataset.addSaving, title, amount }),
+          });
+          const listData = await api("/api/miniapp/budget/savings");
+          state.budget.savings = listData.items || [];
+          renderBudgetWizardStep();
+        } catch (e) {
+          toast(e?.message || "Ошибка сохранения");
+        }
+      });
+    });
+    return;
+  }
+
+  if (step === 4) {
+    el.budgetWizardTitle.textContent = "Расходы на жизнь";
+    el.budgetWizardSubtitle.textContent = "Сколько уходит в месяц на всё остальное — еда, транспорт, покупки и т.д.";
+    el.budgetWizardBody.innerHTML = `
+      <label>Сумма в месяц, ₽
+        <input id="wizardExpensesBase" type="text" placeholder="Например: 90000" />
+      </label>
+      <p class="hint">Можно примерно — уточним через “закрытие месяца”.</p>
+    `;
+    return;
+  }
+
+  el.budgetWizardTitle.textContent = "Цели";
+  el.budgetWizardSubtitle.textContent = "Хотите поставить цель или запланировать крупную трату?";
+  el.budgetWizardBody.innerHTML = `
+    <div class="chips">
+      <button class="chip" data-goal-action="fund">Накопить сумму</button>
+      <button class="chip" data-goal-action="expense">Запланировать трату</button>
+      <button class="chip" data-goal-action="none">Пока без целей</button>
+    </div>
+    <p class="hint">Цели можно добавить позже в разделе “Фонды”.</p>
+  `;
+  el.budgetWizardBody.querySelectorAll("[data-goal-action]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (btn.dataset.goalAction === "fund" || btn.dataset.goalAction === "expense") {
+        await openFundPlanFlow();
+      } else {
+        toast("Продолжим без целей");
+      }
+    });
+  });
+}
+
+async function completeBudgetOnboarding() {
+  const dashboard = await api("/api/miniapp/budget/dashboard");
+  const free = Number(dashboard.free || 0);
+  el.budgetWizardCard.style.display = "none";
+  el.budgetResultCard.style.display = "";
+  el.budgetResultBody.textContent = [
+    `Доход: ${money(dashboard.income)}`,
+    `Обязательные платежи: ${money(dashboard.obligations_total)}`,
+    `Расходы на жизнь: ${money(dashboard.expenses_base)}`,
+    `${free >= 0 ? "Свободно" : "Дефицит"}: ${money(Math.abs(free))}/мес`,
+  ].join("\n");
+  el.budgetResultActions.innerHTML = "";
+  const actions = free >= 0
+    ? ["Запланировать трату", "Создать подушку", "Перейти в бюджет"]
+    : ["Сократить расходы", "Найти доп. доход", "Смешанный план"];
+  actions.forEach((label) => {
+    const btn = document.createElement("button");
+    btn.className = "chip";
+    btn.textContent = label;
+    btn.addEventListener("click", async () => {
+      if (label === "Перейти в бюджет") {
+        await loadBudgetDashboard();
+      } else if (label.includes("трат")) {
+        await openFundPlanFlow();
+      } else {
+        toast("Сохранено");
+      }
+    });
+    el.budgetResultActions.appendChild(btn);
+  });
+}
+
+async function openFundPlanFlow() {
+  const title = window.prompt("На что?", "Отпуск");
+  if (!title) return;
+  const whenRaw = window.prompt("Когда? Формат YYYY-MM", "2026-12");
+  if (!whenRaw) return;
+  const amountRaw = window.prompt("Сумма, ₽", "500000");
+  if (!amountRaw) return;
+  const alreadyRaw = window.prompt("Уже накоплено, ₽", "0") || "0";
+  const priority = (window.prompt("Приоритет: high / medium / low", "medium") || "medium").toLowerCase();
+  try {
+    const target_amount = parseMoneyInput(amountRaw);
+    const already_saved = Number(alreadyRaw || 0);
+    const strategy = await api("/api/miniapp/budget/funds/strategy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title,
+        target_month: whenRaw,
+        target_amount,
+        already_saved,
+        priority,
+      }),
+    });
+    const ok = strategy.is_feasible
+      ? window.confirm(`✅ План реалистичен.\nРекомендуемый взнос: ${money(strategy.required_per_month)}/мес.\nСохранить фонд?`)
+      : window.confirm(`⚠️ Не хватает ${money(strategy.gap)}/мес.\nСохранить как есть?`);
+    if (!ok) return;
+    await api("/api/miniapp/budget/funds", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title,
+        target_month: whenRaw,
+        target_amount,
+        already_saved,
+        priority,
+      }),
+    });
+    toast("Фонд сохранён");
+    await loadBudgetDashboard();
+  } catch (e) {
+    toast(e?.message || "Ошибка расчёта фонда");
+  }
+}
+
+async function openMonthCloseFlow() {
+  const actualRaw = window.prompt("Факт расходов, ₽", "105000");
+  if (!actualRaw) return;
+  const extraRaw = window.prompt("Доп. доходы за месяц, ₽ (можно 0)", "0") || "0";
+  try {
+    const dashboard = await api("/api/miniapp/budget/dashboard");
+    const planned = Number(dashboard.expenses_base || 0);
+    const actual = parseMoneyInput(actualRaw);
+    const extra = Number(extraRaw || 0);
+    const extraItems = extra > 0 ? [{ type: "Другое", amount: extra }] : [];
+    const res = await api("/api/miniapp/budget/month-close", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        month_key: dashboard.previous_month,
+        planned_expenses_base: planned,
+        actual_expenses_base: actual,
+        extra_income_items: extraItems,
+      }),
+    });
+    el.monthCloseBody.style.display = "";
+    const delta = Number(res.delta_expenses || 0);
+    el.monthCloseBody.textContent = [
+      "Месяц закрыт ✅",
+      `План расходов: ${money(res.planned_expenses_base)}`,
+      `Факт расходов: ${money(res.actual_expenses_base)}`,
+      `Разница: ${money(delta)}`,
+      `Доп. доходы: ${money(res.extra_income_total)}`,
+    ].join("\n");
+    toast("Закрытие месяца сохранено");
+    await loadBudgetDashboard();
+  } catch (e) {
+    toast(e?.message || "Не удалось закрыть месяц");
+  }
+}
+
 async function saveTrade() {
   if (!state.selectedTrade) {
     toast("Сначала выберите инструмент");
@@ -568,6 +990,107 @@ function setupEvents() {
   document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => setTab(btn.dataset.tab));
   });
+  el.switchModeBtn?.addEventListener("click", () => setTab("mode"));
+  el.openExchangeBtn?.addEventListener("click", async () => {
+    await setModePreference("exchange");
+    setTab("dashboard");
+  });
+  el.openBudgetBtn?.addEventListener("click", async () => {
+    await setModePreference("budget");
+    setTab("budget");
+    await loadBudgetDashboard();
+  });
+  el.openLastModeBtn?.addEventListener("click", async () => {
+    if (!state.lastMode) return;
+    setTab(state.lastMode === "budget" ? "budget" : "dashboard");
+    if (state.lastMode === "budget") {
+      await loadBudgetDashboard();
+    }
+  });
+  el.startQuickOnboardingBtn?.addEventListener("click", async () => {
+    try {
+      await api("/api/miniapp/budget/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ onboarding_mode: "quick" }),
+      });
+      openBudgetWizard("quick");
+    } catch (_) {
+      toast("Не удалось начать онбординг");
+    }
+  });
+  el.startPreciseOnboardingBtn?.addEventListener("click", async () => {
+    try {
+      await api("/api/miniapp/budget/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ onboarding_mode: "precise" }),
+      });
+      openBudgetWizard("precise");
+    } catch (_) {
+      toast("Не удалось начать онбординг");
+    }
+  });
+  el.budgetBackBtn?.addEventListener("click", () => {
+    state.budget.step = Math.max(1, state.budget.step - 1);
+    renderBudgetWizardStep();
+  });
+  el.budgetSkipBtn?.addEventListener("click", () => {
+    state.budget.step = Math.min(5, state.budget.step + 1);
+    renderBudgetWizardStep();
+  });
+  el.budgetNextBtn?.addEventListener("click", async () => {
+    try {
+      if (state.budget.step === 2) {
+        const incomeType = document.getElementById("wizardIncomeType")?.value || "fixed";
+        const incomeRaw = document.getElementById("wizardIncome")?.value || "";
+        const paydayRaw = document.getElementById("wizardPayday")?.value || "";
+        const income = parseMoneyInput(incomeRaw);
+        await api("/api/miniapp/budget/profile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            income_type: incomeType,
+            income_monthly: income,
+            payday_day: paydayRaw ? Number(paydayRaw) : null,
+          }),
+        });
+      }
+      if (state.budget.step === 4) {
+        const expRaw = document.getElementById("wizardExpensesBase")?.value || "";
+        const expenses = parseMoneyInput(expRaw);
+        await api("/api/miniapp/budget/profile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expenses_base: expenses }),
+        });
+      }
+      if (state.budget.step >= 5) {
+        await api("/api/miniapp/budget/profile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ onboarding_completed: true }),
+        });
+        await completeBudgetOnboarding();
+        return;
+      }
+      state.budget.step += 1;
+      renderBudgetWizardStep();
+    } catch (e) {
+      toast(e?.message || "Проверьте данные");
+    }
+  });
+  el.editBudgetBtn?.addEventListener("click", () => {
+    state.budget.step = 1;
+    el.budgetDashboardCard.style.display = "none";
+    el.budgetFundsCard.style.display = "none";
+    el.budgetMonthCloseCard.style.display = "none";
+    el.budgetWizardCard.style.display = "";
+    renderBudgetWizardStep();
+  });
+  el.planExpenseBtn?.addEventListener("click", openFundPlanFlow);
+  el.saveTargetBtn?.addEventListener("click", openFundPlanFlow);
+  el.closeMonthOpenBtn?.addEventListener("click", openMonthCloseFlow);
 
   state.searchControllers.trade = bindSearch({
     inputEl: el.tradeSearch,
@@ -643,7 +1166,10 @@ function setupEvents() {
   el.tradeDate.value = todayDdmmyyyy();
   el.refreshBtn.addEventListener("click", async () => {
     try {
-      await Promise.all([loadPortfolio(), loadAlerts(), loadUsdRub(), loadOpenCloseSetting()]);
+      await Promise.all([loadPortfolio(), loadAlerts(), loadUsdRub(), loadOpenCloseSetting(), loadModePreference()]);
+      if (state.mode === "budget") {
+        await loadBudgetDashboard();
+      }
       toast("Обновлено");
     } catch (e) {
       toast("Ошибка обновления");
@@ -810,7 +1336,16 @@ function setupEvents() {
       loadAlerts(),
       loadOpenCloseSetting(),
       loadArticles(),
+      loadModePreference(),
     ]);
+    if (state.lastMode === "exchange") {
+      setTab("dashboard");
+    } else if (state.lastMode === "budget") {
+      setTab("budget");
+      await loadBudgetDashboard();
+    } else {
+      setTab("mode");
+    }
   } catch (e) {
     el.userLine.textContent = "Ошибка авторизации Mini App";
     toast("Не удалось инициализировать Mini App");
