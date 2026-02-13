@@ -365,6 +365,46 @@ input:focus, select:focus {
   transform: translateX(-50%) translateY(0);
 }
 
+.global-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity .16s ease, visibility .16s ease;
+}
+.global-loader.show {
+  opacity: 1;
+  visibility: visible;
+}
+.global-loader-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 999px;
+  padding: 10px 14px;
+  background: rgba(31, 47, 81, 0.92);
+  color: #fff;
+  font-size: 13px;
+  box-shadow: 0 8px 20px rgba(31, 47, 81, 0.3);
+}
+.global-loader-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: loader-spin .7s linear infinite;
+}
+@keyframes loader-spin {
+  to { transform: rotate(360deg); }
+}
+
 @media (max-width: 900px) {
   .form-grid.three { grid-template-columns: 1fr; }
 }

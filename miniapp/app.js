@@ -15,6 +15,9 @@ const state = {
   searchControllers: {},
   moversLoaded: false,
   usdLoaded: false,
+  loadingCount: 0,
+  loadingShowTimer: null,
+  loadingVisibleAt: 0,
 };
 
 const POPULAR_FIAT_ALERT_PAIRS = [
@@ -30,6 +33,8 @@ const POPULAR_FIAT_ALERT_PAIRS = [
 const el = {
   app: document.getElementById("app"),
   content: document.getElementById("content"),
+  globalLoader: document.getElementById("globalLoader"),
+  globalLoaderText: document.getElementById("globalLoaderText"),
   toast: document.getElementById("toast"),
   refreshBtn: document.getElementById("refreshBtn"),
   userLine: document.getElementById("userLine"),
@@ -89,6 +94,51 @@ function toast(msg) {
   el.toast.classList.add("show");
   clearTimeout(toast._t);
   toast._t = setTimeout(() => el.toast.classList.remove("show"), 2300);
+}
+
+const LOADER_SHOW_DELAY_MS = 140;
+const LOADER_MIN_VISIBLE_MS = 240;
+
+function showLoader(text = "Загрузка…") {
+  if (!el.globalLoader) return;
+  if (el.globalLoaderText) {
+    el.globalLoaderText.textContent = text;
+  }
+  el.globalLoader.classList.add("show");
+  el.globalLoader.setAttribute("aria-hidden", "false");
+  state.loadingVisibleAt = Date.now();
+}
+
+function hideLoader() {
+  if (!el.globalLoader) return;
+  const elapsed = Date.now() - state.loadingVisibleAt;
+  const delay = elapsed >= LOADER_MIN_VISIBLE_MS ? 0 : (LOADER_MIN_VISIBLE_MS - elapsed);
+  window.setTimeout(() => {
+    if (state.loadingCount > 0) return;
+    el.globalLoader.classList.remove("show");
+    el.globalLoader.setAttribute("aria-hidden", "true");
+  }, delay);
+}
+
+function beginLoading(text) {
+  state.loadingCount += 1;
+  if (state.loadingCount > 1) {
+    if (el.globalLoader?.classList.contains("show") && el.globalLoaderText && text) {
+      el.globalLoaderText.textContent = text;
+    }
+    return;
+  }
+  window.clearTimeout(state.loadingShowTimer);
+  state.loadingShowTimer = window.setTimeout(() => {
+    if (state.loadingCount > 0) showLoader(text);
+  }, LOADER_SHOW_DELAY_MS);
+}
+
+function endLoading() {
+  state.loadingCount = Math.max(0, state.loadingCount - 1);
+  if (state.loadingCount !== 0) return;
+  window.clearTimeout(state.loadingShowTimer);
+  hideLoader();
 }
 
 function money(v) {
@@ -174,13 +224,19 @@ function setupKeyboardBehavior() {
 }
 
 async function api(path, options = {}) {
+  const { skipLoader, loadingText, ...fetchOptions } = options;
   const headers = new Headers(options.headers || {});
   if (state.initData) headers.set("X-Telegram-Init-Data", state.initData);
-  const res = await fetch(path, { ...options, headers });
-  if (!res.ok) throw new Error(await res.text());
-  const body = await res.json();
-  if (!body.ok) throw new Error("API error");
-  return body.data;
+  if (!skipLoader) beginLoading(loadingText || "Загрузка…");
+  try {
+    const res = await fetch(path, { ...fetchOptions, headers });
+    if (!res.ok) throw new Error(await res.text());
+    const body = await res.json();
+    if (!body.ok) throw new Error("API error");
+    return body.data;
+  } finally {
+    if (!skipLoader) endLoading();
+  }
 }
 
 function setTab(name) {
