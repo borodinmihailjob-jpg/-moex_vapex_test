@@ -309,10 +309,86 @@
 
         <article id="budgetExpensesCard" class="card" style="display:none">
           <h2>Расходы</h2>
-          <label>Расходы на жизнь в месяц, ₽
-            <input id="budgetExpensesInput" type="text" placeholder="Например: 90000" />
-          </label>
-          <button id="budgetExpensesSaveBtn" class="btn primary">Сохранить</button>
+          <div class="form-grid two">
+            <label>Тип расхода
+              <select id="budgetExpenseTypeInput">
+                <option value="rent">Аренда</option>
+                <option value="mortgage">Ипотека</option>
+                <option value="loan">Кредит</option>
+                <option value="utilities">ЖКХ</option>
+                <option value="other">Прочие расходы</option>
+              </select>
+            </label>
+            <label>Название
+              <input id="budgetExpenseTitleInput" type="text" placeholder="Например: аренда квартиры" />
+            </label>
+          </div>
+          <div id="expenseFieldsRent" class="form-grid two">
+            <label>Дата платежа
+              <input id="expenseRentDateInput" type="date" />
+            </label>
+            <label>Сумма платежа, ₽
+              <input id="expenseRentAmountInput" type="text" placeholder="Например: 45000" />
+            </label>
+          </div>
+          <div id="expenseFieldsMortgage" class="form-grid three" style="display:none">
+            <label>Дата начала ипотеки
+              <input id="expenseMortgageStartInput" type="date" />
+            </label>
+            <label>Общая сумма задолженности, ₽
+              <input id="expenseMortgagePrincipalInput" type="text" placeholder="Например: 3500000" />
+            </label>
+            <label>Срок, месяцев
+              <input id="expenseMortgageMonthsInput" type="number" min="1" step="1" placeholder="Например: 240" />
+            </label>
+            <label>Тип платежа
+              <select id="expenseMortgagePaymentTypeInput">
+                <option value="annuity">Аннуитетный</option>
+                <option value="diff">Дифференцированный</option>
+              </select>
+            </label>
+          </div>
+          <div id="expenseFieldsLoan" class="form-grid three" style="display:none">
+            <label>Дата начала кредита
+              <input id="expenseLoanStartInput" type="date" />
+            </label>
+            <label>Сумма кредита, ₽
+              <input id="expenseLoanPrincipalInput" type="text" placeholder="Например: 500000" />
+            </label>
+            <label>Срок, месяцев
+              <input id="expenseLoanMonthsInput" type="number" min="1" step="1" placeholder="Например: 36" />
+            </label>
+            <label>Тип платежа
+              <select id="expenseLoanPaymentTypeInput">
+                <option value="annuity">Аннуитетный</option>
+                <option value="diff">Дифференцированный</option>
+              </select>
+            </label>
+          </div>
+          <div id="expenseFieldsUtilities" class="form-grid two" style="display:none">
+            <label>Дата оплаты
+              <input id="expenseUtilitiesDateInput" type="date" />
+            </label>
+            <label>Сумма платежа, ₽
+              <input id="expenseUtilitiesAmountInput" type="text" placeholder="Например: 8500" />
+            </label>
+          </div>
+          <div id="expenseFieldsOther" class="form-grid one" style="display:none">
+            <label>Сумма расходов, ₽
+              <input id="expenseOtherAmountInput" type="text" placeholder="Например: 12000" />
+            </label>
+          </div>
+          <div id="expenseRatePeriodsCard" class="card-inline" style="display:none">
+            <h3>Ставки и периоды</h3>
+            <div id="expenseRatePeriodsList" class="form-grid"></div>
+            <button id="expenseAddRateBtn" class="btn ghost">Добавить ставку</button>
+          </div>
+          <div class="wizard-actions">
+            <button id="budgetExpensesSaveBtn" class="btn primary">Добавить</button>
+            <button id="budgetExpensesCancelEditBtn" class="btn ghost" style="display:none">Отмена редактирования</button>
+          </div>
+          <div id="budgetExpensesCalcResult" class="plain"></div>
+          <div id="budgetExpensesList" class="list"></div>
         </article>
 
         <article id="budgetFundsCard" class="card" style="display:none">

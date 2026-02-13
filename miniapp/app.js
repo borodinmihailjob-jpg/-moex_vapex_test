@@ -31,6 +31,8 @@ const state = {
     profile: null,
     dashboard: null,
     strategyDraft: null,
+    expenseEditingId: null,
+    expenseRateRows: [],
   },
 };
 
@@ -138,7 +140,32 @@ const el = {
   budgetIncomeSaveBtn: document.getElementById("budgetIncomeSaveBtn"),
   budgetIncomeList: document.getElementById("budgetIncomeList"),
   budgetResetBtn: document.getElementById("budgetResetBtn"),
-  budgetExpensesInput: document.getElementById("budgetExpensesInput"),
+  budgetExpenseTypeInput: document.getElementById("budgetExpenseTypeInput"),
+  budgetExpenseTitleInput: document.getElementById("budgetExpenseTitleInput"),
+  expenseFieldsRent: document.getElementById("expenseFieldsRent"),
+  expenseFieldsMortgage: document.getElementById("expenseFieldsMortgage"),
+  expenseFieldsLoan: document.getElementById("expenseFieldsLoan"),
+  expenseFieldsUtilities: document.getElementById("expenseFieldsUtilities"),
+  expenseFieldsOther: document.getElementById("expenseFieldsOther"),
+  expenseRentDateInput: document.getElementById("expenseRentDateInput"),
+  expenseRentAmountInput: document.getElementById("expenseRentAmountInput"),
+  expenseMortgageStartInput: document.getElementById("expenseMortgageStartInput"),
+  expenseMortgagePrincipalInput: document.getElementById("expenseMortgagePrincipalInput"),
+  expenseMortgageMonthsInput: document.getElementById("expenseMortgageMonthsInput"),
+  expenseMortgagePaymentTypeInput: document.getElementById("expenseMortgagePaymentTypeInput"),
+  expenseLoanStartInput: document.getElementById("expenseLoanStartInput"),
+  expenseLoanPrincipalInput: document.getElementById("expenseLoanPrincipalInput"),
+  expenseLoanMonthsInput: document.getElementById("expenseLoanMonthsInput"),
+  expenseLoanPaymentTypeInput: document.getElementById("expenseLoanPaymentTypeInput"),
+  expenseUtilitiesDateInput: document.getElementById("expenseUtilitiesDateInput"),
+  expenseUtilitiesAmountInput: document.getElementById("expenseUtilitiesAmountInput"),
+  expenseOtherAmountInput: document.getElementById("expenseOtherAmountInput"),
+  expenseRatePeriodsCard: document.getElementById("expenseRatePeriodsCard"),
+  expenseRatePeriodsList: document.getElementById("expenseRatePeriodsList"),
+  expenseAddRateBtn: document.getElementById("expenseAddRateBtn"),
+  budgetExpensesCancelEditBtn: document.getElementById("budgetExpensesCancelEditBtn"),
+  budgetExpensesCalcResult: document.getElementById("budgetExpensesCalcResult"),
+  budgetExpensesList: document.getElementById("budgetExpensesList"),
   budgetExpensesSaveBtn: document.getElementById("budgetExpensesSaveBtn"),
   budgetFundsList: document.getElementById("budgetFundsList"),
   planExpenseBtn: document.getElementById("planExpenseBtn"),
@@ -423,6 +450,9 @@ function setBudgetTab(tab) {
   show(el.budgetLoanCalcCard, tab === "loans");
   if (tab === "income") {
     loadBudgetIncomes().catch(() => {});
+  }
+  if (tab === "expenses") {
+    loadBudgetExpenses().catch(() => {});
   }
 }
 
@@ -711,7 +741,7 @@ async function loadBudgetDashboard() {
   el.budgetResultCard.style.display = "none";
   const income = Number(data.income || 0);
   const obligations = Number(data.obligations_total || 0);
-  const living = Number(data.expenses_base || 0);
+  const living = Number((data.living_expenses_total ?? data.expenses_base) || 0);
   const plannedExpenses = obligations + living;
   const free = income - plannedExpenses;
 
@@ -733,7 +763,9 @@ async function loadBudgetDashboard() {
   if (el.budgetIncomeInput) {
     el.budgetIncomeInput.value = "";
   }
-  el.budgetExpensesInput.value = living ? String(Math.round(living)) : "";
+  if (el.budgetExpensesCalcResult) {
+    el.budgetExpensesCalcResult.textContent = "";
+  }
   setBudgetTab(state.budget.activeTab || "overview");
 }
 
@@ -867,6 +899,230 @@ function renderBudgetIncomes(items) {
       }
     });
     el.budgetIncomeList.appendChild(item);
+  });
+}
+
+function expenseKindLabel(kind) {
+  const map = {
+    rent: "Аренда",
+    mortgage: "Ипотека",
+    loan: "Кредит",
+    utilities: "ЖКХ",
+    other: "Прочие расходы",
+  };
+  return map[String(kind || "").toLowerCase()] || "Прочие расходы";
+}
+
+function showExpenseFields(kind) {
+  const show = (node, visible) => {
+    if (!node) return;
+    node.style.display = visible ? "" : "none";
+  };
+  show(el.expenseFieldsRent, kind === "rent");
+  show(el.expenseFieldsMortgage, kind === "mortgage");
+  show(el.expenseFieldsLoan, kind === "loan");
+  show(el.expenseFieldsUtilities, kind === "utilities");
+  show(el.expenseFieldsOther, kind === "other");
+  show(el.expenseRatePeriodsCard, kind === "mortgage" || kind === "loan");
+}
+
+function addExpenseRateRow(row = null) {
+  state.budget.expenseRateRows.push({
+    annual_rate: row?.annual_rate ?? "",
+    start_date: row?.start_date ?? "",
+    end_date: row?.end_date ?? "",
+  });
+  renderExpenseRateRows();
+}
+
+function renderExpenseRateRows() {
+  if (!el.expenseRatePeriodsList) return;
+  el.expenseRatePeriodsList.innerHTML = "";
+  state.budget.expenseRateRows.forEach((row, idx) => {
+    const wrap = document.createElement("div");
+    wrap.className = "form-grid three";
+    wrap.innerHTML = `
+      <label>Ставка, % годовых
+        <input type="number" step="0.01" min="0" value="${row.annual_rate}" data-rate-field="annual_rate" data-rate-idx="${idx}" />
+      </label>
+      <label>Начало периода
+        <input type="date" value="${row.start_date}" data-rate-field="start_date" data-rate-idx="${idx}" />
+      </label>
+      <label>Конец периода
+        <input type="date" value="${row.end_date}" data-rate-field="end_date" data-rate-idx="${idx}" />
+      </label>
+      <div><button class="btn danger" type="button" data-rate-remove="${idx}">Удалить ставку</button></div>
+    `;
+    wrap.querySelectorAll("[data-rate-field]").forEach((input) => {
+      input.addEventListener("input", () => {
+        const i = Number(input.dataset.rateIdx);
+        const field = input.dataset.rateField;
+        if (Number.isNaN(i) || !field) return;
+        state.budget.expenseRateRows[i][field] = input.value;
+      });
+    });
+    wrap.querySelector("[data-rate-remove]")?.addEventListener("click", () => {
+      state.budget.expenseRateRows.splice(idx, 1);
+      renderExpenseRateRows();
+    });
+    el.expenseRatePeriodsList.appendChild(wrap);
+  });
+}
+
+function clearExpenseForm() {
+  state.budget.expenseEditingId = null;
+  state.budget.expenseRateRows = [];
+  if (el.budgetExpenseTypeInput) el.budgetExpenseTypeInput.value = "rent";
+  if (el.budgetExpenseTitleInput) el.budgetExpenseTitleInput.value = "Аренда";
+  if (el.expenseRentDateInput) el.expenseRentDateInput.value = "";
+  if (el.expenseRentAmountInput) el.expenseRentAmountInput.value = "";
+  if (el.expenseMortgageStartInput) el.expenseMortgageStartInput.value = "";
+  if (el.expenseMortgagePrincipalInput) el.expenseMortgagePrincipalInput.value = "";
+  if (el.expenseMortgageMonthsInput) el.expenseMortgageMonthsInput.value = "";
+  if (el.expenseMortgagePaymentTypeInput) el.expenseMortgagePaymentTypeInput.value = "annuity";
+  if (el.expenseLoanStartInput) el.expenseLoanStartInput.value = "";
+  if (el.expenseLoanPrincipalInput) el.expenseLoanPrincipalInput.value = "";
+  if (el.expenseLoanMonthsInput) el.expenseLoanMonthsInput.value = "";
+  if (el.expenseLoanPaymentTypeInput) el.expenseLoanPaymentTypeInput.value = "annuity";
+  if (el.expenseUtilitiesDateInput) el.expenseUtilitiesDateInput.value = "";
+  if (el.expenseUtilitiesAmountInput) el.expenseUtilitiesAmountInput.value = "";
+  if (el.expenseOtherAmountInput) el.expenseOtherAmountInput.value = "";
+  if (el.budgetExpensesSaveBtn) el.budgetExpensesSaveBtn.textContent = "Добавить";
+  if (el.budgetExpensesCancelEditBtn) el.budgetExpensesCancelEditBtn.style.display = "none";
+  if (el.budgetExpensesCalcResult) el.budgetExpensesCalcResult.textContent = "";
+  showExpenseFields("rent");
+  renderExpenseRateRows();
+}
+
+function buildExpensePayloadFromForm() {
+  const kind = el.budgetExpenseTypeInput?.value || "rent";
+  const title = (el.budgetExpenseTitleInput?.value || "").trim() || expenseKindLabel(kind);
+  if (kind === "rent") {
+    return {
+      kind,
+      title,
+      payment_date: el.expenseRentDateInput?.value || "",
+      amount_monthly: parseMoneyInput(el.expenseRentAmountInput?.value || ""),
+    };
+  }
+  if (kind === "utilities") {
+    return {
+      kind,
+      title,
+      payment_date: el.expenseUtilitiesDateInput?.value || "",
+      amount_monthly: parseMoneyInput(el.expenseUtilitiesAmountInput?.value || ""),
+    };
+  }
+  if (kind === "other") {
+    return {
+      kind,
+      title,
+      amount_monthly: parseMoneyInput(el.expenseOtherAmountInput?.value || ""),
+    };
+  }
+  if (!state.budget.expenseRateRows.length) {
+    throw new Error("Добавьте хотя бы одну ставку");
+  }
+  const base = kind === "mortgage"
+    ? {
+        start_date: el.expenseMortgageStartInput?.value || "",
+        principal: parseMoneyInput(el.expenseMortgagePrincipalInput?.value || ""),
+        months: Number(el.expenseMortgageMonthsInput?.value || 0),
+        payment_type: el.expenseMortgagePaymentTypeInput?.value || "annuity",
+      }
+    : {
+        start_date: el.expenseLoanStartInput?.value || "",
+        principal: parseMoneyInput(el.expenseLoanPrincipalInput?.value || ""),
+        months: Number(el.expenseLoanMonthsInput?.value || 0),
+        payment_type: el.expenseLoanPaymentTypeInput?.value || "annuity",
+      };
+  const rate_periods = state.budget.expenseRateRows.map((row) => ({
+    annual_rate: Number(String(row.annual_rate || "").replace(",", ".")),
+    start_date: row.start_date,
+    end_date: row.end_date,
+  }));
+  return { kind, title, ...base, rate_periods };
+}
+
+async function loadBudgetExpenses() {
+  const data = await api("/api/miniapp/budget/expenses", { skipLoader: true });
+  renderBudgetExpenses(data.items || []);
+}
+
+function fillExpenseFormFromRow(row) {
+  const kind = String(row.kind || "other");
+  const payload = row.payload || {};
+  if (el.budgetExpenseTypeInput) el.budgetExpenseTypeInput.value = kind;
+  if (el.budgetExpenseTitleInput) el.budgetExpenseTitleInput.value = row.title || expenseKindLabel(kind);
+  showExpenseFields(kind);
+  if (kind === "rent") {
+    el.expenseRentDateInput.value = payload.payment_date || "";
+    el.expenseRentAmountInput.value = String(Math.round(Number(row.amount_monthly || 0)));
+  } else if (kind === "utilities") {
+    el.expenseUtilitiesDateInput.value = payload.payment_date || "";
+    el.expenseUtilitiesAmountInput.value = String(Math.round(Number(row.amount_monthly || 0)));
+  } else if (kind === "other") {
+    el.expenseOtherAmountInput.value = String(Math.round(Number(row.amount_monthly || 0)));
+  } else if (kind === "mortgage") {
+    el.expenseMortgageStartInput.value = payload.start_date || "";
+    el.expenseMortgagePrincipalInput.value = String(Math.round(Number(payload.principal || 0)));
+    el.expenseMortgageMonthsInput.value = String(Number(payload.months || 0) || "");
+    el.expenseMortgagePaymentTypeInput.value = payload.payment_type || "annuity";
+    state.budget.expenseRateRows = Array.isArray(payload.rate_periods) ? payload.rate_periods.map((x) => ({ ...x })) : [];
+    renderExpenseRateRows();
+  } else if (kind === "loan") {
+    el.expenseLoanStartInput.value = payload.start_date || "";
+    el.expenseLoanPrincipalInput.value = String(Math.round(Number(payload.principal || 0)));
+    el.expenseLoanMonthsInput.value = String(Number(payload.months || 0) || "");
+    el.expenseLoanPaymentTypeInput.value = payload.payment_type || "annuity";
+    state.budget.expenseRateRows = Array.isArray(payload.rate_periods) ? payload.rate_periods.map((x) => ({ ...x })) : [];
+    renderExpenseRateRows();
+  }
+}
+
+function renderBudgetExpenses(items) {
+  if (!el.budgetExpensesList) return;
+  el.budgetExpensesList.innerHTML = "";
+  if (!items.length) {
+    renderEmpty(el.budgetExpensesList, "Пока тут пусто");
+    return;
+  }
+  items.forEach((row) => {
+    const item = document.createElement("div");
+    item.className = "item";
+    item.innerHTML = `
+      <div class="left">
+        <div class="name">${row.title}</div>
+        <div class="sub">${expenseKindLabel(row.kind)} • ${money(row.amount_monthly)}/мес</div>
+      </div>
+      <div class="right">
+        <button class="btn ghost" data-expense-action="edit">Изменить</button>
+        <button class="btn danger" data-expense-action="delete">Удалить</button>
+      </div>
+    `;
+    item.querySelector("[data-expense-action='edit']")?.addEventListener("click", () => {
+      state.budget.expenseEditingId = row.id;
+      fillExpenseFormFromRow(row);
+      el.budgetExpensesSaveBtn.textContent = "Сохранить изменения";
+      el.budgetExpensesCancelEditBtn.style.display = "";
+      el.budgetExpensesCalcResult.textContent = "";
+      el.content.scrollTo({ top: 0, behavior: "smooth" });
+    });
+    item.querySelector("[data-expense-action='delete']")?.addEventListener("click", async () => {
+      try {
+        await api(`/api/miniapp/budget/expenses/${row.id}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "delete" }),
+        });
+        toast("Расход удалён");
+        await loadBudgetDashboard();
+        await loadBudgetExpenses();
+      } catch (e) {
+        toast(e?.message || "Не удалось удалить расход");
+      }
+    });
+    el.budgetExpensesList.appendChild(item);
   });
 }
 
@@ -1548,6 +1804,23 @@ function setupEvents() {
       toast(e?.message || "Не удалось добавить доход");
     }
   });
+  el.budgetExpenseTypeInput?.addEventListener("change", () => {
+    const kind = el.budgetExpenseTypeInput.value || "rent";
+    if (!el.budgetExpenseTitleInput?.value.trim()) {
+      el.budgetExpenseTitleInput.value = expenseKindLabel(kind);
+    }
+    showExpenseFields(kind);
+    if ((kind === "mortgage" || kind === "loan") && !state.budget.expenseRateRows.length) {
+      const today = new Date();
+      const year = today.getFullYear();
+      const start = `${year}-01-01`;
+      const end = `${year}-12-31`;
+      state.budget.expenseRateRows = [{ annual_rate: "", start_date: start, end_date: end }];
+      renderExpenseRateRows();
+    }
+  });
+  el.expenseAddRateBtn?.addEventListener("click", () => addExpenseRateRow());
+  el.budgetExpensesCancelEditBtn?.addEventListener("click", () => clearExpenseForm());
   el.budgetResetBtn?.addEventListener("click", async () => {
     if (!window.confirm("Удалить текущий бюджет? Это деактивирует доходы, расходы и цели.")) return;
     try {
@@ -1561,17 +1834,36 @@ function setupEvents() {
   });
   el.budgetExpensesSaveBtn?.addEventListener("click", async () => {
     try {
-      const expenses = parseMoneyInput(el.budgetExpensesInput.value || "");
-      await api("/api/miniapp/budget/profile", {
+      const payload = buildExpensePayloadFromForm();
+      const path = state.budget.expenseEditingId
+        ? `/api/miniapp/budget/expenses/${state.budget.expenseEditingId}`
+        : "/api/miniapp/budget/expenses";
+      const body = state.budget.expenseEditingId
+        ? { action: "edit", ...payload }
+        : payload;
+      const result = await api(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expenses_base: expenses }),
+        body: JSON.stringify(body),
       });
-      toast("Расходы сохранены");
+      if (payload.kind === "mortgage" || payload.kind === "loan") {
+        const calc = result?.details?.calculation || {};
+        el.budgetExpensesCalcResult.textContent = [
+          calc.monthly_payment !== null && calc.monthly_payment !== undefined ? `Ежемесячный платёж: ${money(calc.monthly_payment)}` : `Первый платёж: ${money(calc.first_payment)}`,
+          calc.monthly_payment === null ? `Последний платёж: ${money(calc.last_payment)}` : "",
+          `Переплата: ${money(calc.overpayment)}`,
+          `Итоговая выплата: ${money(calc.total_payment)}`,
+        ].filter(Boolean).join("\n");
+      } else {
+        el.budgetExpensesCalcResult.textContent = "";
+      }
+      toast(state.budget.expenseEditingId ? "Расход обновлён" : "Расход добавлен");
+      clearExpenseForm();
       await loadBudgetDashboard();
+      await loadBudgetExpenses();
       setBudgetTab("expenses");
     } catch (e) {
-      toast(e?.message || "Не удалось сохранить расходы");
+      toast(e?.message || "Не удалось сохранить расход");
     }
   });
   el.fundCalcBtn?.addEventListener("click", async () => {
@@ -1615,6 +1907,7 @@ function setupEvents() {
       toast(e?.message || "Ошибка расчёта");
     }
   });
+  clearExpenseForm();
 
   state.searchControllers.trade = bindSearch({
     inputEl: el.tradeSearch,

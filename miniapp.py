@@ -12,8 +12,16 @@ from broker_import_service import import_broker_xml_trades
 from common_utils import safe_float
 from db import (
     add_trade,
+    add_budget_expense,
+    add_budget_income,
+    add_budget_obligation,
+    add_budget_saving,
     clear_user_portfolio,
+    close_budget_month,
+    create_budget_fund,
     create_price_target_alert,
+    disable_budget_expense,
+    disable_budget_income,
     disable_price_target_alert,
     ensure_user_alert_settings,
     get_budget_dashboard,
@@ -26,22 +34,18 @@ from db import (
     list_active_app_texts,
     list_active_price_target_alerts,
     list_budget_funds,
+    list_budget_expenses,
     list_budget_incomes,
     list_budget_obligations,
     list_budget_savings,
-    set_user_last_mode,
-    add_budget_income,
-    add_budget_obligation,
-    add_budget_saving,
-    disable_budget_income,
-    upsert_budget_profile,
-    create_budget_fund,
-    close_budget_month,
     reset_budget_data,
-    update_budget_income,
-    update_budget_fund,
-    upsert_instrument,
+    set_user_last_mode,
     set_open_close_alert,
+    update_budget_income,
+    update_budget_expense,
+    update_budget_fund,
+    upsert_budget_profile,
+    upsert_instrument,
 )
 from moex_iss import (
     ASSET_TYPE_FIAT,
@@ -202,6 +206,110 @@ def _parse_month_key(raw: str | None) -> str:
         except ValueError:
             pass
     raise ValueError("invalid month format, expected YYYY-MM")
+
+
+def _parse_date_ymd(raw: str | None) -> date:
+    text = (raw or "").strip()
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError("invalid date format, expected YYYY-MM-DD") from exc
+
+
+def _add_months(d: date, months: int) -> date:
+    y = d.year + (d.month - 1 + months) // 12
+    m = (d.month - 1 + months) % 12 + 1
+    return date(y, m, 1)
+
+
+def _annuity_payment(principal: float, annual_rate: float, months: int) -> float:
+    if months <= 0:
+        return 0.0
+    monthly_rate = annual_rate / 12.0 / 100.0
+    if monthly_rate <= 0:
+        return principal / months
+    factor = (1.0 + monthly_rate) ** months
+    return principal * monthly_rate * factor / (factor - 1.0)
+
+
+def _normalize_rate_periods(periods_raw: list[dict], loan_start: date, months: int) -> list[dict]:
+    if not periods_raw:
+        raise ValueError("rate_periods is required")
+    out: list[dict] = []
+    for row in periods_raw:
+        if not isinstance(row, dict):
+            continue
+        start = _parse_date_ymd(str(row.get("start_date") or ""))
+        end = _parse_date_ymd(str(row.get("end_date") or ""))
+        if end < start:
+            raise ValueError("rate period end_date before start_date")
+        try:
+            rate = float(row.get("annual_rate"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid annual_rate in rate_periods") from exc
+        if rate < 0:
+            raise ValueError("annual_rate must be >= 0")
+        out.append({"start_date": start, "end_date": end, "annual_rate": rate})
+    out.sort(key=lambda x: x["start_date"])
+    loan_end = _add_months(loan_start, max(0, months - 1))
+    if out[0]["start_date"] > loan_start or out[-1]["end_date"] < loan_end:
+        raise ValueError("rate periods must cover the whole loan term")
+    return out
+
+
+def _resolve_rate_for_month(current: date, periods: list[dict]) -> float:
+    for period in periods:
+        if period["start_date"] <= current <= period["end_date"]:
+            return float(period["annual_rate"])
+    return float(periods[-1]["annual_rate"])
+
+
+def _calc_loan_schedule(
+    principal: float,
+    start_date: date,
+    months: int,
+    payment_type: str,
+    rate_periods: list[dict],
+) -> dict:
+    remain = float(principal)
+    total_payment = 0.0
+    first_payment = 0.0
+    last_payment = 0.0
+    monthly_payment_current = 0.0
+    prev_rate = None
+    principal_part_fixed = principal / months if months > 0 else 0.0
+    for idx in range(months):
+        current_date = _add_months(start_date, idx)
+        annual_rate = _resolve_rate_for_month(current_date, rate_periods)
+        monthly_rate = annual_rate / 100.0 / 12.0
+        months_left = months - idx
+        if payment_type == "annuity":
+            if prev_rate is None or abs(float(prev_rate) - annual_rate) > 1e-12:
+                monthly_payment_current = _annuity_payment(remain, annual_rate, months_left)
+                prev_rate = annual_rate
+            interest = remain * monthly_rate
+            principal_part = monthly_payment_current - interest
+            if principal_part > remain:
+                principal_part = remain
+            payment = principal_part + interest
+        else:
+            interest = remain * monthly_rate
+            principal_part = min(remain, principal_part_fixed)
+            payment = principal_part + interest
+        remain = max(0.0, remain - principal_part)
+        total_payment += payment
+        if idx == 0:
+            first_payment = payment
+        if idx == months - 1:
+            last_payment = payment
+    overpayment = total_payment - principal
+    return {
+        "monthly_payment": monthly_payment_current if payment_type == "annuity" else None,
+        "first_payment": first_payment,
+        "last_payment": last_payment,
+        "total_payment": total_payment,
+        "overpayment": overpayment,
+    }
 
 
 async def miniapp_index(request: web.Request) -> web.Response:
@@ -886,6 +994,124 @@ async def api_budget_income_item(request: web.Request) -> web.Response:
     return _json_ok({"updated": ok})
 
 
+def _build_expense_payload(payload: dict) -> tuple[str, str, float, dict]:
+    kind = str(payload.get("kind") or "").strip().lower()
+    if kind not in {"rent", "mortgage", "loan", "utilities", "other"}:
+        raise web.HTTPBadRequest(text="invalid expense kind")
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        title = {
+            "rent": "Аренда",
+            "mortgage": "Ипотека",
+            "loan": "Кредит",
+            "utilities": "ЖКХ",
+            "other": "Прочие расходы",
+        }[kind]
+
+    if kind in {"rent", "utilities"}:
+        pay_date = _parse_date_ymd(str(payload.get("payment_date") or ""))
+        amount = _parse_money_text(payload.get("amount_monthly"))
+        details = {"payment_date": pay_date.isoformat()}
+        return kind, title, amount, details
+
+    if kind == "other":
+        amount = _parse_money_text(payload.get("amount_monthly"))
+        details = {}
+        return kind, title, amount, details
+
+    start_date = _parse_date_ymd(str(payload.get("start_date") or ""))
+    try:
+        principal = _parse_money_text(payload.get("principal"))
+        months = int(payload.get("months"))
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="invalid principal or months") from exc
+    if months <= 0:
+        raise web.HTTPBadRequest(text="months must be > 0")
+    payment_type = str(payload.get("payment_type") or "annuity").strip().lower()
+    if payment_type not in {"annuity", "diff"}:
+        raise web.HTTPBadRequest(text="payment_type must be annuity or diff")
+    rates_raw = payload.get("rate_periods")
+    if not isinstance(rates_raw, list):
+        raise web.HTTPBadRequest(text="rate_periods must be list")
+    try:
+        rate_periods = _normalize_rate_periods(rates_raw, start_date, months)
+        calc = _calc_loan_schedule(
+            principal=principal,
+            start_date=start_date,
+            months=months,
+            payment_type=payment_type,
+            rate_periods=rate_periods,
+        )
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    amount = float(calc["monthly_payment"] if calc["monthly_payment"] is not None else calc["first_payment"])
+    details = {
+        "start_date": start_date.isoformat(),
+        "principal": principal,
+        "months": months,
+        "payment_type": payment_type,
+        "rate_periods": [
+            {
+                "start_date": r["start_date"].isoformat(),
+                "end_date": r["end_date"].isoformat(),
+                "annual_rate": r["annual_rate"],
+            }
+            for r in rate_periods
+        ],
+        "calculation": calc,
+    }
+    return kind, title, amount, details
+
+
+async def api_budget_expenses(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    if request.method == "GET":
+        rows = await list_budget_expenses(db_dsn, user_id)
+        total = sum(float(x.get("amount_monthly") or 0.0) for x in rows)
+        return _json_ok({"items": rows, "total": total})
+    payload = await _read_json(request)
+    kind, title, amount, details = _build_expense_payload(payload)
+    item_id = await add_budget_expense(
+        db_dsn,
+        user_id=user_id,
+        kind=kind,
+        title=title,
+        amount_monthly=amount,
+        payload=details,
+    )
+    return _json_ok({"id": item_id, "amount_monthly": amount, "details": details})
+
+
+async def api_budget_expense_item(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    try:
+        expense_id = int(request.match_info["expense_id"])
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="invalid expense_id") from exc
+    payload = await _read_json(request)
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in {"edit", "delete"}:
+        raise web.HTTPBadRequest(text="invalid action")
+    if action == "delete":
+        ok = await disable_budget_expense(db_dsn, user_id, expense_id)
+        return _json_ok({"deleted": ok})
+    kind, title, amount, details = _build_expense_payload(payload)
+    ok = await update_budget_expense(
+        db_dsn,
+        user_id=user_id,
+        expense_id=expense_id,
+        kind=kind,
+        title=title,
+        amount_monthly=amount,
+        payload=details,
+    )
+    return _json_ok({"updated": ok, "amount_monthly": amount, "details": details})
+
+
 async def api_budget_reset(request: web.Request) -> web.Response:
     bot_token = request.app["bot_token"]
     db_dsn = request.app["db_dsn"]
@@ -1148,6 +1374,9 @@ def attach_miniapp_routes(app: web.Application, db_dsn: str, bot_token: str) -> 
     app.router.add_get("/api/miniapp/budget/incomes", api_budget_incomes)
     app.router.add_post("/api/miniapp/budget/incomes", api_budget_incomes)
     app.router.add_post("/api/miniapp/budget/incomes/{income_id}", api_budget_income_item)
+    app.router.add_get("/api/miniapp/budget/expenses", api_budget_expenses)
+    app.router.add_post("/api/miniapp/budget/expenses", api_budget_expenses)
+    app.router.add_post("/api/miniapp/budget/expenses/{expense_id}", api_budget_expense_item)
     app.router.add_post("/api/miniapp/budget/reset", api_budget_reset)
     app.router.add_post("/api/miniapp/budget/funds/strategy", api_budget_fund_strategy)
     app.router.add_get("/api/miniapp/budget/funds", api_budget_funds)

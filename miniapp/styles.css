@@ -150,8 +150,16 @@ body {
   gap: 8px;
   margin-bottom: 8px;
 }
+.form-grid.one { grid-template-columns: 1fr; }
 .form-grid.two { grid-template-columns: 1fr 1fr; }
 .form-grid.three { grid-template-columns: repeat(3, 1fr); }
+.card-inline {
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  margin-bottom: 8px;
+  background: rgba(255, 255, 255, 0.55);
+}
 label {
   display: block;
   font-size: 12px;
