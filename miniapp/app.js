@@ -134,6 +134,8 @@ const el = {
   budgetNextBtn: document.getElementById("budgetNextBtn"),
   budgetResultBody: document.getElementById("budgetResultBody"),
   budgetResultActions: document.getElementById("budgetResultActions"),
+  budgetOverviewDonut: document.getElementById("budgetOverviewDonut"),
+  budgetOverviewShare: document.getElementById("budgetOverviewShare"),
   budgetCurrentMonth: document.getElementById("budgetCurrentMonth"),
   budgetGoalsOverview: document.getElementById("budgetGoalsOverview"),
   editBudgetBtn: document.getElementById("editBudgetBtn"),
@@ -777,17 +779,21 @@ async function loadBudgetDashboard() {
   el.budgetWizardCard.style.display = "none";
   el.budgetResultCard.style.display = "none";
   const income = Number(data.income || 0);
-  const obligations = Number(data.obligations_total || 0);
-  const living = Number((data.living_expenses_total ?? data.expenses_base) || 0);
-  const plannedExpenses = obligations + living;
-  const free = income - plannedExpenses;
+  const expensesTotal = Number(data.expenses_total || 0);
+  const savings = Number(data.savings_total || 0);
+  const free = income - expensesTotal;
 
+  renderBudgetOverviewMix({
+    income,
+    expenses: expensesTotal,
+    savings,
+  });
   el.budgetCurrentMonth.textContent = [
     `${monthLabel(data.month)}`,
-    `План доходов: ${money(income)}`,
-    `План расходов: ${money(plannedExpenses)}`,
-    `Обязательные: ${money(obligations)} • На жизнь: ${money(living)}`,
-    `${free >= 0 ? "Свободно" : "Дефицит"}: ${money(Math.abs(free))}/мес`,
+    `Доходы в месяц: ${money(income)}`,
+    `Расходы в месяц: ${money(expensesTotal)}`,
+    `Накопления: ${money(savings)}`,
+    `${free >= 0 ? "Свободно в бюджете" : "Дефицит бюджета"}: ${money(Math.abs(free))}/мес`,
   ].join("\n");
   renderBudgetOverviewGoals(getBudgetGoals());
   renderBudgetFunds(getBudgetGoals());
@@ -821,6 +827,46 @@ function renderBudgetOverviewGoals(funds) {
       <div class="right"><div>${pctVal.toFixed(0)}%</div></div>
     `;
     el.budgetGoalsOverview.appendChild(item);
+  });
+}
+
+function renderBudgetOverviewMix({ income, expenses, savings }) {
+  const donut = el.budgetOverviewDonut;
+  const share = el.budgetOverviewShare;
+  if (!donut || !share) return;
+  const safeIncome = Math.max(0, Number(income || 0));
+  const safeExpenses = Math.max(0, Number(expenses || 0));
+  const safeSavings = Math.max(0, Number(savings || 0));
+  const total = safeIncome + safeExpenses + safeSavings;
+  const pctIncome = total > 0 ? (safeIncome / total) * 100 : 0;
+  const pctExpenses = total > 0 ? (safeExpenses / total) * 100 : 0;
+  const pctSavings = total > 0 ? (safeSavings / total) * 100 : 0;
+  const degIncomeEnd = pctIncome * 3.6;
+  const degExpensesEnd = (pctIncome + pctExpenses) * 3.6;
+  donut.style.background = total > 0
+    ? `conic-gradient(#2c8fdf 0deg ${degIncomeEnd.toFixed(2)}deg, #d1497a ${degIncomeEnd.toFixed(2)}deg ${degExpensesEnd.toFixed(2)}deg, #1ea86c ${degExpensesEnd.toFixed(2)}deg 360deg)`
+    : "conic-gradient(rgba(32,52,94,0.12) 0deg 360deg)";
+
+  share.innerHTML = "";
+  const rows = [
+    { cls: "income", label: "Доходы", amount: safeIncome, pct: pctIncome },
+    { cls: "expenses", label: "Расходы", amount: safeExpenses, pct: pctExpenses },
+    { cls: "savings", label: "Накопления", amount: safeSavings, pct: pctSavings },
+  ];
+  rows.forEach((row) => {
+    const item = document.createElement("div");
+    item.className = "item";
+    item.innerHTML = `
+      <div class="left">
+        <span class="dot ${row.cls}"></span>
+        <div>
+          <div class="name">${row.label}</div>
+          <div class="sub">${money(row.amount)}</div>
+        </div>
+      </div>
+      <div class="right"><div>${row.pct.toFixed(1)}%</div></div>
+    `;
+    share.appendChild(item);
   });
 }
 

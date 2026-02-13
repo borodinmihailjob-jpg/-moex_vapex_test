@@ -85,6 +85,46 @@ body {
 .overview-goals {
   margin-top: 10px;
 }
+.overview-mix {
+  display: grid;
+  grid-template-columns: 132px 1fr;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.overview-donut {
+  width: 132px;
+  height: 132px;
+  border-radius: 50%;
+  background: conic-gradient(#2c8fdf 0deg 120deg, #d1497a 120deg 240deg, #1ea86c 240deg 360deg);
+  position: relative;
+  border: 1px solid var(--line);
+}
+.overview-donut::after {
+  content: "";
+  position: absolute;
+  inset: 24px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(32, 52, 94, 0.08);
+}
+.overview-share .item {
+  padding: 6px 0;
+}
+.overview-share .left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.dot.income { background: #2c8fdf; }
+.dot.expenses { background: #d1497a; }
+.dot.savings { background: #1ea86c; }
 .progress-line {
   margin-top: 6px;
   width: 100%;
@@ -462,6 +502,13 @@ input:focus, select:focus, textarea:focus {
 
 @media (max-width: 900px) {
   .form-grid.three { grid-template-columns: 1fr; }
+  .overview-mix {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+  .overview-share {
+    width: 100%;
+  }
 }
 @media (max-width: 720px) {
   .form-grid.two, .summary-grid { grid-template-columns: 1fr; }
