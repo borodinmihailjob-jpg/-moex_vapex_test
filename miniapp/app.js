@@ -146,6 +146,16 @@ function money(v) {
   return n.toLocaleString("ru-RU", { maximumFractionDigits: 2 }) + " ₽";
 }
 
+function formatQty(value, assetType) {
+  const n = Number(value || 0);
+  const text = Number.isInteger(n)
+    ? n.toLocaleString("ru-RU", { maximumFractionDigits: 0 })
+    : n.toLocaleString("ru-RU", { maximumFractionDigits: 4 });
+  if (assetType === "metal") return `${text} грамм`;
+  if (assetType === "stock") return `${text} акций`;
+  return text;
+}
+
 function pct(v) {
   if (v === null || v === undefined || Number.isNaN(Number(v))) return "н/д";
   const n = Number(v);
@@ -392,9 +402,10 @@ function renderPositions(rows) {
   if (!rows.length) return renderEmpty(el.positions, "Портфель пуст");
   rows.slice(0, 30).forEach((row) => {
     const pnlVal = Number(row.ret_30d || 0);
+    const qtyText = formatQty(row.qty, row.asset_type);
     const item = document.createElement("div");
     item.className = "item";
-    item.innerHTML = `<div class="left"><div class="name">${row.name || row.ticker}</div><div class="sub">${row.ticker} · ${Number(row.qty || 0).toFixed(4)}</div></div><div class="right"><div>${money(row.value)}</div><div class="pnl ${pnlVal >= 0 ? "plus" : "minus"}">${pct(pnlVal)}</div></div>`;
+    item.innerHTML = `<div class="left"><div class="name">${row.name || row.ticker}</div><div class="sub">${row.ticker} · ${qtyText}</div></div><div class="right"><div>${money(row.value)}</div><div class="pnl ${pnlVal >= 0 ? "plus" : "minus"}">${pct(pnlVal)}</div></div>`;
     el.positions.appendChild(item);
   });
 }
@@ -455,9 +466,11 @@ function renderMoversList(container, rows, type) {
   if (!rows.length) return renderEmpty(container, "Нет данных");
   rows.slice(0, 10).forEach((r) => {
     const v = Number(r.pct || 0);
+    const last = r.last === null || r.last === undefined ? "н/д" : money(r.last);
+    const volume = r.val_today === null || r.val_today === undefined ? "н/д" : money(r.val_today);
     const item = document.createElement("div");
     item.className = "item";
-    item.innerHTML = `<div class="left"><div class="name">${r.shortname || r.secid}</div><div class="sub">${r.secid}</div></div><div class="right"><div class="pnl ${v >= 0 ? "plus" : "minus"}">${pct(v)}</div></div>`;
+    item.innerHTML = `<div class="left"><div class="name">${r.shortname || r.secid}</div><div class="sub">${r.secid} · Цена: ${last} · Объём: ${volume}</div></div><div class="right"><div class="pnl ${v >= 0 ? "plus" : "minus"}">${pct(v)}</div></div>`;
     container.appendChild(item);
   });
 }
@@ -677,27 +690,37 @@ function setupEvents() {
       return;
     }
     const targetPrice = Number(el.alertTargetPrice.value);
-    const rangePercent = Number(el.alertRange.value || 5);
+    const rangeRaw = (el.alertRange.value || "").trim();
     if (!targetPrice || targetPrice <= 0) {
       toast("Введите корректную цену");
       return;
     }
+    if (rangeRaw) {
+      const rangePercentCheck = Number(rangeRaw);
+      if (!Number.isFinite(rangePercentCheck) || rangePercentCheck < 0 || rangePercentCheck > 50) {
+        toast("Диапазон должен быть числом от 0 до 50");
+        return;
+      }
+    }
     try {
+      const payload = {
+        secid: state.selectedAlert.secid,
+        shortname: state.selectedAlert.shortname || state.selectedAlert.name || state.selectedAlert.secid,
+        isin: state.selectedAlert.isin,
+        boardid: state.selectedAlert.boardid,
+        asset_type: el.alertAssetType.value,
+        target_price: targetPrice,
+      };
+      if (rangeRaw) {
+        payload.range_percent = Number(rangeRaw);
+      }
       await api("/api/miniapp/alerts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          secid: state.selectedAlert.secid,
-          shortname: state.selectedAlert.shortname || state.selectedAlert.name || state.selectedAlert.secid,
-          isin: state.selectedAlert.isin,
-          boardid: state.selectedAlert.boardid,
-          asset_type: el.alertAssetType.value,
-          target_price: targetPrice,
-          range_percent: rangePercent,
-        }),
+        body: JSON.stringify(payload),
       });
       el.alertTargetPrice.value = "";
-      el.alertRange.value = "5";
+      el.alertRange.value = "";
       state.searchControllers.alert?.clearSelection();
       await loadAlerts();
       toast("Алерт создан");

@@ -609,10 +609,14 @@ async def api_alerts_post(request: web.Request) -> web.Response:
     if target_price <= 0:
         raise web.HTTPBadRequest(text="target_price must be > 0")
 
-    try:
-        range_percent = float(payload.get("range_percent", 5.0))
-    except (TypeError, ValueError):
-        range_percent = 5.0
+    range_raw = payload.get("range_percent")
+    if range_raw is None or str(range_raw).strip() == "":
+        range_percent = 0.0
+    else:
+        try:
+            range_percent = float(range_raw)
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text="range_percent must be a number") from exc
     if range_percent < 0 or range_percent > 50:
         raise web.HTTPBadRequest(text="range_percent out of bounds")
 
