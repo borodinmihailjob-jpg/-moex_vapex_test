@@ -2593,7 +2593,8 @@ async def main():
     await init_db(DB_DSN)
 
     lock_name = "moex_portfolio_bot_polling"
-    lock_max_wait_cycles = int((os.getenv("POLLING_LOCK_MAX_WAIT_CYCLES") or "8").strip() or "8")
+    lock_max_wait_cycles = int((os.getenv("POLLING_LOCK_MAX_WAIT_CYCLES") or "0").strip() or "0")
+    lock_log_every_cycles = max(1, int((os.getenv("POLLING_LOCK_LOG_EVERY_CYCLES") or "4").strip() or "4"))
     wait_cycles = 0
     while True:
         locked = await acquire_single_instance_lock(DB_DSN, lock_name)
@@ -2601,12 +2602,17 @@ async def main():
             logger.info("Acquired single-instance polling lock: %s", lock_name)
             break
         wait_cycles += 1
-        if wait_cycles >= lock_max_wait_cycles:
+        if lock_max_wait_cycles > 0 and wait_cycles >= lock_max_wait_cycles:
             raise RuntimeError(
                 f"Не удалось получить polling lock '{lock_name}' за "
                 f"{lock_max_wait_cycles * 15} секунд. Завершаю второй инстанс."
             )
-        logger.warning("Another bot instance is polling. Waiting 15 seconds for lock: %s", lock_name)
+        if wait_cycles == 1 or (wait_cycles % lock_log_every_cycles == 0):
+            logger.warning(
+                "Another bot instance is polling. Waiting 15 seconds for lock: %s (cycle=%s)",
+                lock_name,
+                wait_cycles,
+            )
         await asyncio.sleep(15)
 
     bot = Bot(BOT_TOKEN)
