@@ -394,7 +394,7 @@ async def get_last_price_fiat(session: aiohttp.ClientSession, secid: str, boardi
     if cached and (now_ts - cached[1] <= LAST_PRICE_CACHE_TTL_SEC):
         return cached[0]
 
-    candidates = [secid]
+    candidates = []
     alias_map: dict[str, list[str]] = {
         "USDRUB_TOM": ["USD000UTSTOM"],
         "EURRUB_TOM": ["EUR_RUB__TOM", "EUR000UTSTOM"],
@@ -408,10 +408,21 @@ async def get_last_price_fiat(session: aiohttp.ClientSession, secid: str, boardi
     for alias in aliases:
         if alias not in candidates:
             candidates.append(alias)
+    if secid not in candidates:
+        candidates.append(secid)
 
     for candidate in candidates:
         path = f"/engines/currency/markets/selt/boards/{norm_boardid}/securities/{candidate}.json"
-        data, delayed = await get_json_with_fallback_source(session, path, params={"iss.meta": "off"})
+        try:
+            data, delayed = await get_json_with_fallback_source(session, path, params={"iss.meta": "off"})
+        except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+            logger.warning(
+                "Fiat candidate request failed secid=%s boardid=%s error=%s; trying next alias",
+                candidate,
+                norm_boardid,
+                exc.__class__.__name__,
+            )
+            continue
         price = _parse_marketdata_price(data)
         if price is None and not delayed:
             now_msk = datetime.now(MSK_TZ)
@@ -424,7 +435,16 @@ async def get_last_price_fiat(session: aiohttp.ClientSession, secid: str, boardi
                 continue
             logger.warning("ALGOPACK returned no fiat price for secid=%s boardid=%s; retry via ISS", candidate, norm_boardid)
             mark_delayed_data_used()
-            data = await iss_get_json(session, path, params={"iss.meta": "off"})
+            try:
+                data = await iss_get_json(session, path, params={"iss.meta": "off"})
+            except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+                logger.warning(
+                    "Fiat ISS retry failed secid=%s boardid=%s error=%s; trying next alias",
+                    candidate,
+                    norm_boardid,
+                    exc.__class__.__name__,
+                )
+                continue
             price = _parse_marketdata_price(data)
         if price is not None:
             _last_price_cache[cache_key] = (price, now_ts)
