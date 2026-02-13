@@ -2413,7 +2413,7 @@ async def reset_budget_data(db_path: str, user_id: int) -> dict[str, int]:
                     int(user_id),
                 ))
                 funds = _affected_count(await conn.execute(
-                    "UPDATE budget_funds SET status = 'deleted', updated_at = NOW() WHERE user_id = $1 AND status <> 'deleted'",
+                    "DELETE FROM budget_funds WHERE user_id = $1",
                     int(user_id),
                 ))
                 month_closes = _affected_count(await conn.execute(
@@ -2535,7 +2535,7 @@ async def list_budget_funds(db_path: str, user_id: int) -> list[dict[str, Any]]:
                 """
                 SELECT id, title, target_amount, already_saved, target_month, payload, priority, status, autopilot_enabled
                 FROM budget_funds
-                WHERE user_id = $1
+                WHERE user_id = $1 AND status <> 'deleted'
                 ORDER BY id DESC
                 """,
                 int(user_id),

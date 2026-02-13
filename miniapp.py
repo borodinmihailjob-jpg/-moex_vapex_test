@@ -256,6 +256,14 @@ def _normalize_rate_periods(periods_raw: list[dict], loan_start: date, months: i
     loan_end = _add_months(loan_start, max(0, months - 1))
     if out[0]["start_date"] > loan_start or out[-1]["end_date"] < loan_end:
         raise ValueError("rate periods must cover the whole loan term")
+    # Validate month-by-month coverage and disallow ambiguous overlaps.
+    for idx in range(months):
+        current = _add_months(loan_start, idx)
+        matched = [p for p in out if p["start_date"] <= current <= p["end_date"]]
+        if not matched:
+            raise ValueError(f"rate periods gap at {current.strftime('%Y-%m')}")
+        if len(matched) > 1:
+            raise ValueError(f"overlapping rate periods at {current.strftime('%Y-%m')}")
     return out
 
 

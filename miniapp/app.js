@@ -298,6 +298,11 @@ function monthLabel(monthKey) {
   return d.toLocaleString("ru-RU", { month: "long", year: "numeric" });
 }
 
+function getBudgetGoals() {
+  const rows = state.budget.dashboard?.funds || [];
+  return rows.filter((x) => String(x?.status || "active") !== "deleted");
+}
+
 function formatQty(value, assetType) {
   const n = Number(value || 0);
   const text = Number.isInteger(n)
@@ -468,7 +473,7 @@ function setBudgetTab(tab) {
     loadBudgetExpenses().catch(() => {});
   }
   if (tab === "funds") {
-    renderBudgetGoalsList((state.budget.dashboard?.funds || []));
+    renderBudgetGoalsList(getBudgetGoals());
   }
   if (tab === "settings") {
     loadBudgetNotificationSettings().catch(() => {});
@@ -771,17 +776,9 @@ async function loadBudgetDashboard() {
     `Обязательные: ${money(obligations)} • На жизнь: ${money(living)}`,
     `${free >= 0 ? "Свободно" : "Дефицит"}: ${money(Math.abs(free))}/мес`,
   ].join("\n");
-  renderBudgetOverviewGoals(data.funds || []);
-  renderBudgetFunds(data.funds || []);
-  if (el.budgetIncomeTypeInput && !el.budgetIncomeTypeInput.value) {
-    el.budgetIncomeTypeInput.value = "salary";
-  }
-  if (el.budgetIncomeTitleInput && !el.budgetIncomeTitleInput.value) {
-    el.budgetIncomeTitleInput.value = "Зарплата";
-  }
-  if (el.budgetIncomeInput) {
-    el.budgetIncomeInput.value = "";
-  }
+  renderBudgetOverviewGoals(getBudgetGoals());
+  renderBudgetFunds(getBudgetGoals());
+  resetIncomeForm();
   if (el.budgetExpensesCalcResult) {
     el.budgetExpensesCalcResult.textContent = "";
   }
@@ -792,7 +789,7 @@ function renderBudgetOverviewGoals(funds) {
   if (!el.budgetGoalsOverview) return;
   el.budgetGoalsOverview.innerHTML = "";
   if (!funds.length) {
-    renderEmpty(el.budgetGoalsOverview, "Пока нет целей. Добавьте первую цель в разделе «Фонды».");
+    renderEmpty(el.budgetGoalsOverview, "Пока нет целей. Добавьте первую цель в разделе «Цели».");
     return;
   }
   funds.forEach((fund) => {
@@ -824,6 +821,19 @@ function incomeKindLabel(kind) {
     other: "Другое",
   };
   return map[String(kind || "").toLowerCase()] || "Другое";
+}
+
+function resetIncomeForm() {
+  if (el.budgetIncomeTypeInput && !el.budgetIncomeTypeInput.value) {
+    el.budgetIncomeTypeInput.value = "salary";
+  }
+  if (el.budgetIncomeTitleInput) {
+    el.budgetIncomeTitleInput.value = incomeKindLabel(el.budgetIncomeTypeInput?.value || "salary");
+    el.budgetIncomeTitleInput.dataset.autoTitle = "1";
+  }
+  if (el.budgetIncomeInput) {
+    el.budgetIncomeInput.value = "";
+  }
 }
 
 async function loadBudgetIncomes() {
@@ -992,7 +1002,10 @@ function clearExpenseForm() {
   state.budget.expenseEditingId = null;
   state.budget.expenseRateRows = [];
   if (el.budgetExpenseTypeInput) el.budgetExpenseTypeInput.value = "rent";
-  if (el.budgetExpenseTitleInput) el.budgetExpenseTitleInput.value = "Аренда";
+  if (el.budgetExpenseTitleInput) {
+    el.budgetExpenseTitleInput.value = "Аренда";
+    el.budgetExpenseTitleInput.dataset.autoTitle = "1";
+  }
   if (el.expenseRentDateInput) el.expenseRentDateInput.value = "";
   if (el.expenseRentAmountInput) el.expenseRentAmountInput.value = "";
   if (el.expenseMortgageStartInput) el.expenseMortgageStartInput.value = "";
@@ -1072,7 +1085,10 @@ function fillExpenseFormFromRow(row) {
   const kind = String(row.kind || "other");
   const payload = row.payload || {};
   if (el.budgetExpenseTypeInput) el.budgetExpenseTypeInput.value = kind;
-  if (el.budgetExpenseTitleInput) el.budgetExpenseTitleInput.value = row.title || expenseKindLabel(kind);
+  if (el.budgetExpenseTitleInput) {
+    el.budgetExpenseTitleInput.value = row.title || expenseKindLabel(kind);
+    el.budgetExpenseTitleInput.dataset.autoTitle = "0";
+  }
   showExpenseFields(kind);
   if (kind === "rent") {
     el.expenseRentDateInput.value = payload.payment_date || "";
@@ -1859,6 +1875,18 @@ function setupEvents() {
   });
   el.addGoalBtn?.addEventListener("click", () => openGoalDetail(null));
   el.closeMonthOpenBtn?.addEventListener("click", openMonthCloseFlow);
+  el.budgetIncomeTypeInput?.addEventListener("change", () => {
+    if (!el.budgetIncomeTitleInput) return;
+    if (el.budgetIncomeTitleInput.dataset.autoTitle === "1" || !el.budgetIncomeTitleInput.value.trim()) {
+      el.budgetIncomeTitleInput.value = incomeKindLabel(el.budgetIncomeTypeInput?.value || "salary");
+      el.budgetIncomeTitleInput.dataset.autoTitle = "1";
+    }
+  });
+  el.budgetIncomeTitleInput?.addEventListener("input", () => {
+    if (!el.budgetIncomeTitleInput) return;
+    const expected = incomeKindLabel(el.budgetIncomeTypeInput?.value || "salary");
+    el.budgetIncomeTitleInput.dataset.autoTitle = el.budgetIncomeTitleInput.value.trim() === expected ? "1" : "0";
+  });
   el.budgetIncomeSaveBtn?.addEventListener("click", async () => {
     try {
       const kind = el.budgetIncomeTypeInput.value || "other";
@@ -1873,7 +1901,7 @@ function setupEvents() {
           amount_monthly: amount,
         }),
       });
-      el.budgetIncomeInput.value = "";
+      resetIncomeForm();
       toast("Доход добавлен");
       await loadBudgetDashboard();
       await loadBudgetIncomes();
@@ -1884,8 +1912,9 @@ function setupEvents() {
   });
   el.budgetExpenseTypeInput?.addEventListener("change", () => {
     const kind = el.budgetExpenseTypeInput.value || "rent";
-    if (!el.budgetExpenseTitleInput?.value.trim()) {
+    if (el.budgetExpenseTitleInput && (el.budgetExpenseTitleInput.dataset.autoTitle === "1" || !el.budgetExpenseTitleInput.value.trim())) {
       el.budgetExpenseTitleInput.value = expenseKindLabel(kind);
+      el.budgetExpenseTitleInput.dataset.autoTitle = "1";
     }
     showExpenseFields(kind);
     if ((kind === "mortgage" || kind === "loan") && !state.budget.expenseRateRows.length) {
@@ -1896,6 +1925,11 @@ function setupEvents() {
       state.budget.expenseRateRows = [{ annual_rate: "", start_date: start, end_date: end }];
       renderExpenseRateRows();
     }
+  });
+  el.budgetExpenseTitleInput?.addEventListener("input", () => {
+    if (!el.budgetExpenseTitleInput) return;
+    const expected = expenseKindLabel(el.budgetExpenseTypeInput?.value || "rent");
+    el.budgetExpenseTitleInput.dataset.autoTitle = el.budgetExpenseTitleInput.value.trim() === expected ? "1" : "0";
   });
   el.expenseAddRateBtn?.addEventListener("click", () => addExpenseRateRow());
   el.budgetExpensesCancelEditBtn?.addEventListener("click", () => clearExpenseForm());
@@ -2028,6 +2062,7 @@ function setupEvents() {
     }
   });
   clearExpenseForm();
+  resetIncomeForm();
 
   state.searchControllers.trade = bindSearch({
     inputEl: el.tradeSearch,
