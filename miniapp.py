@@ -46,6 +46,22 @@ logger = logging.getLogger(__name__)
 TRADE_SIDE_BUY = "buy"
 TRADE_SIDE_SELL = "sell"
 MAX_XML_UPLOAD_BYTES = 5 * 1024 * 1024
+_api_cache: dict[str, tuple[float, dict]] = {}
+_API_CACHE_TTL_SEC = int((os.getenv("MINIAPP_API_CACHE_TTL_SEC") or "900").strip() or "900")
+
+
+def _cache_get(key: str) -> dict | None:
+    row = _api_cache.get(key)
+    if not row:
+        return None
+    ts, data = row
+    if asyncio.get_running_loop().time() - ts > _API_CACHE_TTL_SEC:
+        return None
+    return data
+
+
+def _cache_set(key: str, data: dict) -> None:
+    _api_cache[key] = (asyncio.get_running_loop().time(), data)
 
 
 class MiniAppAuthError(Exception):
@@ -445,8 +461,14 @@ async def api_usd_rub(request: web.Request) -> web.Response:
             rate = await get_usd_rub_rate(session)
     except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
         logger.warning("MiniApp USD/RUB failed error=%s", exc.__class__.__name__)
+        cached = _cache_get("usd_rub")
+        if cached is not None:
+            return _json_ok({**cached, "stale": True})
         rate = None
-    return _json_ok({"secid": "USDRUB_TOM", "rate": rate, "as_of": datetime.utcnow().isoformat()})
+    payload = {"secid": "USDRUB_TOM", "rate": rate, "as_of": datetime.utcnow().isoformat()}
+    if rate is not None:
+        _cache_set("usd_rub", payload)
+    return _json_ok(payload)
 
 
 async def api_price(request: web.Request) -> web.Response:
@@ -468,8 +490,14 @@ async def api_price(request: web.Request) -> web.Response:
                 price = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
     except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
         logger.warning("MiniApp price endpoint failed secid=%s error=%s", secid, exc.__class__.__name__)
+        cached = _cache_get(f"price:{asset_type}:{secid}:{boardid or ''}")
+        if cached is not None:
+            return _json_ok({**cached, "stale": True})
         price = None
-    return _json_ok({"secid": secid, "price": price, "as_of": datetime.utcnow().isoformat()})
+    payload = {"secid": secid, "price": price, "as_of": datetime.utcnow().isoformat()}
+    if price is not None:
+        _cache_set(f"price:{asset_type}:{secid}:{boardid or ''}", payload)
+    return _json_ok(payload)
 
 
 async def api_portfolio_clear(request: web.Request) -> web.Response:

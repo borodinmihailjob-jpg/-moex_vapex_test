@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 import logging
 import os
+import random
 from dataclasses import dataclass
 from contextvars import ContextVar
 from datetime import date, datetime
@@ -13,6 +14,8 @@ logger = logging.getLogger(__name__)
 ISS_RETRIES = 3
 ISS_RETRY_DELAY_SEC = 0.6
 ISS_TIMEOUT = aiohttp.ClientTimeout(total=12, connect=4, sock_connect=4, sock_read=8)
+MOEX_HTTP_CONCURRENCY = max(1, int((os.getenv("MOEX_HTTP_CONCURRENCY") or "6").strip() or "6"))
+ISS_FALLBACK_FROM_HOUR_MSK = int((os.getenv("ISS_FALLBACK_FROM_HOUR_MSK") or "10").strip() or "10")
 
 ASSET_TYPE_STOCK = "stock"
 ASSET_TYPE_METAL = "metal"
@@ -27,6 +30,9 @@ class DataSourceFlags:
 
 
 _data_source_flags_var: ContextVar[DataSourceFlags | None] = ContextVar("moex_data_source_flags", default=None)
+_moex_http_sem = asyncio.Semaphore(MOEX_HTTP_CONCURRENCY)
+_last_price_cache: dict[tuple[str, str, str], tuple[float, float]] = {}
+LAST_PRICE_CACHE_TTL_SEC = max(5, int((os.getenv("LAST_PRICE_CACHE_TTL_SEC") or "300").strip() or "300"))
 
 
 def reset_data_source_flags() -> None:
@@ -71,21 +77,23 @@ async def _request_json(
     last_exc: Exception | None = None
     for attempt in range(1, ISS_RETRIES + 1):
         try:
-            async with session.get(url, params=params, timeout=ISS_TIMEOUT, headers=headers) as resp:
-                if resp.status in {429, 500, 502, 503, 504}:
-                    if attempt < ISS_RETRIES:
-                        logger.warning(
-                            "%s temporary HTTP status=%s url=%s attempt=%s/%s",
-                            source_name.upper(),
-                            resp.status,
-                            url,
-                            attempt,
-                            ISS_RETRIES,
-                        )
-                        await asyncio.sleep(ISS_RETRY_DELAY_SEC * attempt)
-                        continue
-                resp.raise_for_status()
-                return await resp.json()
+            async with _moex_http_sem:
+                async with session.get(url, params=params, timeout=ISS_TIMEOUT, headers=headers) as resp:
+                    if resp.status in {429, 500, 502, 503, 504}:
+                        if attempt < ISS_RETRIES:
+                            logger.warning(
+                                "%s temporary HTTP status=%s url=%s attempt=%s/%s",
+                                source_name.upper(),
+                                resp.status,
+                                url,
+                                attempt,
+                                ISS_RETRIES,
+                            )
+                            sleep_s = ISS_RETRY_DELAY_SEC * attempt + random.uniform(0.0, 0.35)
+                            await asyncio.sleep(sleep_s)
+                            continue
+                    resp.raise_for_status()
+                    return await resp.json()
         except asyncio.CancelledError:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -99,7 +107,8 @@ async def _request_json(
                     ISS_RETRIES,
                     exc.__class__.__name__,
                 )
-                await asyncio.sleep(ISS_RETRY_DELAY_SEC * attempt)
+                sleep_s = ISS_RETRY_DELAY_SEC * attempt + random.uniform(0.0, 0.35)
+                await asyncio.sleep(sleep_s)
                 continue
             logger.error(
                 "%s request failed after retries: %s params=%s error=%s",
@@ -302,6 +311,12 @@ async def get_last_price_stock_shares(session: aiohttp.ClientSession, secid: str
             return None
         return float(last)
 
+    cache_key = (ASSET_TYPE_STOCK, str(secid).upper(), str(boardid or "").upper())
+    now_ts = asyncio.get_running_loop().time()
+    cached = _last_price_cache.get(cache_key)
+    if cached and (now_ts - cached[1] <= LAST_PRICE_CACHE_TTL_SEC):
+        return cached[0]
+
     data, delayed = await get_json_with_fallback_source(session, path, params={"iss.meta": "off"})
     price = parse_last(data)
     if price is None and not delayed:
@@ -312,6 +327,7 @@ async def get_last_price_stock_shares(session: aiohttp.ClientSession, secid: str
     if price is None:
         logger.warning("No LAST marketdata for secid=%s boardid=%s", secid, boardid)
         return None
+    _last_price_cache[cache_key] = (price, now_ts)
     logger.debug("Last price secid=%s boardid=%s last=%s", secid, boardid, price)
     return price
 
@@ -338,9 +354,23 @@ async def get_last_price_metal(session: aiohttp.ClientSession, secid: str, board
             return None
         return float(last)
 
+    cache_key = (ASSET_TYPE_METAL, str(secid).upper(), str(boardid or "").upper())
+    now_ts = asyncio.get_running_loop().time()
+    cached = _last_price_cache.get(cache_key)
+    if cached and (now_ts - cached[1] <= LAST_PRICE_CACHE_TTL_SEC):
+        return cached[0]
+
     data, delayed = await get_json_with_fallback_source(session, path, params={"iss.meta": "off"})
     price = parse_last(data)
     if price is None and not delayed:
+        now_msk = datetime.now(MSK_TZ)
+        if now_msk.hour < ISS_FALLBACK_FROM_HOUR_MSK:
+            logger.info(
+                "Skip ISS fallback for metal before %02d:00 MSK secid=%s",
+                ISS_FALLBACK_FROM_HOUR_MSK,
+                secid,
+            )
+            return None
         logger.warning("ALGOPACK returned no metal LAST for secid=%s boardid=%s; retry via ISS", secid, boardid)
         mark_delayed_data_used()
         data = await iss_get_json(session, path, params={"iss.meta": "off"})
@@ -348,6 +378,7 @@ async def get_last_price_metal(session: aiohttp.ClientSession, secid: str, board
     if price is None:
         logger.warning("No metal LAST marketdata for secid=%s boardid=%s", secid, boardid)
         return None
+    _last_price_cache[cache_key] = (price, now_ts)
     logger.debug("Last metal price secid=%s boardid=%s last=%s", secid, boardid, price)
     return price
 
@@ -357,6 +388,12 @@ async def get_last_price_fiat(session: aiohttp.ClientSession, secid: str, boardi
     Цена валютной пары на валютном рынке MOEX.
     """
     norm_boardid = (boardid or "CETS").strip() or "CETS"
+    cache_key = (ASSET_TYPE_FIAT, str(secid).upper(), norm_boardid.upper())
+    now_ts = asyncio.get_running_loop().time()
+    cached = _last_price_cache.get(cache_key)
+    if cached and (now_ts - cached[1] <= LAST_PRICE_CACHE_TTL_SEC):
+        return cached[0]
+
     candidates = [secid]
     alias_map = {"USDRUB_TOM": "USD000UTSTOM"}
     alias = alias_map.get(str(secid).upper())
@@ -368,11 +405,20 @@ async def get_last_price_fiat(session: aiohttp.ClientSession, secid: str, boardi
         data, delayed = await get_json_with_fallback_source(session, path, params={"iss.meta": "off"})
         price = _parse_marketdata_price(data)
         if price is None and not delayed:
+            now_msk = datetime.now(MSK_TZ)
+            if now_msk.hour < ISS_FALLBACK_FROM_HOUR_MSK:
+                logger.info(
+                    "Skip ISS fallback for fiat before %02d:00 MSK secid=%s",
+                    ISS_FALLBACK_FROM_HOUR_MSK,
+                    candidate,
+                )
+                continue
             logger.warning("ALGOPACK returned no fiat price for secid=%s boardid=%s; retry via ISS", candidate, norm_boardid)
             mark_delayed_data_used()
             data = await iss_get_json(session, path, params={"iss.meta": "off"})
             price = _parse_marketdata_price(data)
         if price is not None:
+            _last_price_cache[cache_key] = (price, now_ts)
             logger.debug("Last fiat price secid=%s boardid=%s last=%s", candidate, norm_boardid, price)
             return price
     logger.warning("No fiat marketdata for secid=%s boardid=%s", secid, norm_boardid)

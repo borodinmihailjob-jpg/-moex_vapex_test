@@ -13,6 +13,8 @@ const state = {
   selectedLookup: null,
   selectedAlert: null,
   searchControllers: {},
+  moversLoaded: false,
+  usdLoaded: false,
 };
 
 const el = {
@@ -177,6 +179,16 @@ function setTab(name) {
   document.getElementById(`tab-${name}`)?.classList.add("active");
   document.querySelector(`.tab-btn[data-tab='${name}']`)?.classList.add("active");
   el.content.scrollTo({ top: 0, behavior: "smooth" });
+  if (name === "movers" && !state.moversLoaded) {
+    loadMovers(0).then(() => {
+      state.moversLoaded = true;
+    }).catch(() => {});
+  }
+  if (name === "more" && !state.usdLoaded) {
+    loadUsdRub().then(() => {
+      state.usdLoaded = true;
+    }).catch(() => {});
+  }
 }
 
 function renderEmpty(container, text) {
@@ -598,6 +610,7 @@ function setupEvents() {
   el.usdRubBtn.addEventListener("click", async () => {
     try {
       await loadUsdRub();
+      state.usdLoaded = true;
     } catch (_) {
       toast("Ошибка USD/RUB");
     }
@@ -664,8 +677,6 @@ function setupEvents() {
     await Promise.all([
       loadPortfolio(),
       loadAlerts(),
-      loadMovers(0),
-      loadUsdRub(),
       loadOpenCloseSetting(),
       loadArticles(),
     ]);
