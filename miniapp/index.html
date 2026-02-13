@@ -278,6 +278,33 @@
           <button id="editBudgetBtn" class="btn ghost">Изменить бюджет</button>
         </article>
 
+        <article id="budgetIncomeCard" class="card" style="display:none">
+          <h2>Доходы</h2>
+          <div class="form-grid two">
+            <label>Тип дохода
+              <select id="budgetIncomeTypeInput">
+                <option value="fixed">Фиксированный</option>
+                <option value="irregular">Нерегулярный</option>
+              </select>
+            </label>
+            <label>День зарплаты (опц.)
+              <input id="budgetPaydayInput" type="number" min="1" max="31" placeholder="Например: 10" />
+            </label>
+          </div>
+          <label>Доход в месяц, ₽
+            <input id="budgetIncomeInput" type="text" placeholder="Например: 150000" />
+          </label>
+          <button id="budgetIncomeSaveBtn" class="btn primary">Сохранить</button>
+        </article>
+
+        <article id="budgetExpensesCard" class="card" style="display:none">
+          <h2>Расходы</h2>
+          <label>Расходы на жизнь в месяц, ₽
+            <input id="budgetExpensesInput" type="text" placeholder="Например: 90000" />
+          </label>
+          <button id="budgetExpensesSaveBtn" class="btn primary">Сохранить</button>
+        </article>
+
         <article id="budgetFundsCard" class="card" style="display:none">
           <h2>Фонды</h2>
           <div id="budgetFundsList" class="list"></div>
@@ -341,18 +368,52 @@
           </div>
           <div id="monthCloseBody" class="plain" style="display:none"></div>
         </article>
+
+        <article id="budgetLoanCalcCard" class="card" style="display:none">
+          <h2>Кредит / Ипотека</h2>
+          <p class="hint">Расчёт ежемесячного платежа, переплаты и итоговой суммы.</p>
+          <div class="form-grid three">
+            <label>Сумма кредита, ₽
+              <input id="loanAmountInput" type="text" placeholder="Например: 3500000" />
+            </label>
+            <label>Ставка, % годовых
+              <input id="loanRateInput" type="number" step="0.01" min="0" placeholder="Например: 14.9" />
+            </label>
+            <label>Срок, месяцев
+              <input id="loanMonthsInput" type="number" step="1" min="1" placeholder="Например: 180" />
+            </label>
+          </div>
+          <label>Тип платежа
+            <select id="loanTypeInput">
+              <option value="annuity">Аннуитетный</option>
+              <option value="diff">Дифференцированный</option>
+            </select>
+          </label>
+          <div class="wizard-actions">
+            <button id="loanCalcBtn" class="btn primary">Рассчитать</button>
+          </div>
+          <div id="loanCalcResult" class="plain"></div>
+        </article>
       </section>
     </main>
 
-    <nav class="tabbar" id="tabbar">
+    <nav class="tabbar" id="tabbarExchange">
       <button class="tab-btn active" data-tab="mode">Режим</button>
       <button class="tab-btn" data-tab="dashboard">Портфель</button>
       <button class="tab-btn" data-tab="trade">Сделка</button>
       <button class="tab-btn" data-tab="lookup">Поиск</button>
       <button class="tab-btn" data-tab="movers">Рынок</button>
       <button class="tab-btn" data-tab="alerts">Алерты</button>
-      <button class="tab-btn" data-tab="budget">Бюджет</button>
       <button class="tab-btn" data-tab="more">Ещё</button>
+    </nav>
+    <nav class="tabbar hidden" id="tabbarBudget">
+      <button class="tab-btn active" data-tab="mode">Режим</button>
+      <button class="tab-btn" data-budget-tab="overview">Обзор</button>
+      <button class="tab-btn" data-budget-tab="income">Доходы</button>
+      <button class="tab-btn" data-budget-tab="expenses">Расходы</button>
+      <button class="tab-btn" data-budget-tab="funds">Фонды</button>
+      <button class="tab-btn" data-budget-tab="loans">Кредиты</button>
+      <button class="tab-btn" data-budget-tab="close">Закрытие</button>
     </nav>
   </div>
 

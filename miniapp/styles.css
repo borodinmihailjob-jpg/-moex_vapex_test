@@ -349,13 +349,16 @@ input:focus, select:focus {
   bottom: 0;
   z-index: 30;
   display: grid;
-  grid-template-columns: repeat(8, 1fr);
+  grid-template-columns: repeat(7, 1fr);
   gap: 4px;
   padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
   background: rgba(234, 241, 255, 0.92);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-top: 1px solid var(--line);
+}
+.tabbar.hidden {
+  display: none;
 }
 .tab-btn {
   border: 0;

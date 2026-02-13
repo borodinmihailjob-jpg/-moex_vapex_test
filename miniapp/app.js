@@ -10,6 +10,7 @@ if (tg) {
 const state = {
   initData: tg?.initData || "",
   mode: "mode",
+  appMode: "mode",
   lastMode: null,
   selectedTrade: null,
   selectedLookup: null,
@@ -21,7 +22,9 @@ const state = {
   loadingShowTimer: null,
   loadingVisibleAt: 0,
   budget: {
+    activeTab: "overview",
     onboardingMode: null,
+    onboardingCompleted: false,
     step: 1,
     obligations: [],
     savings: [],
@@ -44,6 +47,8 @@ const POPULAR_FIAT_ALERT_PAIRS = [
 const el = {
   app: document.getElementById("app"),
   content: document.getElementById("content"),
+  tabbarExchange: document.getElementById("tabbarExchange"),
+  tabbarBudget: document.getElementById("tabbarBudget"),
   globalLoader: document.getElementById("globalLoader"),
   globalLoaderText: document.getElementById("globalLoaderText"),
   toast: document.getElementById("toast"),
@@ -110,8 +115,11 @@ const el = {
   budgetWizardCard: document.getElementById("budgetWizardCard"),
   budgetResultCard: document.getElementById("budgetResultCard"),
   budgetDashboardCard: document.getElementById("budgetDashboardCard"),
+  budgetIncomeCard: document.getElementById("budgetIncomeCard"),
+  budgetExpensesCard: document.getElementById("budgetExpensesCard"),
   budgetFundsCard: document.getElementById("budgetFundsCard"),
   budgetMonthCloseCard: document.getElementById("budgetMonthCloseCard"),
+  budgetLoanCalcCard: document.getElementById("budgetLoanCalcCard"),
   budgetWizardTitle: document.getElementById("budgetWizardTitle"),
   budgetStepProgress: document.getElementById("budgetStepProgress"),
   budgetWizardSubtitle: document.getElementById("budgetWizardSubtitle"),
@@ -123,6 +131,12 @@ const el = {
   budgetResultActions: document.getElementById("budgetResultActions"),
   budgetCurrentMonth: document.getElementById("budgetCurrentMonth"),
   editBudgetBtn: document.getElementById("editBudgetBtn"),
+  budgetIncomeTypeInput: document.getElementById("budgetIncomeTypeInput"),
+  budgetPaydayInput: document.getElementById("budgetPaydayInput"),
+  budgetIncomeInput: document.getElementById("budgetIncomeInput"),
+  budgetIncomeSaveBtn: document.getElementById("budgetIncomeSaveBtn"),
+  budgetExpensesInput: document.getElementById("budgetExpensesInput"),
+  budgetExpensesSaveBtn: document.getElementById("budgetExpensesSaveBtn"),
   budgetFundsList: document.getElementById("budgetFundsList"),
   planExpenseBtn: document.getElementById("planExpenseBtn"),
   saveTargetBtn: document.getElementById("saveTargetBtn"),
@@ -143,6 +157,12 @@ const el = {
   monthCloseSubmitBtn: document.getElementById("monthCloseSubmitBtn"),
   monthCloseCancelBtn: document.getElementById("monthCloseCancelBtn"),
   monthCloseBody: document.getElementById("monthCloseBody"),
+  loanAmountInput: document.getElementById("loanAmountInput"),
+  loanRateInput: document.getElementById("loanRateInput"),
+  loanMonthsInput: document.getElementById("loanMonthsInput"),
+  loanTypeInput: document.getElementById("loanTypeInput"),
+  loanCalcBtn: document.getElementById("loanCalcBtn"),
+  loanCalcResult: document.getElementById("loanCalcResult"),
 };
 
 function toast(msg) {
@@ -342,9 +362,11 @@ async function api(path, options = {}) {
 function setTab(name) {
   state.mode = name;
   document.querySelectorAll(".tab-view").forEach((x) => x.classList.remove("active"));
-  document.querySelectorAll(".tab-btn").forEach((x) => x.classList.remove("active"));
+  document.querySelectorAll("#tabbarExchange .tab-btn[data-tab]").forEach((x) => x.classList.remove("active"));
+  document.querySelectorAll("#tabbarBudget .tab-btn[data-tab]").forEach((x) => x.classList.remove("active"));
   document.getElementById(`tab-${name}`)?.classList.add("active");
-  document.querySelector(`.tab-btn[data-tab='${name}']`)?.classList.add("active");
+  document.querySelector(`#tabbarExchange .tab-btn[data-tab='${name}']`)?.classList.add("active");
+  document.querySelector(`#tabbarBudget .tab-btn[data-tab='${name}']`)?.classList.add("active");
   el.content.scrollTo({ top: 0, behavior: "smooth" });
   if (name === "movers" && !state.moversLoaded) {
     loadMovers(0).then(() => {
@@ -359,6 +381,58 @@ function setTab(name) {
   if (name === "budget") {
     loadBudgetDashboard().catch(() => {});
   }
+}
+
+function setAppMode(mode) {
+  state.appMode = mode;
+  if (mode === "exchange") {
+    el.tabbarExchange?.classList.remove("hidden");
+    el.tabbarBudget?.classList.add("hidden");
+  } else if (mode === "budget") {
+    el.tabbarExchange?.classList.add("hidden");
+    el.tabbarBudget?.classList.remove("hidden");
+  } else {
+    el.tabbarExchange?.classList.remove("hidden");
+    el.tabbarBudget?.classList.add("hidden");
+  }
+}
+
+function setBudgetTab(tab) {
+  state.budget.activeTab = tab;
+  document.querySelectorAll("#tabbarBudget .tab-btn[data-budget-tab]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.budgetTab === tab);
+  });
+  const show = (node, visible) => {
+    if (!node) return;
+    node.style.display = visible ? "" : "none";
+  };
+  const onboardingIncomplete = !state.budget.onboardingCompleted;
+  if (onboardingIncomplete) {
+    show(el.budgetWelcomeCard, true);
+    show(el.budgetWizardCard, false);
+    show(el.budgetResultCard, false);
+    show(el.budgetDashboardCard, false);
+    show(el.budgetIncomeCard, false);
+    show(el.budgetExpensesCard, false);
+    show(el.budgetFundsCard, false);
+    show(el.budgetFundPlannerCard, false);
+    show(el.budgetMonthCloseCard, false);
+    show(el.budgetLoanCalcCard, false);
+    return;
+  }
+
+  show(el.budgetWelcomeCard, false);
+  show(el.budgetWizardCard, false);
+  show(el.budgetResultCard, false);
+  show(el.budgetDashboardCard, tab === "overview");
+  show(el.budgetIncomeCard, tab === "income");
+  show(el.budgetExpensesCard, tab === "expenses");
+  show(el.budgetFundsCard, tab === "funds");
+  if (tab !== "funds") {
+    show(el.budgetFundPlannerCard, false);
+  }
+  show(el.budgetMonthCloseCard, tab === "close");
+  show(el.budgetLoanCalcCard, tab === "loans");
 }
 
 function renderEmpty(container, text) {
@@ -640,14 +714,11 @@ async function loadBudgetDashboard() {
   const data = await api("/api/miniapp/budget/dashboard", { loadingText: "Считаю…" });
   state.budget.dashboard = data;
   state.budget.profile = data.profile || {};
+  state.budget.onboardingCompleted = !!data.profile?.onboarding_completed;
 
-  const onboardingCompleted = !!data.profile?.onboarding_completed;
-  el.budgetWelcomeCard.style.display = onboardingCompleted ? "none" : "";
+  const onboardingCompleted = state.budget.onboardingCompleted;
   el.budgetWizardCard.style.display = "none";
   el.budgetResultCard.style.display = "none";
-  el.budgetDashboardCard.style.display = onboardingCompleted ? "" : "none";
-  el.budgetFundsCard.style.display = onboardingCompleted ? "" : "none";
-  el.budgetMonthCloseCard.style.display = onboardingCompleted && data.need_close_previous_month ? "" : "none";
 
   if (onboardingCompleted) {
     const free = Number(data.free || 0);
@@ -659,7 +730,12 @@ async function loadBudgetDashboard() {
       `${free >= 0 ? "Свободно" : "Дефицит"}: ${money(Math.abs(free))}/мес`,
     ].join("\n");
     renderBudgetFunds(data.funds || []);
+    el.budgetIncomeTypeInput.value = data.profile?.income_type || "fixed";
+    el.budgetPaydayInput.value = data.profile?.payday_day || "";
+    el.budgetIncomeInput.value = data.income ? String(Math.round(Number(data.income))) : "";
+    el.budgetExpensesInput.value = data.expenses_base ? String(Math.round(Number(data.expenses_base))) : "";
   }
+  setBudgetTab(state.budget.activeTab || "overview");
 }
 
 function renderBudgetFunds(rows) {
@@ -708,6 +784,7 @@ function openBudgetWizard(onboardingMode) {
   el.budgetDashboardCard.style.display = "none";
   el.budgetFundsCard.style.display = "none";
   el.budgetMonthCloseCard.style.display = "none";
+  state.budget.onboardingCompleted = false;
   renderBudgetWizardStep();
 }
 
@@ -741,6 +818,22 @@ function renderBudgetWizardStep() {
           <input id="wizardObligationAmount" type="text" placeholder="Например: 45000" />
         </label>
       </div>
+      <div id="wizardDebtExtra" class="form-grid three" style="${selectedKind === "mortgage" || selectedKind === "loan" ? "" : "display:none"}">
+        <label>Остаток долга, ₽
+          <input id="wizardDebtAmount" type="text" placeholder="Например: 2100000" />
+        </label>
+        <label>Ставка, % годовых
+          <input id="wizardDebtRate" type="number" step="0.01" min="0" placeholder="Например: 14.9" />
+        </label>
+        <label>Срок, мес
+          <input id="wizardDebtMonths" type="number" step="1" min="1" placeholder="Например: 120" />
+        </label>
+      </div>
+      <div id="wizardDebtHint" class="hint" style="${selectedKind === "mortgage" || selectedKind === "loan" ? "" : "display:none"}">Это нужно для расчёта переплаты и досрочного погашения.</div>
+      <div class="wizard-actions" style="${selectedKind === "mortgage" || selectedKind === "loan" ? "" : "display:none"}">
+        <button id="wizardDebtCalcBtn" class="btn ghost" type="button">Рассчитать платёж</button>
+      </div>
+      <div id="wizardDebtCalcResult" class="plain"></div>
       <button id="wizardObligationAddBtn" class="btn primary">Сохранить платёж</button>
       <div id="wizardObligationsList" class="plain">${state.budget.obligations.length ? state.budget.obligations.map((x) => `• ${x.title}: ${money(x.amount_monthly)}`).join("\n") : "Пока ничего не добавили. Нажмите на пункт выше, чтобы добавить платёж."}</div>
       <p class="hint">Сейчас обязательные платежи: <strong>${money(total)}/мес</strong></p>
@@ -760,11 +853,34 @@ function renderBudgetWizardStep() {
         return;
       }
       try {
-        const amount = parseMoneyInput(raw);
+        let amount = parseMoneyInput(raw);
+        let debtDetails = null;
+        if (selectedKind === "mortgage" || selectedKind === "loan") {
+          const debtAmountRaw = (document.getElementById("wizardDebtAmount")?.value || "").trim();
+          const debtRateRaw = (document.getElementById("wizardDebtRate")?.value || "").trim();
+          const debtMonthsRaw = (document.getElementById("wizardDebtMonths")?.value || "").trim();
+          if (debtAmountRaw && debtRateRaw && debtMonthsRaw) {
+            const calc = calculateLoanMetrics({
+              amount: parseMoneyInput(debtAmountRaw),
+              annualRate: Number(debtRateRaw),
+              months: Number(debtMonthsRaw),
+              paymentType: "annuity",
+            });
+            amount = calc.monthly_payment || amount;
+            debtDetails = {
+              debt_amount: parseMoneyInput(debtAmountRaw),
+              annual_rate: Number(debtRateRaw),
+              months: Number(debtMonthsRaw),
+              monthly_payment: calc.monthly_payment,
+              overpayment: calc.overpayment,
+              total_payment: calc.total_payment,
+            };
+          }
+        }
         await api("/api/miniapp/budget/obligations", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title, kind: selectedKind, amount_monthly: amount }),
+          body: JSON.stringify({ title, kind: selectedKind, amount_monthly: amount, debt_details: debtDetails }),
         });
         const listData = await api("/api/miniapp/budget/obligations");
         state.budget.obligations = listData.items || [];
@@ -773,6 +889,31 @@ function renderBudgetWizardStep() {
         renderBudgetWizardStep();
       } catch (e) {
         toast(e?.message || "Ошибка добавления");
+      }
+    });
+    el.budgetWizardBody.querySelector("#wizardDebtCalcBtn")?.addEventListener("click", () => {
+      try {
+        const debtAmountRaw = (document.getElementById("wizardDebtAmount")?.value || "").trim();
+        const debtRateRaw = (document.getElementById("wizardDebtRate")?.value || "").trim();
+        const debtMonthsRaw = (document.getElementById("wizardDebtMonths")?.value || "").trim();
+        const calc = calculateLoanMetrics({
+          amount: parseMoneyInput(debtAmountRaw),
+          annualRate: Number(debtRateRaw),
+          months: Number(debtMonthsRaw),
+          paymentType: "annuity",
+        });
+        const out = document.getElementById("wizardDebtCalcResult");
+        if (out) {
+          out.textContent = [
+            `Ежемесячный платёж: ${money(calc.monthly_payment)}`,
+            `Переплата: ${money(calc.overpayment)}`,
+            `Итоговая выплата: ${money(calc.total_payment)}`,
+          ].join("\n");
+        }
+        const amountInput = document.getElementById("wizardObligationAmount");
+        if (amountInput) amountInput.value = String(Math.round(Number(calc.monthly_payment || 0)));
+      } catch (e) {
+        toast(e?.message || "Ошибка расчёта кредита");
       }
     });
     return;
@@ -898,6 +1039,7 @@ async function completeBudgetOnboarding() {
   const free = Number(dashboard.free || 0);
   el.budgetWizardCard.style.display = "none";
   el.budgetResultCard.style.display = "";
+  state.budget.onboardingCompleted = true;
   el.budgetResultBody.textContent = [
     `Доход: ${money(dashboard.income)}`,
     `Обязательные платежи: ${money(dashboard.obligations_total)}`,
@@ -936,6 +1078,10 @@ async function openFundPlanFlow() {
 }
 
 async function openMonthCloseFlow() {
+  if (state.budget.dashboard && !state.budget.dashboard.need_close_previous_month) {
+    toast("Прошлый месяц уже закрыт");
+    return;
+  }
   el.monthCloseForm.style.display = "";
   el.monthCloseBody.style.display = "none";
   el.monthCloseActualInput.value = el.monthCloseActualInput.value || "";
@@ -1039,6 +1185,52 @@ async function submitMonthCloseFromForm() {
   }
 }
 
+function calculateLoanMetrics({ amount, annualRate, months, paymentType }) {
+  const principal = Number(amount || 0);
+  const rateYear = Number(annualRate || 0);
+  const termMonths = Number(months || 0);
+  if (!Number.isFinite(principal) || principal <= 0) throw new Error("Сумма кредита должна быть больше 0");
+  if (!Number.isFinite(rateYear) || rateYear < 0) throw new Error("Ставка должна быть числом от 0");
+  if (!Number.isFinite(termMonths) || termMonths <= 0) throw new Error("Срок должен быть больше 0");
+  const i = rateYear / 100 / 12;
+  if (paymentType === "diff") {
+    const principalPart = principal / termMonths;
+    let total = 0;
+    let first = 0;
+    let last = 0;
+    let remain = principal;
+    for (let m = 1; m <= termMonths; m += 1) {
+      const pay = principalPart + remain * i;
+      if (m === 1) first = pay;
+      if (m === termMonths) last = pay;
+      total += pay;
+      remain = Math.max(0, remain - principalPart);
+    }
+    return {
+      monthly_payment: null,
+      first_payment: first,
+      last_payment: last,
+      total_payment: total,
+      overpayment: total - principal,
+    };
+  }
+  let monthly = 0;
+  if (i === 0) {
+    monthly = principal / termMonths;
+  } else {
+    const factor = Math.pow(1 + i, termMonths);
+    monthly = principal * i * factor / (factor - 1);
+  }
+  const total = monthly * termMonths;
+  return {
+    monthly_payment: monthly,
+    first_payment: monthly,
+    last_payment: monthly,
+    total_payment: total,
+    overpayment: total - principal,
+  };
+}
+
 async function saveTrade() {
   if (!state.selectedTrade) {
     toast("Сначала выберите инструмент");
@@ -1077,25 +1269,50 @@ async function saveTrade() {
 }
 
 function setupEvents() {
-  document.querySelectorAll(".tab-btn").forEach((btn) => {
+  document.querySelectorAll("#tabbarExchange .tab-btn[data-tab]").forEach((btn) => {
     btn.addEventListener("click", () => setTab(btn.dataset.tab));
   });
-  el.switchModeBtn?.addEventListener("click", () => setTab("mode"));
+  document.querySelectorAll("#tabbarBudget .tab-btn[data-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setAppMode("mode");
+      setTab("mode");
+    });
+  });
+  document.querySelectorAll("#tabbarBudget .tab-btn[data-budget-tab]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      setAppMode("budget");
+      setTab("budget");
+      await loadBudgetDashboard();
+      setBudgetTab(btn.dataset.budgetTab || "overview");
+    });
+  });
+  el.switchModeBtn?.addEventListener("click", () => {
+    setAppMode("mode");
+    setTab("mode");
+  });
   el.openExchangeBtn?.addEventListener("click", async () => {
     await setModePreference("exchange");
+    setAppMode("exchange");
     setTab("dashboard");
   });
   el.openBudgetBtn?.addEventListener("click", async () => {
     await setModePreference("budget");
+    setAppMode("budget");
     setTab("budget");
     await loadBudgetDashboard();
+    setBudgetTab("overview");
   });
   el.openLastModeBtn?.addEventListener("click", async () => {
     if (!state.lastMode) return;
-    setTab(state.lastMode === "budget" ? "budget" : "dashboard");
     if (state.lastMode === "budget") {
+      setAppMode("budget");
+      setTab("budget");
       await loadBudgetDashboard();
+      setBudgetTab("overview");
+      return;
     }
+    setAppMode("exchange");
+    setTab("dashboard");
   });
   el.startQuickOnboardingBtn?.addEventListener("click", async () => {
     try {
@@ -1181,6 +1398,42 @@ function setupEvents() {
   el.planExpenseBtn?.addEventListener("click", openFundPlanFlow);
   el.saveTargetBtn?.addEventListener("click", openFundPlanFlow);
   el.closeMonthOpenBtn?.addEventListener("click", openMonthCloseFlow);
+  el.budgetIncomeSaveBtn?.addEventListener("click", async () => {
+    try {
+      const incomeType = el.budgetIncomeTypeInput.value || "fixed";
+      const income = parseMoneyInput(el.budgetIncomeInput.value || "");
+      const payday = (el.budgetPaydayInput.value || "").trim();
+      await api("/api/miniapp/budget/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          income_type: incomeType,
+          income_monthly: income,
+          payday_day: payday ? Number(payday) : null,
+        }),
+      });
+      toast("Доходы сохранены");
+      await loadBudgetDashboard();
+      setBudgetTab("income");
+    } catch (e) {
+      toast(e?.message || "Не удалось сохранить доходы");
+    }
+  });
+  el.budgetExpensesSaveBtn?.addEventListener("click", async () => {
+    try {
+      const expenses = parseMoneyInput(el.budgetExpensesInput.value || "");
+      await api("/api/miniapp/budget/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expenses_base: expenses }),
+      });
+      toast("Расходы сохранены");
+      await loadBudgetDashboard();
+      setBudgetTab("expenses");
+    } catch (e) {
+      toast(e?.message || "Не удалось сохранить расходы");
+    }
+  });
   el.fundCalcBtn?.addEventListener("click", async () => {
     try {
       await calcFundStrategyFromForm();
@@ -1203,6 +1456,24 @@ function setupEvents() {
   el.monthCloseSubmitBtn?.addEventListener("click", submitMonthCloseFromForm);
   el.monthCloseCancelBtn?.addEventListener("click", () => {
     el.monthCloseForm.style.display = "none";
+  });
+  el.loanCalcBtn?.addEventListener("click", () => {
+    try {
+      const calc = calculateLoanMetrics({
+        amount: parseMoneyInput(el.loanAmountInput.value || ""),
+        annualRate: Number(el.loanRateInput.value || 0),
+        months: Number(el.loanMonthsInput.value || 0),
+        paymentType: el.loanTypeInput.value || "annuity",
+      });
+      el.loanCalcResult.textContent = [
+        calc.monthly_payment !== null ? `Ежемесячный платёж: ${money(calc.monthly_payment)}` : `Первый платёж: ${money(calc.first_payment)}`,
+        calc.monthly_payment === null ? `Последний платёж: ${money(calc.last_payment)}` : "",
+        `Переплата: ${money(calc.overpayment)}`,
+        `Итоговая выплата: ${money(calc.total_payment)}`,
+      ].filter(Boolean).join("\n");
+    } catch (e) {
+      toast(e?.message || "Ошибка расчёта");
+    }
   });
 
   state.searchControllers.trade = bindSearch({
@@ -1320,9 +1591,9 @@ function setupEvents() {
     }
   });
 
-  document.querySelectorAll(".chip").forEach((chip) => {
+  document.querySelectorAll("#tab-movers .chip").forEach((chip) => {
     chip.addEventListener("click", async () => {
-      document.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
+      document.querySelectorAll("#tab-movers .chip").forEach((c) => c.classList.remove("active"));
       chip.classList.add("active");
       try {
         await loadMovers(Number(chip.dataset.day || "0"));
@@ -1452,11 +1723,15 @@ function setupEvents() {
       loadModePreference(),
     ]);
     if (state.lastMode === "exchange") {
+      setAppMode("exchange");
       setTab("dashboard");
     } else if (state.lastMode === "budget") {
+      setAppMode("budget");
       setTab("budget");
       await loadBudgetDashboard();
+      setBudgetTab("overview");
     } else {
+      setAppMode("mode");
       setTab("mode");
     }
   } catch (e) {
