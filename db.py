@@ -2,6 +2,8 @@ import asyncio
 import json
 import hashlib
 import logging
+import random
+from functools import wraps
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -325,6 +327,55 @@ _pools: dict[str, asyncpg.Pool] = {}
 _pools_lock = asyncio.Lock()
 _single_instance_lock_conn: asyncpg.Connection | None = None
 _single_instance_lock_key: int | None = None
+_DB_RETRY_ATTEMPTS = 3
+_DB_RETRY_BASE_DELAY_SEC = 0.2
+
+_RETRYABLE_DB_ERRORS: tuple[type[BaseException], ...] = (
+    asyncpg.PostgresConnectionError,
+    asyncpg.CannotConnectNowError,
+    asyncpg.ConnectionDoesNotExistError,
+    asyncpg.ConnectionFailureError,
+    asyncpg.TooManyConnectionsError,
+    asyncpg.SerializationError,
+    asyncpg.DeadlockDetectedError,
+    asyncpg.InterfaceError,
+    asyncio.TimeoutError,
+    TimeoutError,
+    ConnectionError,
+    OSError,
+)
+_LOGGABLE_DB_ERRORS: tuple[type[BaseException], ...] = _RETRYABLE_DB_ERRORS + (
+    asyncpg.PostgresError,
+    asyncpg.DataError,
+)
+
+
+def db_operation(*, retries: int = _DB_RETRY_ATTEMPTS, base_delay_sec: float = _DB_RETRY_BASE_DELAY_SEC):
+    def decorator(fn):
+        @wraps(fn)
+        async def wrapper(*args, **kwargs):
+            attempt = 0
+            while True:
+                try:
+                    return await fn(*args, **kwargs)
+                except _RETRYABLE_DB_ERRORS as exc:
+                    attempt += 1
+                    if attempt >= max(1, retries):
+                        raise
+                    delay = base_delay_sec * (2 ** (attempt - 1)) + random.uniform(0.0, 0.1)
+                    logger.warning(
+                        "Retryable DB error in %s (attempt %s/%s, retry in %.2fs): %s",
+                        fn.__name__,
+                        attempt,
+                        retries,
+                        delay,
+                        exc.__class__.__name__,
+                    )
+                    await asyncio.sleep(delay)
+
+        return wrapper
+
+    return decorator
 
 
 def _norm_boardid(boardid: str | None) -> str:
@@ -392,6 +443,7 @@ async def _get_pool(db_dsn: str) -> asyncpg.Pool:
         return pool
 
 
+@db_operation()
 async def close_pools() -> None:
     async with _pools_lock:
         pools = list(_pools.values())
@@ -405,6 +457,7 @@ def _advisory_lock_key(lock_name: str) -> int:
     return int.from_bytes(digest[:8], "big", signed=True)
 
 
+@db_operation()
 async def acquire_single_instance_lock(db_dsn: str, lock_name: str) -> bool:
     global _single_instance_lock_conn, _single_instance_lock_key
     if _single_instance_lock_conn is not None:
@@ -420,6 +473,7 @@ async def acquire_single_instance_lock(db_dsn: str, lock_name: str) -> bool:
     return False
 
 
+@db_operation()
 async def release_single_instance_lock() -> None:
     global _single_instance_lock_conn, _single_instance_lock_key
     conn = _single_instance_lock_conn
@@ -431,7 +485,7 @@ async def release_single_instance_lock() -> None:
     try:
         if key is not None:
             await conn.execute("SELECT pg_advisory_unlock($1::bigint)", key)
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed to release advisory lock")
     finally:
         await conn.close()
@@ -793,6 +847,7 @@ async def _run_one_time_maintenance(conn: asyncpg.Connection, key: str) -> None:
     )
 
 
+@db_operation()
 async def init_db(db_path: str):
     try:
         pool = await _get_pool(db_path)
@@ -805,11 +860,12 @@ async def init_db(db_path: str):
                     await conn.execute(sql)
                 await _run_one_time_maintenance(conn, "maintenance_v2_done")
         logger.info("Database initialized (PostgreSQL)")
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed to initialize database")
         raise
 
 
+@db_operation()
 async def upsert_instrument(
     db_path: str,
     secid: str,
@@ -839,11 +895,12 @@ async def upsert_instrument(
                 asset_type,
             )
             return int(row["id"])
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed upsert_instrument secid=%s boardid=%s asset_type=%s", secid, boardid, asset_type)
         raise
 
 
+@db_operation()
 async def add_trade(
     db_path: str,
     user_id: int,
@@ -927,11 +984,12 @@ async def add_trade(
             external_trade_id,
         )
         return inserted
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed add_trade user=%s instrument=%s", user_id, instrument_id)
         raise
 
 
+@db_operation()
 async def get_position_agg(db_path: str, user_id: int, instrument_id: int):
     """
     total_qty, total_cost (qty*price + commission), avg_price = total_cost/total_qty
@@ -954,11 +1012,12 @@ async def get_position_agg(db_path: str, user_id: int, instrument_id: int):
             if not row:
                 return 0.0, 0.0, 0.0
             return float(row["total_qty"]), float(row["total_cost"]), float(row["avg_price"])
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed get_position_agg user=%s instrument=%s", user_id, instrument_id)
         raise
 
 
+@db_operation()
 async def get_instrument(db_path: str, instrument_id: int):
     try:
         pool = await _get_pool(db_path)
@@ -981,11 +1040,12 @@ async def get_instrument(db_path: str, instrument_id: int):
                 "shortname": row["shortname"],
                 "asset_type": row["asset_type"],
             }
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed get_instrument instrument=%s", instrument_id)
         raise
 
 
+@db_operation()
 async def get_user_positions(db_path: str, user_id: int):
     """
     Возвращает агрегированные позиции пользователя по инструментам.
@@ -1031,11 +1091,12 @@ async def get_user_positions(db_path: str, user_id: int):
             }
             for row in rows
         ]
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed get_user_positions user=%s", user_id)
         raise
 
 
+@db_operation()
 async def list_active_position_instruments(db_path: str) -> list[dict[str, Any]]:
     try:
         pool = await _get_pool(db_path)
@@ -1062,11 +1123,12 @@ async def list_active_position_instruments(db_path: str) -> list[dict[str, Any]]
             }
             for r in rows
         ]
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed list_active_position_instruments")
         raise
 
 
+@db_operation()
 async def clear_user_portfolio(db_path: str, user_id: int) -> int:
     """
     Deletes all trades and aggregated positions for user's default portfolio.
@@ -1104,11 +1166,12 @@ async def clear_user_portfolio(db_path: str, user_id: int) -> int:
                     int(user_id),
                 )
                 return len(deleted_rows)
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed clear_user_portfolio user=%s", user_id)
         raise
 
 
+@db_operation()
 async def ensure_app_text(
     db_path: str,
     text_code: str,
@@ -1131,11 +1194,12 @@ async def ensure_app_text(
                 str(value),
                 bool(active),
             )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed ensure_app_text text_code=%s", text_code)
         raise
 
 
+@db_operation()
 async def get_active_app_text(db_path: str, text_code: str) -> str | None:
     try:
         pool = await _get_pool(db_path)
@@ -1153,11 +1217,12 @@ async def get_active_app_text(db_path: str, text_code: str) -> str | None:
             if not row:
                 return None
             return str(row["value"])
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed get_active_app_text text_code=%s", text_code)
         raise
 
 
+@db_operation()
 async def list_active_app_texts(db_path: str) -> list[dict[str, str]]:
     try:
         pool = await _get_pool(db_path)
@@ -1178,11 +1243,12 @@ async def list_active_app_texts(db_path: str) -> list[dict[str, str]]:
             }
             for r in rows
         ]
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed list_active_app_texts")
         raise
 
 
+@db_operation()
 async def upsert_price_cache_bulk(
     db_path: str,
     rows: list[tuple[int, float]],
@@ -1212,11 +1278,12 @@ async def upsert_price_cache_bulk(
                 last_prices,
                 ts,
             )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed upsert_price_cache_bulk rows=%s", len(rows))
         raise
 
 
+@db_operation()
 async def get_price_cache_map(db_path: str, instrument_ids: list[int]) -> dict[int, dict[str, Any]]:
     if not instrument_ids:
         return {}
@@ -1238,11 +1305,12 @@ async def get_price_cache_map(db_path: str, instrument_ids: list[int]) -> dict[i
             }
             for r in rows
         }
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed get_price_cache_map for %s instruments", len(instrument_ids))
         raise
 
 
+@db_operation()
 async def ensure_user_alert_settings(db_path: str, user_id: int):
     try:
         pool = await _get_pool(db_path)
@@ -1258,11 +1326,12 @@ async def ensure_user_alert_settings(db_path: str, user_id: int):
                     int(user_id),
                     user_ref_id,
                 )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed ensure_user_alert_settings user=%s", user_id)
         raise
 
 
+@db_operation()
 async def set_periodic_alert(db_path: str, user_id: int, enabled: bool, interval_min: int | None = None):
     try:
         await ensure_user_alert_settings(db_path, user_id)
@@ -1294,11 +1363,12 @@ async def set_periodic_alert(db_path: str, user_id: int, enabled: bool, interval
                     int(interval_min),
                     int(user_id),
                 )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed set_periodic_alert user=%s", user_id)
         raise
 
 
+@db_operation()
 async def set_drop_alert(db_path: str, user_id: int, enabled: bool, drop_percent: float | None = None):
     try:
         await ensure_user_alert_settings(db_path, user_id)
@@ -1317,11 +1387,12 @@ async def set_drop_alert(db_path: str, user_id: int, enabled: bool, drop_percent
                     float(drop_percent),
                     int(user_id),
                 )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed set_drop_alert user=%s", user_id)
         raise
 
 
+@db_operation()
 async def set_open_close_alert(db_path: str, user_id: int, enabled: bool):
     try:
         await ensure_user_alert_settings(db_path, user_id)
@@ -1347,11 +1418,12 @@ async def set_open_close_alert(db_path: str, user_id: int, enabled: bool):
                 bool(enabled),
                 int(user_id),
             )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed set_open_close_alert user=%s", user_id)
         raise
 
 
+@db_operation()
 async def get_user_alert_settings(db_path: str, user_id: int):
     try:
         await ensure_user_alert_settings(db_path, user_id)
@@ -1410,11 +1482,12 @@ async def get_user_alert_settings(db_path: str, user_id: int):
             "day_open_value": (float(row["day_open_value"]) if row["day_open_value"] is not None else None),
             "day_open_value_date": day_open_on.isoformat() if day_open_on is not None else row["day_open_value_date"],
         }
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed get_user_alert_settings user=%s", user_id)
         raise
 
 
+@db_operation()
 async def list_users_with_alerts(db_path: str):
     try:
         pool = await _get_pool(db_path)
@@ -1431,11 +1504,12 @@ async def list_users_with_alerts(db_path: str):
                 """
             )
         return [int(r["user_id"]) for r in rows]
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed list_users_with_alerts")
         raise
 
 
+@db_operation()
 async def update_periodic_last_sent_at(db_path: str, user_id: int, iso_ts: str):
     try:
         pool = await _get_pool(db_path)
@@ -1452,11 +1526,12 @@ async def update_periodic_last_sent_at(db_path: str, user_id: int, iso_ts: str):
                 dt,
                 int(user_id),
             )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed update_periodic_last_sent_at user=%s", user_id)
         raise
 
 
+@db_operation()
 async def update_open_sent_date(db_path: str, user_id: int, date_iso: str):
     try:
         pool = await _get_pool(db_path)
@@ -1473,11 +1548,12 @@ async def update_open_sent_date(db_path: str, user_id: int, date_iso: str):
                 day,
                 int(user_id),
             )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed update_open_sent_date user=%s", user_id)
         raise
 
 
+@db_operation()
 async def update_midday_sent_date(db_path: str, user_id: int, date_iso: str):
     try:
         pool = await _get_pool(db_path)
@@ -1494,11 +1570,12 @@ async def update_midday_sent_date(db_path: str, user_id: int, date_iso: str):
                 day,
                 int(user_id),
             )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed update_midday_sent_date user=%s", user_id)
         raise
 
 
+@db_operation()
 async def update_main_close_sent_date(db_path: str, user_id: int, date_iso: str):
     try:
         pool = await _get_pool(db_path)
@@ -1515,11 +1592,12 @@ async def update_main_close_sent_date(db_path: str, user_id: int, date_iso: str)
                 day,
                 int(user_id),
             )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed update_main_close_sent_date user=%s", user_id)
         raise
 
 
+@db_operation()
 async def update_close_sent_date(db_path: str, user_id: int, date_iso: str):
     try:
         pool = await _get_pool(db_path)
@@ -1536,11 +1614,12 @@ async def update_close_sent_date(db_path: str, user_id: int, date_iso: str):
                 day,
                 int(user_id),
             )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed update_close_sent_date user=%s", user_id)
         raise
 
 
+@db_operation()
 async def update_day_open_value(db_path: str, user_id: int, date_iso: str, open_value: float | None) -> None:
     try:
         pool = await _get_pool(db_path)
@@ -1559,11 +1638,12 @@ async def update_day_open_value(db_path: str, user_id: int, date_iso: str, open_
                 day,
                 int(user_id),
             )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed update_day_open_value user=%s", user_id)
         raise
 
 
+@db_operation()
 async def get_price_alert_state(db_path: str, user_id: int, instrument_id: int) -> bool:
     try:
         pool = await _get_pool(db_path)
@@ -1574,11 +1654,12 @@ async def get_price_alert_state(db_path: str, user_id: int, instrument_id: int) 
                 int(instrument_id),
             )
         return bool(row["was_below"]) if row else False
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed get_price_alert_state user=%s instrument=%s", user_id, instrument_id)
         raise
 
 
+@db_operation()
 async def get_price_alert_states_bulk(db_path: str, user_id: int, instrument_ids: list[int]) -> dict[int, bool]:
     if not instrument_ids:
         return {}
@@ -1596,11 +1677,12 @@ async def get_price_alert_states_bulk(db_path: str, user_id: int, instrument_ids
                 [int(iid) for iid in instrument_ids],
             )
         return {int(row["instrument_id"]): bool(row["was_below"]) for row in rows}
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed get_price_alert_states_bulk user=%s count=%s", user_id, len(instrument_ids))
         raise
 
 
+@db_operation()
 async def set_price_alert_state(db_path: str, user_id: int, instrument_id: int, was_below: bool, alert_ts: str | None = None):
     try:
         pool = await _get_pool(db_path)
@@ -1624,11 +1706,12 @@ async def set_price_alert_state(db_path: str, user_id: int, instrument_id: int, 
                 alert_ts,
                 alert_dt,
             )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed set_price_alert_state user=%s instrument=%s", user_id, instrument_id)
         raise
 
 
+@db_operation()
 async def set_price_alert_states_bulk(
     db_path: str,
     user_id: int,
@@ -1680,11 +1763,12 @@ async def set_price_alert_states_bulk(
                 alert_text_values,
                 alert_ts_values,
             )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed set_price_alert_states_bulk user=%s count=%s", user_id, len(updates))
         raise
 
 
+@db_operation()
 async def create_price_target_alert(
     db_path: str,
     user_id: int,
@@ -1714,7 +1798,7 @@ async def create_price_target_alert(
                     float(range_percent),
                 )
         return int(row["id"])
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception(
             "Failed create_price_target_alert user=%s instrument=%s target=%s range=%s",
             user_id,
@@ -1725,6 +1809,7 @@ async def create_price_target_alert(
         raise
 
 
+@db_operation()
 async def list_active_price_target_alerts(db_path: str, user_id: int) -> list[dict[str, Any]]:
     try:
         pool = await _get_pool(db_path)
@@ -1769,11 +1854,12 @@ async def list_active_price_target_alerts(db_path: str, user_id: int) -> list[di
                 }
             )
         return out
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed list_active_price_target_alerts user=%s", user_id)
         raise
 
 
+@db_operation()
 async def update_price_target_alert_last_sent(db_path: str, alert_id: int, iso_ts: str) -> None:
     try:
         pool = await _get_pool(db_path)
@@ -1790,11 +1876,12 @@ async def update_price_target_alert_last_sent(db_path: str, alert_id: int, iso_t
                 dt,
                 int(alert_id),
             )
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed update_price_target_alert_last_sent alert=%s", alert_id)
         raise
 
 
+@db_operation()
 async def disable_price_target_alert(db_path: str, user_id: int, alert_id: int) -> bool:
     try:
         pool = await _get_pool(db_path)
@@ -1812,7 +1899,7 @@ async def disable_price_target_alert(db_path: str, user_id: int, alert_id: int) 
                 int(user_id),
             )
         return row is not None
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed disable_price_target_alert user=%s alert=%s", user_id, alert_id)
         raise
 
@@ -1858,6 +1945,7 @@ def _fund_metrics(target_amount: float, already_saved: float, target_month: str,
     }
 
 
+@db_operation()
 async def get_user_last_mode(db_path: str, user_id: int) -> str | None:
     try:
         pool = await _get_pool(db_path)
@@ -1867,11 +1955,12 @@ async def get_user_last_mode(db_path: str, user_id: int) -> str | None:
             return None
         mode = (row["last_mode"] or "").strip().lower()
         return mode if mode in {"exchange", "budget"} else None
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed get_user_last_mode user=%s", user_id)
         raise
 
 
+@db_operation()
 async def set_user_last_mode(db_path: str, user_id: int, mode: str) -> str:
     normalized = (mode or "").strip().lower()
     if normalized not in {"exchange", "budget"}:
@@ -1895,11 +1984,12 @@ async def set_user_last_mode(db_path: str, user_id: int, mode: str) -> str:
                     normalized,
                 )
         return normalized
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed set_user_last_mode user=%s mode=%s", user_id, normalized)
         raise
 
 
+@db_operation()
 async def get_budget_profile(db_path: str, user_id: int) -> dict[str, Any]:
     try:
         pool = await _get_pool(db_path)
@@ -1929,11 +2019,12 @@ async def get_budget_profile(db_path: str, user_id: int) -> dict[str, Any]:
             "expenses_base": float(row["expenses_base"] or 0.0),
             "onboarding_completed": bool(row["onboarding_completed"]),
         }
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed get_budget_profile user=%s", user_id)
         raise
 
 
+@db_operation()
 async def upsert_budget_profile(
     db_path: str,
     user_id: int,
@@ -2011,11 +2102,12 @@ async def upsert_budget_profile(
             "expenses_base": float(row["expenses_base"] or 0.0),
             "onboarding_completed": bool(row["onboarding_completed"]),
         }
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed upsert_budget_profile user=%s", user_id)
         raise
 
 
+@db_operation()
 async def list_budget_obligations(db_path: str, user_id: int) -> list[dict[str, Any]]:
     try:
         pool = await _get_pool(db_path)
@@ -2047,11 +2139,12 @@ async def list_budget_obligations(db_path: str, user_id: int) -> list[dict[str, 
                 }
             )
         return out
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed list_budget_obligations user=%s", user_id)
         raise
 
 
+@db_operation()
 async def list_budget_incomes(db_path: str, user_id: int) -> list[dict[str, Any]]:
     try:
         pool = await _get_pool(db_path)
@@ -2074,11 +2167,12 @@ async def list_budget_incomes(db_path: str, user_id: int) -> list[dict[str, Any]
             }
             for row in rows
         ]
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed list_budget_incomes user=%s", user_id)
         raise
 
 
+@db_operation()
 async def add_budget_income(db_path: str, user_id: int, kind: str, title: str, amount_monthly: float) -> int:
     try:
         pool = await _get_pool(db_path)
@@ -2098,11 +2192,12 @@ async def add_budget_income(db_path: str, user_id: int, kind: str, title: str, a
                     float(amount_monthly),
                 )
         return int(row["id"])
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed add_budget_income user=%s title=%s", user_id, title)
         raise
 
 
+@db_operation()
 async def list_budget_expenses(db_path: str, user_id: int) -> list[dict[str, Any]]:
     try:
         pool = await _get_pool(db_path)
@@ -2134,11 +2229,12 @@ async def list_budget_expenses(db_path: str, user_id: int) -> list[dict[str, Any
                 }
             )
         return out
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed list_budget_expenses user=%s", user_id)
         raise
 
 
+@db_operation()
 async def add_budget_expense(
     db_path: str,
     user_id: int,
@@ -2166,11 +2262,12 @@ async def add_budget_expense(
                     json.dumps(payload or {}),
                 )
         return int(row["id"])
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed add_budget_expense user=%s title=%s", user_id, title)
         raise
 
 
+@db_operation()
 async def update_budget_expense(
     db_path: str,
     user_id: int,
@@ -2223,11 +2320,12 @@ async def update_budget_expense(
                 int(user_id),
             )
         return upd is not None
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed update_budget_expense user=%s expense=%s", user_id, expense_id)
         raise
 
 
+@db_operation()
 async def disable_budget_expense(db_path: str, user_id: int, expense_id: int) -> bool:
     try:
         pool = await _get_pool(db_path)
@@ -2244,11 +2342,12 @@ async def disable_budget_expense(db_path: str, user_id: int, expense_id: int) ->
                 int(user_id),
             )
         return row is not None
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed disable_budget_expense user=%s expense=%s", user_id, expense_id)
         raise
 
 
+@db_operation()
 async def update_budget_income(
     db_path: str,
     user_id: int,
@@ -2291,11 +2390,12 @@ async def update_budget_income(
                 int(user_id),
             )
         return upd is not None
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed update_budget_income user=%s income=%s", user_id, income_id)
         raise
 
 
+@db_operation()
 async def disable_budget_income(db_path: str, user_id: int, income_id: int) -> bool:
     try:
         pool = await _get_pool(db_path)
@@ -2312,11 +2412,12 @@ async def disable_budget_income(db_path: str, user_id: int, income_id: int) -> b
                 int(user_id),
             )
         return row is not None
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed disable_budget_income user=%s income=%s", user_id, income_id)
         raise
 
 
+@db_operation()
 async def get_budget_notification_settings(db_path: str, user_id: int) -> dict[str, Any]:
     try:
         pool = await _get_pool(db_path)
@@ -2347,11 +2448,12 @@ async def get_budget_notification_settings(db_path: str, user_id: int) -> dict[s
             "goal_deadline_enabled": bool(row["goal_deadline_enabled"]) if row else True,
             "month_close_enabled": bool(row["month_close_enabled"]) if row else True,
         }
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed get_budget_notification_settings user=%s", user_id)
         raise
 
 
+@db_operation()
 async def set_budget_notification_settings(
     db_path: str,
     user_id: int,
@@ -2392,11 +2494,12 @@ async def set_budget_notification_settings(
             "goal_deadline_enabled": next_goal_deadline,
             "month_close_enabled": next_month_close,
         }
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed set_budget_notification_settings user=%s", user_id)
         raise
 
 
+@db_operation()
 async def reset_budget_data(db_path: str, user_id: int) -> dict[str, int]:
     def _affected_count(status: str) -> int:
         parts = (status or "").split()
@@ -2458,11 +2561,12 @@ async def reset_budget_data(db_path: str, user_id: int) -> dict[str, int]:
             "notification_settings": notification_settings,
             "history": history,
         }
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed reset_budget_data user=%s", user_id)
         raise
 
 
+@db_operation()
 async def add_budget_obligation(
     db_path: str,
     user_id: int,
@@ -2490,11 +2594,12 @@ async def add_budget_obligation(
                     json.dumps(debt_details or {}),
                 )
         return int(row["id"])
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed add_budget_obligation user=%s title=%s", user_id, title)
         raise
 
 
+@db_operation()
 async def list_budget_savings(db_path: str, user_id: int) -> list[dict[str, Any]]:
     try:
         pool = await _get_pool(db_path)
@@ -2517,11 +2622,12 @@ async def list_budget_savings(db_path: str, user_id: int) -> list[dict[str, Any]
             }
             for row in rows
         ]
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed list_budget_savings user=%s", user_id)
         raise
 
 
+@db_operation()
 async def add_budget_saving(db_path: str, user_id: int, kind: str, title: str, amount: float) -> int:
     try:
         pool = await _get_pool(db_path)
@@ -2541,11 +2647,12 @@ async def add_budget_saving(db_path: str, user_id: int, kind: str, title: str, a
                     float(amount),
                 )
         return int(row["id"])
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed add_budget_saving user=%s title=%s", user_id, title)
         raise
 
 
+@db_operation()
 async def update_budget_saving(
     db_path: str,
     user_id: int,
@@ -2584,11 +2691,12 @@ async def update_budget_saving(
                 int(user_id),
             )
         return upd is not None
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed update_budget_saving user=%s saving=%s", user_id, saving_id)
         raise
 
 
+@db_operation()
 async def change_budget_saving_amount(db_path: str, user_id: int, saving_id: int, delta: float) -> dict[str, Any] | None:
     try:
         pool = await _get_pool(db_path)
@@ -2628,11 +2736,12 @@ async def change_budget_saving_amount(db_path: str, user_id: int, saving_id: int
             "amount_before": current,
             "amount_after": next_amount,
         }
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed change_budget_saving_amount user=%s saving=%s delta=%s", user_id, saving_id, delta)
         raise
 
 
+@db_operation()
 async def disable_budget_saving(db_path: str, user_id: int, saving_id: int) -> bool:
     try:
         pool = await _get_pool(db_path)
@@ -2649,11 +2758,12 @@ async def disable_budget_saving(db_path: str, user_id: int, saving_id: int) -> b
                 int(user_id),
             )
         return row is not None
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed disable_budget_saving user=%s saving=%s", user_id, saving_id)
         raise
 
 
+@db_operation()
 async def add_budget_history_event(
     db_path: str,
     user_id: int,
@@ -2681,11 +2791,12 @@ async def add_budget_history_event(
                     json.dumps(payload or {}),
                 )
         return int(row["id"])
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed add_budget_history_event user=%s entity=%s action=%s", user_id, entity, action)
         raise
 
 
+@db_operation()
 async def list_budget_history(db_path: str, user_id: int, limit: int = 100) -> list[dict[str, Any]]:
     limit_val = max(1, min(int(limit), 500))
     try:
@@ -2721,11 +2832,12 @@ async def list_budget_history(db_path: str, user_id: int, limit: int = 100) -> l
                 }
             )
         return out
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed list_budget_history user=%s", user_id)
         raise
 
 
+@db_operation()
 async def list_budget_funds(db_path: str, user_id: int) -> list[dict[str, Any]]:
     now_key = _month_key_for(date.today())
     try:
@@ -2784,11 +2896,12 @@ async def list_budget_funds(db_path: str, user_id: int) -> list[dict[str, Any]]:
                 }
             )
         return out
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed list_budget_funds user=%s", user_id)
         raise
 
 
+@db_operation()
 async def create_budget_fund(
     db_path: str,
     user_id: int,
@@ -2822,11 +2935,12 @@ async def create_budget_fund(
                     priority,
                 )
         return int(row["id"])
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed create_budget_fund user=%s title=%s", user_id, title)
         raise
 
 
+@db_operation()
 async def update_budget_fund(
     db_path: str,
     user_id: int,
@@ -2893,11 +3007,12 @@ async def update_budget_fund(
                 int(user_id),
             )
         return result is not None
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed update_budget_fund user=%s fund=%s", user_id, fund_id)
         raise
 
 
+@db_operation()
 async def close_budget_month(
     db_path: str,
     user_id: int,
@@ -2981,11 +3096,12 @@ async def close_budget_month(
             "extra_income_total": float(total_extra),
             "funds_recalc": funds_recalc,
         }
-    except Exception:
+    except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed close_budget_month user=%s month=%s", user_id, month_key)
         raise
 
 
+@db_operation()
 async def get_budget_dashboard(db_path: str, user_id: int) -> dict[str, Any]:
     profile = await get_budget_profile(db_path, user_id)
     incomes = await list_budget_incomes(db_path, user_id)

@@ -3,7 +3,6 @@ import logging
 import asyncio
 import html
 import io
-from urllib.parse import urlparse, urlunparse
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta, date
@@ -118,6 +117,14 @@ from moex_iss import (
     search_securities,
 )
 from miniapp import attach_miniapp_routes
+from main_helpers import (
+    alert_query_prompt,
+    article_button_text,
+    normalize_miniapp_url,
+    parse_iso_utc,
+    ru_weekday_short,
+    top_movers_date_options,
+)
 
 load_dotenv()
 
@@ -198,28 +205,11 @@ DB_DSN = _env("DATABASE_URL") or _env("DB_DSN") or _env("DB_PATH")
 MINIAPP_URL = _env("MINIAPP_URL")
 
 
-def _normalize_miniapp_url(url: str | None) -> str | None:
-    if not url:
-        return None
-    value = url.strip()
-    if not value:
-        return None
-    parsed = urlparse(value)
-    if not parsed.scheme or not parsed.netloc:
-        return value.rstrip("/")
-    path = parsed.path or ""
-    if path in ("", "/"):
-        path = "/miniapp"
-    elif path == "/miniapp/":
-        path = "/miniapp"
-    return urlunparse(parsed._replace(path=path))
-
-
 if not MINIAPP_URL:
     ext = (_env("RENDER_EXTERNAL_URL") or "").rstrip("/")
     if ext:
         MINIAPP_URL = f"{ext}/miniapp"
-MINIAPP_URL = _normalize_miniapp_url(MINIAPP_URL)
+MINIAPP_URL = normalize_miniapp_url(MINIAPP_URL)
 
 class AddTradeFlow(StatesGroup):
     waiting_date_mode = State()
@@ -248,26 +238,13 @@ class PriceTargetAlertFlow(StatesGroup):
     waiting_range_confirm = State()
 
 
-def _ru_weekday_short(d: date) -> str:
-    names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-    return names[d.weekday()]
-
-
-def _top_movers_date_options(base_date: date) -> list[tuple[str, date]]:
-    return [
-        ("Текущая", base_date),
-        ("Вчера", base_date - timedelta(days=1)),
-        ("Позавчера", base_date - timedelta(days=2)),
-    ]
-
-
 async def make_top_movers_dates_kb(selected: date | None = None):
     base = datetime.now(MSK_TZ).date()
-    options = _top_movers_date_options(base)
+    options = top_movers_date_options(base)
     kb = InlineKeyboardBuilder()
     for label, d in options:
         mark = "• " if selected and selected == d else ""
-        text = f"{mark}{label} ({_ru_weekday_short(d)} {d.strftime('%d.%m')})"
+        text = f"{mark}{label} ({ru_weekday_short(d)} {d.strftime('%d.%m')})"
         kb.button(text=text[:64], callback_data=f"tmdate:{d.isoformat()}")
     kb.adjust(1)
     return kb.as_markup()
@@ -331,24 +308,13 @@ async def safe_edit_text(message: Message | None, text: str, reply_markup=None) 
             logger.exception("Failed fallback answer after edit_text network error")
 
 
-def _article_button_text(button_name: str, text_code: str) -> str:
-    raw = str(button_name or "").strip()
-    if raw:
-        return raw[:64]
-    raw = str(text_code or "").strip()
-    if not raw:
-        return "Статья"
-    label = raw.replace("_", " ").replace("-", " ").strip().title()
-    return label[:64]
-
-
 async def make_articles_kb():
     items = await list_active_app_texts(DB_DSN)
     kb = InlineKeyboardBuilder()
     for item in items:
         text_code = item["text_code"]
         button_name = item.get("button_name") or ""
-        kb.button(text=_article_button_text(button_name, text_code), callback_data=f"article:{text_code}")
+        kb.button(text=article_button_text(button_name, text_code), callback_data=f"article:{text_code}")
     kb.adjust(1)
     return kb.as_markup(), items
 
@@ -657,14 +623,6 @@ async def cmd_miniapp(message: Message):
     await message.answer("Открой интерфейс бота в Mini App:", reply_markup=kb)
 
 
-def _alert_query_prompt(asset_type: str) -> str:
-    if asset_type == ASSET_TYPE_METAL:
-        return "Введи тикер или название металла (например: GLDRUB_TOM):"
-    if asset_type == ASSET_TYPE_FIAT:
-        return "Введи валюту или тикер пары (например: доллар, USD000UTSTOM):"
-    return "Введи тикер, ISIN или название компании:"
-
-
 async def cmd_alert(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(PriceTargetAlertFlow.waiting_asset_type)
@@ -681,7 +639,7 @@ async def on_alert_asset_type_pick(call: CallbackQuery, state: FSMContext):
         return
     await state.update_data(asset_type=asset_type, cands=None, chosen=None, target_price=None)
     await state.set_state(PriceTargetAlertFlow.waiting_query)
-    await safe_edit_text(call.message, _alert_query_prompt(asset_type), reply_markup=await make_alert_search_back_kb())
+    await safe_edit_text(call.message, alert_query_prompt(asset_type), reply_markup=await make_alert_search_back_kb())
     await call.answer()
 
 
@@ -702,7 +660,7 @@ async def on_alert_back_to_query(call: CallbackQuery, state: FSMContext):
         return
     await state.update_data(cands=None, chosen=None, target_price=None)
     await state.set_state(PriceTargetAlertFlow.waiting_query)
-    await safe_edit_text(call.message, _alert_query_prompt(asset_type), reply_markup=await make_alert_search_back_kb())
+    await safe_edit_text(call.message, alert_query_prompt(asset_type), reply_markup=await make_alert_search_back_kb())
     await call.answer()
 
 
@@ -1402,25 +1360,12 @@ async def on_portfolio_map_share(call: CallbackQuery):
     )
     await call.answer()
 
-def _parse_iso_utc(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        if value.endswith("Z"):
-            value = value[:-1] + "+00:00"
-        dt = datetime.fromisoformat(value)
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except (TypeError, ValueError):
-        return None
-
 async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
     settings = await get_user_alert_settings(DB_DSN, user_id)
     positions = await get_user_positions(DB_DSN, user_id)
 
     if settings["periodic_enabled"] and positions:
-        last = _parse_iso_utc(settings.get("periodic_last_sent_at"))
+        last = parse_iso_utc(settings.get("periodic_last_sent_at"))
         due = (last is None) or ((now_utc - last).total_seconds() >= settings["periodic_interval_min"] * 60)
         if due:
             text, _, _ = await build_portfolio_report(user_id)
@@ -1582,7 +1527,7 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
             if not in_range:
                 continue
 
-            last_sent = _parse_iso_utc(alert.get("last_sent_at"))
+            last_sent = parse_iso_utc(alert.get("last_sent_at"))
             if last_sent is not None and (now_utc - last_sent).total_seconds() < TARGET_ALERT_ANTISPAM_MIN * 60:
                 continue
 

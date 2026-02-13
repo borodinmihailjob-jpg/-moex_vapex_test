@@ -2,10 +2,11 @@ import asyncio
 import calendar
 import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from aiohttp import web
@@ -80,6 +81,16 @@ _api_cache: dict[str, tuple[float, dict]] = {}
 _API_CACHE_TTL_SEC = int((os.getenv("MINIAPP_API_CACHE_TTL_SEC") or "900").strip() or "900")
 _API_CACHE_MAX_SIZE = int((os.getenv("MINIAPP_API_CACHE_MAX_SIZE") or "2048").strip() or "2048")
 _PRICE_LOAD_CONCURRENCY = int((os.getenv("MINIAPP_PRICE_LOAD_CONCURRENCY") or "12").strip() or "12")
+_INITDATA_MAX_AGE_SEC = int((os.getenv("MINIAPP_INITDATA_MAX_AGE_SEC") or "86400").strip() or "86400")
+MSK_TZ = ZoneInfo("Europe/Moscow")
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(tz=timezone.utc).isoformat()
+
+
+def _today_msk() -> date:
+    return datetime.now(MSK_TZ).date()
 
 
 def _cache_get(key: str) -> dict | None:
@@ -133,7 +144,11 @@ async def _auth_user_id(request: web.Request, bot_token: str) -> int:
         raise web.HTTPUnauthorized(text="Missing initData")
 
     try:
-        user = parse_and_validate_init_data(bot_token, init_data)
+        user = parse_and_validate_init_data(
+            bot_token,
+            init_data,
+            max_age_seconds=_INITDATA_MAX_AGE_SEC,
+        )
     except MiniAppAuthError as exc:
         raise web.HTTPUnauthorized(text=f"Invalid initData: {exc}") from exc
 
@@ -405,7 +420,7 @@ async def api_portfolio(request: web.Request) -> web.Response:
             "summary": {
                 "total_value": total_value,
                 "pnl_pct": total_pnl_pct,
-                "as_of": datetime.utcnow().isoformat(),
+                "as_of": _utc_now_iso(),
             },
             "positions": sorted(out_positions, key=lambda x: float(x["value"]), reverse=True),
         }
@@ -451,7 +466,11 @@ async def api_trade_post(request: web.Request) -> web.Response:
 
     trade_date = str(payload.get("trade_date") or "").strip()
     if not trade_date:
-        trade_date = datetime.now().strftime("%d.%m.%Y")
+        trade_date = _today_msk().strftime("%d.%m.%Y")
+    try:
+        datetime.strptime(trade_date, "%d.%m.%Y")
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text="trade_date must be DD.MM.YYYY") from exc
 
     qty = safe_float(payload.get("qty"), 0.0)
     price = safe_float(payload.get("price"), 0.0)
@@ -528,7 +547,7 @@ async def api_asset_lookup_post(request: web.Request) -> web.Response:
     if asset_type not in {ASSET_TYPE_STOCK, ASSET_TYPE_METAL, ASSET_TYPE_FIAT}:
         raise web.HTTPBadRequest(text="invalid asset_type")
 
-    now = datetime.now().date()
+    now = _today_msk()
     periods = [("week", 7), ("month", 30), ("half_year", 182), ("year", 365)]
 
     current = None
@@ -596,7 +615,7 @@ async def api_top_movers(request: web.Request) -> web.Response:
         except ValueError as exc:
             raise web.HTTPBadRequest(text="invalid date, use YYYY-MM-DD") from exc
     else:
-        day = datetime.now().date()
+        day = _today_msk()
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -623,7 +642,7 @@ async def api_usd_rub(request: web.Request) -> web.Response:
         if cached is not None:
             return _json_ok({**cached, "stale": True})
         rate = None
-    payload = {"secid": "USDRUB_TOM", "rate": rate, "as_of": datetime.utcnow().isoformat()}
+    payload = {"secid": "USDRUB_TOM", "rate": rate, "as_of": _utc_now_iso()}
     if rate is not None:
         _cache_set("usd_rub", payload)
     return _json_ok(payload)
@@ -658,7 +677,7 @@ async def api_price(request: web.Request) -> web.Response:
         if cached is not None:
             return _json_ok({**cached, "stale": True})
         price = None
-    payload = {"secid": secid, "price": price, "as_of": datetime.utcnow().isoformat()}
+    payload = {"secid": secid, "price": price, "as_of": _utc_now_iso()}
     if price is not None:
         _cache_set(f"price:{asset_type}:{secid}:{boardid or ''}", payload)
     return _json_ok(payload)
@@ -1324,7 +1343,7 @@ def _calc_fund_strategy(
     obligations_total: float,
     expenses_base: float,
 ) -> dict:
-    now = date.today()
+    now = _today_msk()
     target_dt = datetime.strptime(target_month + "-01", "%Y-%m-%d").date()
     months_left = max(1, (target_dt.year - now.year) * 12 + (target_dt.month - now.month))
     need = max(0.0, target_amount - already_saved)
@@ -1597,7 +1616,7 @@ async def api_budget_month_close(request: web.Request) -> web.Response:
     user_id = await _auth_user_id(request, bot_token)
     payload = await _read_json(request)
 
-    month_raw = payload.get("month_key") or (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    month_raw = payload.get("month_key") or (_today_msk().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
     try:
         month_key = _parse_month_key(str(month_raw))
     except ValueError as exc:
