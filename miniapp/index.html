@@ -287,10 +287,58 @@
           </div>
         </article>
 
+        <article id="budgetFundPlannerCard" class="card" style="display:none">
+          <h2>Запланировать трату</h2>
+          <p class="hint">Накопим к нужной дате без стресса.</p>
+          <div class="form-grid two">
+            <label>На что?
+              <input id="fundTitleInput" type="text" placeholder="Например: отпуск" />
+            </label>
+            <label>Когда? (YYYY-MM)
+              <input id="fundTargetMonthInput" type="text" placeholder="Например: 2026-12" />
+            </label>
+          </div>
+          <div class="form-grid three">
+            <label>Сумма, ₽
+              <input id="fundTargetAmountInput" type="text" placeholder="Например: 5000000" />
+            </label>
+            <label>Уже накоплено, ₽
+              <input id="fundAlreadySavedInput" type="text" placeholder="0" />
+            </label>
+            <label>Приоритет
+              <select id="fundPriorityInput">
+                <option value="high">Высокий</option>
+                <option value="medium" selected>Средний</option>
+                <option value="low">Низкий</option>
+              </select>
+            </label>
+          </div>
+          <div class="wizard-actions">
+            <button id="fundCalcBtn" class="btn primary">Посчитать стратегию</button>
+            <button id="fundSaveBtn" class="btn ghost">Сохранить фонд</button>
+            <button id="fundCancelBtn" class="btn ghost">Отмена</button>
+          </div>
+          <div id="fundStrategyResult" class="plain"></div>
+        </article>
+
         <article id="budgetMonthCloseCard" class="card" style="display:none">
           <h2>Закрыть прошлый месяц</h2>
           <p class="hint">Добавьте фактические траты и доп. доходы — прогноз целей станет точнее.</p>
           <button id="closeMonthOpenBtn" class="btn primary">Закрыть месяц</button>
+          <div id="monthCloseForm" style="display:none">
+            <div class="form-grid two">
+              <label>Факт расходов, ₽
+                <input id="monthCloseActualInput" type="text" placeholder="Например: 105000" />
+              </label>
+              <label>Доп. доходы, ₽
+                <input id="monthCloseExtraInput" type="text" placeholder="Например: 5000" />
+              </label>
+            </div>
+            <div class="wizard-actions">
+              <button id="monthCloseSubmitBtn" class="btn primary">Закрыть сейчас</button>
+              <button id="monthCloseCancelBtn" class="btn ghost">Отмена</button>
+            </div>
+          </div>
           <div id="monthCloseBody" class="plain" style="display:none"></div>
         </article>
       </section>

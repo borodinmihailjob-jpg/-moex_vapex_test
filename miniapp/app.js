@@ -126,7 +126,22 @@ const el = {
   budgetFundsList: document.getElementById("budgetFundsList"),
   planExpenseBtn: document.getElementById("planExpenseBtn"),
   saveTargetBtn: document.getElementById("saveTargetBtn"),
+  budgetFundPlannerCard: document.getElementById("budgetFundPlannerCard"),
+  fundTitleInput: document.getElementById("fundTitleInput"),
+  fundTargetMonthInput: document.getElementById("fundTargetMonthInput"),
+  fundTargetAmountInput: document.getElementById("fundTargetAmountInput"),
+  fundAlreadySavedInput: document.getElementById("fundAlreadySavedInput"),
+  fundPriorityInput: document.getElementById("fundPriorityInput"),
+  fundCalcBtn: document.getElementById("fundCalcBtn"),
+  fundSaveBtn: document.getElementById("fundSaveBtn"),
+  fundCancelBtn: document.getElementById("fundCancelBtn"),
+  fundStrategyResult: document.getElementById("fundStrategyResult"),
   closeMonthOpenBtn: document.getElementById("closeMonthOpenBtn"),
+  monthCloseForm: document.getElementById("monthCloseForm"),
+  monthCloseActualInput: document.getElementById("monthCloseActualInput"),
+  monthCloseExtraInput: document.getElementById("monthCloseExtraInput"),
+  monthCloseSubmitBtn: document.getElementById("monthCloseSubmitBtn"),
+  monthCloseCancelBtn: document.getElementById("monthCloseCancelBtn"),
   monthCloseBody: document.getElementById("monthCloseBody"),
 };
 
@@ -683,6 +698,10 @@ function openBudgetWizard(onboardingMode) {
   state.budget.step = 1;
   state.budget.obligations = [];
   state.budget.savings = [];
+  state.budget.selectedObligationKind = "rent";
+  state.budget.selectedObligationTitle = "Аренда";
+  state.budget.selectedSavingKind = "cash";
+  state.budget.selectedSavingTitle = "Подушка (наличные/карта)";
   el.budgetWelcomeCard.style.display = "none";
   el.budgetWizardCard.style.display = "";
   el.budgetResultCard.style.display = "none";
@@ -701,41 +720,60 @@ function renderBudgetWizardStep() {
 
   if (step === 1) {
     const total = state.budget.obligations.reduce((acc, x) => acc + Number(x.amount_monthly || 0), 0);
+    const selectedKind = state.budget.selectedObligationKind || "rent";
+    const selectedTitle = state.budget.selectedObligationTitle || "";
     el.budgetWizardTitle.textContent = "Обязательные платежи";
     el.budgetWizardSubtitle.textContent = "Добавьте то, что вы платите каждый месяц в первую очередь.";
     el.budgetWizardBody.innerHTML = `
       <div class="chips">
-        <button class="chip" data-add-obligation="rent">Аренда</button>
-        <button class="chip" data-add-obligation="mortgage">Ипотека</button>
-        <button class="chip" data-add-obligation="loan">Кредит</button>
-        <button class="chip" data-add-obligation="installment">Рассрочка</button>
-        <button class="chip" data-add-obligation="alimony">Алименты/обязательные переводы</button>
-        <button class="chip" data-add-obligation="other">Другое</button>
+        <button class="chip ${selectedKind === "rent" ? "active" : ""}" data-obligation-kind="rent" data-obligation-label="Аренда">Аренда</button>
+        <button class="chip ${selectedKind === "mortgage" ? "active" : ""}" data-obligation-kind="mortgage" data-obligation-label="Ипотека">Ипотека</button>
+        <button class="chip ${selectedKind === "loan" ? "active" : ""}" data-obligation-kind="loan" data-obligation-label="Кредит">Кредит</button>
+        <button class="chip ${selectedKind === "installment" ? "active" : ""}" data-obligation-kind="installment" data-obligation-label="Рассрочка">Рассрочка</button>
+        <button class="chip ${selectedKind === "alimony" ? "active" : ""}" data-obligation-kind="alimony" data-obligation-label="Алименты/обязательные переводы">Алименты/обязательные переводы</button>
+        <button class="chip ${selectedKind === "other" ? "active" : ""}" data-obligation-kind="other" data-obligation-label="Другое">Другое</button>
       </div>
+      <div class="form-grid two">
+        <label>Название
+          <input id="wizardObligationTitle" type="text" placeholder="Например: аренда квартиры" value="${selectedTitle}" />
+        </label>
+        <label>Сумма в месяц, ₽
+          <input id="wizardObligationAmount" type="text" placeholder="Например: 45000" />
+        </label>
+      </div>
+      <button id="wizardObligationAddBtn" class="btn primary">Сохранить платёж</button>
       <div id="wizardObligationsList" class="plain">${state.budget.obligations.length ? state.budget.obligations.map((x) => `• ${x.title}: ${money(x.amount_monthly)}`).join("\n") : "Пока ничего не добавили. Нажмите на пункт выше, чтобы добавить платёж."}</div>
       <p class="hint">Сейчас обязательные платежи: <strong>${money(total)}/мес</strong></p>
     `;
-    el.budgetWizardBody.querySelectorAll("[data-add-obligation]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const title = window.prompt("Название", btn.textContent.trim());
-        if (!title) return;
-        const raw = window.prompt("Сумма в месяц, ₽", "45000");
-        if (!raw) return;
-        try {
-          const amount = parseMoneyInput(raw);
-          await api("/api/miniapp/budget/obligations", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title, kind: btn.dataset.addObligation, amount_monthly: amount }),
-          });
-          const listData = await api("/api/miniapp/budget/obligations");
-          state.budget.obligations = listData.items || [];
-          toast("Платёж добавлен ✅");
-          renderBudgetWizardStep();
-        } catch (e) {
-          toast(e?.message || "Ошибка добавления");
-        }
+    el.budgetWizardBody.querySelectorAll("[data-obligation-kind]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.budget.selectedObligationKind = btn.dataset.obligationKind;
+        state.budget.selectedObligationTitle = btn.dataset.obligationLabel || btn.textContent.trim();
+        renderBudgetWizardStep();
       });
+    });
+    el.budgetWizardBody.querySelector("#wizardObligationAddBtn")?.addEventListener("click", async () => {
+      const title = (document.getElementById("wizardObligationTitle")?.value || "").trim();
+      const raw = (document.getElementById("wizardObligationAmount")?.value || "").trim();
+      if (!title) {
+        toast("Введите название платежа");
+        return;
+      }
+      try {
+        const amount = parseMoneyInput(raw);
+        await api("/api/miniapp/budget/obligations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title, kind: selectedKind, amount_monthly: amount }),
+        });
+        const listData = await api("/api/miniapp/budget/obligations");
+        state.budget.obligations = listData.items || [];
+        toast("Платёж добавлен ✅");
+        state.budget.selectedObligationTitle = "";
+        renderBudgetWizardStep();
+      } catch (e) {
+        toast(e?.message || "Ошибка добавления");
+      }
     });
     return;
   }
@@ -766,39 +804,58 @@ function renderBudgetWizardStep() {
 
   if (step === 3) {
     const total = state.budget.savings.reduce((acc, x) => acc + Number(x.amount || 0), 0);
+    const selectedSavingKind = state.budget.selectedSavingKind || "cash";
+    const selectedSavingTitle = state.budget.selectedSavingTitle || "";
     el.budgetWizardTitle.textContent = "Накопления";
     el.budgetWizardSubtitle.textContent = "Это нужно только для оценки “запаса прочности”. Можно пропустить.";
     el.budgetWizardBody.innerHTML = `
       <div class="chips">
-        <button class="chip" data-add-saving="cash">Подушка (наличные/карта)</button>
-        <button class="chip" data-add-saving="deposit">Вклад</button>
-        <button class="chip" data-add-saving="investments">Инвестиции (акции/ОФЗ)</button>
-        <button class="chip" data-add-saving="crypto">Крипта</button>
-        <button class="chip" data-add-saving="other">Другое</button>
+        <button class="chip ${selectedSavingKind === "cash" ? "active" : ""}" data-saving-kind="cash" data-saving-label="Подушка (наличные/карта)">Подушка (наличные/карта)</button>
+        <button class="chip ${selectedSavingKind === "deposit" ? "active" : ""}" data-saving-kind="deposit" data-saving-label="Вклад">Вклад</button>
+        <button class="chip ${selectedSavingKind === "investments" ? "active" : ""}" data-saving-kind="investments" data-saving-label="Инвестиции (акции/ОФЗ)">Инвестиции (акции/ОФЗ)</button>
+        <button class="chip ${selectedSavingKind === "crypto" ? "active" : ""}" data-saving-kind="crypto" data-saving-label="Крипта">Крипта</button>
+        <button class="chip ${selectedSavingKind === "other" ? "active" : ""}" data-saving-kind="other" data-saving-label="Другое">Другое</button>
       </div>
+      <div class="form-grid two">
+        <label>Название
+          <input id="wizardSavingTitle" type="text" placeholder="Например: вклад" value="${selectedSavingTitle}" />
+        </label>
+        <label>Сумма, ₽
+          <input id="wizardSavingAmount" type="text" placeholder="Например: 100000" />
+        </label>
+      </div>
+      <button id="wizardSavingAddBtn" class="btn primary">Добавить ещё</button>
       <div class="plain">${state.budget.savings.length ? state.budget.savings.map((x) => `• ${x.title}: ${money(x.amount)}`).join("\n") : "Нет накоплений"}</div>
       <p class="hint">Всего накоплений: ${money(total)}</p>
     `;
-    el.budgetWizardBody.querySelectorAll("[data-add-saving]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const title = window.prompt("Название", btn.textContent.trim());
-        if (!title) return;
-        const raw = window.prompt("Сумма, ₽", "100000");
-        if (!raw) return;
-        try {
-          const amount = parseMoneyInput(raw);
-          await api("/api/miniapp/budget/savings", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ kind: btn.dataset.addSaving, title, amount }),
-          });
-          const listData = await api("/api/miniapp/budget/savings");
-          state.budget.savings = listData.items || [];
-          renderBudgetWizardStep();
-        } catch (e) {
-          toast(e?.message || "Ошибка сохранения");
-        }
+    el.budgetWizardBody.querySelectorAll("[data-saving-kind]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.budget.selectedSavingKind = btn.dataset.savingKind;
+        state.budget.selectedSavingTitle = btn.dataset.savingLabel || btn.textContent.trim();
+        renderBudgetWizardStep();
       });
+    });
+    el.budgetWizardBody.querySelector("#wizardSavingAddBtn")?.addEventListener("click", async () => {
+      const title = (document.getElementById("wizardSavingTitle")?.value || "").trim();
+      const raw = (document.getElementById("wizardSavingAmount")?.value || "").trim();
+      if (!title) {
+        toast("Введите название накопления");
+        return;
+      }
+      try {
+        const amount = parseMoneyInput(raw);
+        await api("/api/miniapp/budget/savings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kind: selectedSavingKind, title, amount }),
+        });
+        const listData = await api("/api/miniapp/budget/savings");
+        state.budget.savings = listData.items || [];
+        state.budget.selectedSavingTitle = "";
+        renderBudgetWizardStep();
+      } catch (e) {
+        toast(e?.message || "Ошибка сохранения");
+      }
     });
     return;
   }
@@ -869,59 +926,91 @@ async function completeBudgetOnboarding() {
 }
 
 async function openFundPlanFlow() {
-  const title = window.prompt("На что?", "Отпуск");
-  if (!title) return;
-  const whenRaw = window.prompt("Когда? Формат YYYY-MM", "2026-12");
-  if (!whenRaw) return;
-  const amountRaw = window.prompt("Сумма, ₽", "500000");
-  if (!amountRaw) return;
-  const alreadyRaw = window.prompt("Уже накоплено, ₽", "0") || "0";
-  const priority = (window.prompt("Приоритет: high / medium / low", "medium") || "medium").toLowerCase();
-  try {
-    const target_amount = parseMoneyInput(amountRaw);
-    const already_saved = Number(alreadyRaw || 0);
-    const strategy = await api("/api/miniapp/budget/funds/strategy", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        title,
-        target_month: whenRaw,
-        target_amount,
-        already_saved,
-        priority,
-      }),
-    });
-    const ok = strategy.is_feasible
-      ? window.confirm(`✅ План реалистичен.\nРекомендуемый взнос: ${money(strategy.required_per_month)}/мес.\nСохранить фонд?`)
-      : window.confirm(`⚠️ Не хватает ${money(strategy.gap)}/мес.\nСохранить как есть?`);
-    if (!ok) return;
-    await api("/api/miniapp/budget/funds", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        title,
-        target_month: whenRaw,
-        target_amount,
-        already_saved,
-        priority,
-      }),
-    });
-    toast("Фонд сохранён");
-    await loadBudgetDashboard();
-  } catch (e) {
-    toast(e?.message || "Ошибка расчёта фонда");
-  }
+  el.budgetFundPlannerCard.style.display = "";
+  el.fundTitleInput.value = el.fundTitleInput.value || "Отпуск";
+  el.fundTargetMonthInput.value = el.fundTargetMonthInput.value || "2026-12";
+  el.fundTargetAmountInput.value = el.fundTargetAmountInput.value || "";
+  el.fundAlreadySavedInput.value = el.fundAlreadySavedInput.value || "0";
+  el.fundStrategyResult.textContent = "";
+  el.fundTitleInput.focus();
 }
 
 async function openMonthCloseFlow() {
-  const actualRaw = window.prompt("Факт расходов, ₽", "105000");
-  if (!actualRaw) return;
-  const extraRaw = window.prompt("Доп. доходы за месяц, ₽ (можно 0)", "0") || "0";
+  el.monthCloseForm.style.display = "";
+  el.monthCloseBody.style.display = "none";
+  el.monthCloseActualInput.value = el.monthCloseActualInput.value || "";
+  el.monthCloseExtraInput.value = el.monthCloseExtraInput.value || "0";
+  el.monthCloseActualInput.focus();
+}
+
+async function calcFundStrategyFromForm() {
+  const title = (el.fundTitleInput.value || "").trim();
+  const whenRaw = (el.fundTargetMonthInput.value || "").trim();
+  const amountRaw = (el.fundTargetAmountInput.value || "").trim();
+  const alreadyRaw = (el.fundAlreadySavedInput.value || "0").trim();
+  const priority = (el.fundPriorityInput.value || "medium").toLowerCase();
+  if (!title) throw new Error("Заполните поле «На что?»");
+  if (!whenRaw) throw new Error("Заполните поле «Когда?»");
+  const target_amount = parseMoneyInput(amountRaw);
+  const already_saved = Number(alreadyRaw || 0);
+  if (!Number.isFinite(already_saved) || already_saved < 0) {
+    throw new Error("Уже накоплено должно быть числом от 0");
+  }
+  const strategy = await api("/api/miniapp/budget/funds/strategy", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title,
+      target_month: whenRaw,
+      target_amount,
+      already_saved,
+      priority,
+    }),
+  });
+  state.budget.strategyDraft = { title, whenRaw, target_amount, already_saved, priority, strategy };
+  el.fundStrategyResult.textContent = [
+    "Стратегия накопления",
+    `Сейчас свободно: ${money(strategy.budget_now.free)}/мес`,
+    `Нужно накопить: ${money(strategy.need)}`,
+    `Осталось: ${strategy.months_left} мес`,
+    `Рекомендуемый взнос: ${money(strategy.required_per_month)}/мес`,
+    strategy.is_feasible ? "✅ План реалистичен" : `⚠️ Не хватает ${money(strategy.gap)}/мес`,
+  ].join("\n");
+}
+
+async function saveFundFromForm() {
+  if (!state.budget.strategyDraft) {
+    await calcFundStrategyFromForm();
+  }
+  const draft = state.budget.strategyDraft;
+  await api("/api/miniapp/budget/funds", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: draft.title,
+      target_month: draft.whenRaw,
+      target_amount: draft.target_amount,
+      already_saved: draft.already_saved,
+      priority: draft.priority,
+    }),
+  });
+  el.budgetFundPlannerCard.style.display = "none";
+  el.fundStrategyResult.textContent = "";
+  state.budget.strategyDraft = null;
+  toast("Фонд сохранён");
+  await loadBudgetDashboard();
+}
+
+async function submitMonthCloseFromForm() {
   try {
     const dashboard = await api("/api/miniapp/budget/dashboard");
     const planned = Number(dashboard.expenses_base || 0);
-    const actual = parseMoneyInput(actualRaw);
-    const extra = Number(extraRaw || 0);
+    const actual = parseMoneyInput(el.monthCloseActualInput.value || "");
+    const extraRaw = (el.monthCloseExtraInput.value || "0").trim();
+    const extra = extraRaw ? Number(extraRaw.replace(/\s+/g, "").replace(",", ".")) : 0;
+    if (!Number.isFinite(extra) || extra < 0) {
+      throw new Error("Доп. доходы должны быть числом от 0");
+    }
     const extraItems = extra > 0 ? [{ type: "Другое", amount: extra }] : [];
     const res = await api("/api/miniapp/budget/month-close", {
       method: "POST",
@@ -933,6 +1022,7 @@ async function openMonthCloseFlow() {
         extra_income_items: extraItems,
       }),
     });
+    el.monthCloseForm.style.display = "none";
     el.monthCloseBody.style.display = "";
     const delta = Number(res.delta_expenses || 0);
     el.monthCloseBody.textContent = [
@@ -1091,6 +1181,29 @@ function setupEvents() {
   el.planExpenseBtn?.addEventListener("click", openFundPlanFlow);
   el.saveTargetBtn?.addEventListener("click", openFundPlanFlow);
   el.closeMonthOpenBtn?.addEventListener("click", openMonthCloseFlow);
+  el.fundCalcBtn?.addEventListener("click", async () => {
+    try {
+      await calcFundStrategyFromForm();
+    } catch (e) {
+      toast(e?.message || "Ошибка расчёта");
+    }
+  });
+  el.fundSaveBtn?.addEventListener("click", async () => {
+    try {
+      await saveFundFromForm();
+    } catch (e) {
+      toast(e?.message || "Не удалось сохранить фонд");
+    }
+  });
+  el.fundCancelBtn?.addEventListener("click", () => {
+    el.budgetFundPlannerCard.style.display = "none";
+    state.budget.strategyDraft = null;
+    el.fundStrategyResult.textContent = "";
+  });
+  el.monthCloseSubmitBtn?.addEventListener("click", submitMonthCloseFromForm);
+  el.monthCloseCancelBtn?.addEventListener("click", () => {
+    el.monthCloseForm.style.display = "none";
+  });
 
   state.searchControllers.trade = bindSearch({
     inputEl: el.tradeSearch,
