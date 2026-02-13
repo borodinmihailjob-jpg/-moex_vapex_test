@@ -121,8 +121,12 @@ async def _load_prices_for_positions(positions: list[dict]) -> dict[int, float |
                 else:
                     px = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
                 return iid, px
-            except Exception:
-                logger.exception("MiniApp price load failed secid=%s", secid)
+            except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+                logger.warning(
+                    "MiniApp price load failed secid=%s error=%s",
+                    secid,
+                    exc.__class__.__name__,
+                )
                 return iid, None
 
         rows = await asyncio.gather(*(one(p) for p in positions))
@@ -353,22 +357,36 @@ async def api_asset_lookup_post(request: web.Request) -> web.Response:
     now = datetime.now().date()
     periods = [("week", 7), ("month", 30), ("half_year", 182), ("year", 365)]
 
+    current = None
+    dynamics: list[dict] = []
     async with aiohttp.ClientSession() as session:
-        if asset_type == ASSET_TYPE_FIAT:
-            current = await get_last_price_fiat(session, secid, boardid or "CETS")
-        else:
-            current = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
+        try:
+            if asset_type == ASSET_TYPE_FIAT:
+                current = await get_last_price_fiat(session, secid, boardid or "CETS")
+            else:
+                current = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
+        except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+            logger.warning("MiniApp asset lookup price failed secid=%s error=%s", secid, exc.__class__.__name__)
 
-        dynamics: list[dict] = []
         for key, days in periods:
-            history = await get_history_prices_by_asset_type(
-                session,
-                secid=secid,
-                boardid=boardid,
-                asset_type=asset_type,
-                from_date=now - timedelta(days=days),
-                till_date=now,
-            )
+            try:
+                history = await get_history_prices_by_asset_type(
+                    session,
+                    secid=secid,
+                    boardid=boardid,
+                    asset_type=asset_type,
+                    from_date=now - timedelta(days=days),
+                    till_date=now,
+                )
+            except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+                logger.warning(
+                    "MiniApp asset lookup history failed secid=%s period=%s error=%s",
+                    secid,
+                    key,
+                    exc.__class__.__name__,
+                )
+                dynamics.append({"period": key, "pct": None, "delta": None})
+                continue
             if not history:
                 dynamics.append({"period": key, "pct": None, "delta": None})
                 continue
@@ -406,8 +424,12 @@ async def api_top_movers(request: web.Request) -> web.Response:
     else:
         day = datetime.now().date()
 
-    async with aiohttp.ClientSession() as session:
-        movers = await get_stock_movers_by_date(session, day)
+    try:
+        async with aiohttp.ClientSession() as session:
+            movers = await get_stock_movers_by_date(session, day)
+    except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+        logger.warning("MiniApp top movers failed date=%s error=%s", day.isoformat(), exc.__class__.__name__)
+        movers = []
 
     movers_sorted = sorted(movers, key=lambda x: _safe_float(x.get("pct"), -10**9), reverse=True)
     top = movers_sorted[:10]
@@ -418,8 +440,12 @@ async def api_top_movers(request: web.Request) -> web.Response:
 async def api_usd_rub(request: web.Request) -> web.Response:
     bot_token = request.app["bot_token"]
     _ = await _auth_user_id(request, bot_token)
-    async with aiohttp.ClientSession() as session:
-        rate = await get_usd_rub_rate(session)
+    try:
+        async with aiohttp.ClientSession() as session:
+            rate = await get_usd_rub_rate(session)
+    except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+        logger.warning("MiniApp USD/RUB failed error=%s", exc.__class__.__name__)
+        rate = None
     return _json_ok({"secid": "USDRUB_TOM", "rate": rate, "as_of": datetime.utcnow().isoformat()})
 
 
@@ -434,11 +460,15 @@ async def api_price(request: web.Request) -> web.Response:
     asset_type = str(payload.get("asset_type") or ASSET_TYPE_STOCK).strip().lower()
     if asset_type not in {ASSET_TYPE_STOCK, ASSET_TYPE_METAL, ASSET_TYPE_FIAT}:
         raise web.HTTPBadRequest(text="invalid asset_type")
-    async with aiohttp.ClientSession() as session:
-        if asset_type == ASSET_TYPE_FIAT:
-            price = await get_last_price_fiat(session, secid, boardid or "CETS")
-        else:
-            price = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
+    try:
+        async with aiohttp.ClientSession() as session:
+            if asset_type == ASSET_TYPE_FIAT:
+                price = await get_last_price_fiat(session, secid, boardid or "CETS")
+            else:
+                price = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
+    except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+        logger.warning("MiniApp price endpoint failed secid=%s error=%s", secid, exc.__class__.__name__)
+        price = None
     return _json_ok({"secid": secid, "price": price, "as_of": datetime.utcnow().isoformat()})
 
 

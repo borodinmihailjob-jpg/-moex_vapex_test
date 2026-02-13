@@ -1992,8 +1992,13 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
                     current = await get_last_price_fiat(session, secid, boardid or "CETS")
                 else:
                     current = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
-            except Exception:
-                logger.exception("Failed to load target alert price user=%s secid=%s", user_id, secid)
+            except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+                logger.warning(
+                    "Failed to load target alert price user=%s secid=%s error=%s",
+                    user_id,
+                    secid,
+                    exc.__class__.__name__,
+                )
                 continue
             if current is None:
                 continue
