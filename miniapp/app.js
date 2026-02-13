@@ -130,6 +130,7 @@ const el = {
   budgetResultBody: document.getElementById("budgetResultBody"),
   budgetResultActions: document.getElementById("budgetResultActions"),
   budgetCurrentMonth: document.getElementById("budgetCurrentMonth"),
+  budgetGoalsOverview: document.getElementById("budgetGoalsOverview"),
   editBudgetBtn: document.getElementById("editBudgetBtn"),
   budgetIncomeTypeInput: document.getElementById("budgetIncomeTypeInput"),
   budgetPaydayInput: document.getElementById("budgetPaydayInput"),
@@ -406,21 +407,6 @@ function setBudgetTab(tab) {
     if (!node) return;
     node.style.display = visible ? "" : "none";
   };
-  const onboardingIncomplete = !state.budget.onboardingCompleted;
-  if (onboardingIncomplete) {
-    show(el.budgetWelcomeCard, true);
-    show(el.budgetWizardCard, false);
-    show(el.budgetResultCard, false);
-    show(el.budgetDashboardCard, false);
-    show(el.budgetIncomeCard, false);
-    show(el.budgetExpensesCard, false);
-    show(el.budgetFundsCard, false);
-    show(el.budgetFundPlannerCard, false);
-    show(el.budgetMonthCloseCard, false);
-    show(el.budgetLoanCalcCard, false);
-    return;
-  }
-
   show(el.budgetWelcomeCard, false);
   show(el.budgetWizardCard, false);
   show(el.budgetResultCard, false);
@@ -716,26 +702,54 @@ async function loadBudgetDashboard() {
   state.budget.profile = data.profile || {};
   state.budget.onboardingCompleted = !!data.profile?.onboarding_completed;
 
-  const onboardingCompleted = state.budget.onboardingCompleted;
   el.budgetWizardCard.style.display = "none";
   el.budgetResultCard.style.display = "none";
+  const income = Number(data.income || 0);
+  const obligations = Number(data.obligations_total || 0);
+  const living = Number(data.expenses_base || 0);
+  const plannedExpenses = obligations + living;
+  const free = income - plannedExpenses;
 
-  if (onboardingCompleted) {
-    const free = Number(data.free || 0);
-    el.budgetCurrentMonth.textContent = [
-      `${monthLabel(data.month)}`,
-      `Доход: ${money(data.income)}`,
-      `Обязательные: ${money(data.obligations_total)}`,
-      `На жизнь (план): ${money(data.expenses_base)}`,
-      `${free >= 0 ? "Свободно" : "Дефицит"}: ${money(Math.abs(free))}/мес`,
-    ].join("\n");
-    renderBudgetFunds(data.funds || []);
-    el.budgetIncomeTypeInput.value = data.profile?.income_type || "fixed";
-    el.budgetPaydayInput.value = data.profile?.payday_day || "";
-    el.budgetIncomeInput.value = data.income ? String(Math.round(Number(data.income))) : "";
-    el.budgetExpensesInput.value = data.expenses_base ? String(Math.round(Number(data.expenses_base))) : "";
-  }
+  el.budgetCurrentMonth.textContent = [
+    `${monthLabel(data.month)}`,
+    `План доходов: ${money(income)}`,
+    `План расходов: ${money(plannedExpenses)}`,
+    `Обязательные: ${money(obligations)} • На жизнь: ${money(living)}`,
+    `${free >= 0 ? "Свободно" : "Дефицит"}: ${money(Math.abs(free))}/мес`,
+  ].join("\n");
+  renderBudgetOverviewGoals(data.funds || []);
+  renderBudgetFunds(data.funds || []);
+  el.budgetIncomeTypeInput.value = data.profile?.income_type || "fixed";
+  el.budgetPaydayInput.value = data.profile?.payday_day || "";
+  el.budgetIncomeInput.value = income ? String(Math.round(income)) : "";
+  el.budgetExpensesInput.value = living ? String(Math.round(living)) : "";
   setBudgetTab(state.budget.activeTab || "overview");
+}
+
+function renderBudgetOverviewGoals(funds) {
+  if (!el.budgetGoalsOverview) return;
+  el.budgetGoalsOverview.innerHTML = "";
+  if (!funds.length) {
+    renderEmpty(el.budgetGoalsOverview, "Пока нет целей. Добавьте первую цель в разделе «Фонды».");
+    return;
+  }
+  funds.forEach((fund) => {
+    const target = Number(fund.target_amount || 0);
+    const saved = Number(fund.already_saved || 0);
+    const pctRaw = target > 0 ? (saved / target) * 100 : 0;
+    const pctVal = Math.max(0, Math.min(100, pctRaw));
+    const item = document.createElement("div");
+    item.className = "item";
+    item.innerHTML = `
+      <div class="left">
+        <div class="name">${fund.title}</div>
+        <div class="sub">${money(saved)} из ${money(target)} • осталось ${fund.months_left} мес</div>
+        <div class="progress-line"><div class="progress-fill" style="width:${pctVal.toFixed(1)}%"></div></div>
+      </div>
+      <div class="right"><div>${pctVal.toFixed(0)}%</div></div>
+    `;
+    el.budgetGoalsOverview.appendChild(item);
+  });
 }
 
 function renderBudgetFunds(rows) {
