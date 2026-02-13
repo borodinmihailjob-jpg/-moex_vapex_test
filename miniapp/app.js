@@ -124,6 +124,7 @@ const el = {
   budgetFundsCard: document.getElementById("budgetFundsCard"),
   budgetMonthCloseCard: document.getElementById("budgetMonthCloseCard"),
   budgetLoanCalcCard: document.getElementById("budgetLoanCalcCard"),
+  budgetSettingsCard: document.getElementById("budgetSettingsCard"),
   budgetWizardTitle: document.getElementById("budgetWizardTitle"),
   budgetStepProgress: document.getElementById("budgetStepProgress"),
   budgetWizardSubtitle: document.getElementById("budgetWizardSubtitle"),
@@ -142,6 +143,10 @@ const el = {
   budgetIncomeSaveBtn: document.getElementById("budgetIncomeSaveBtn"),
   budgetIncomeList: document.getElementById("budgetIncomeList"),
   budgetResetBtn: document.getElementById("budgetResetBtn"),
+  budgetNotifSummaryToggle: document.getElementById("budgetNotifSummaryToggle"),
+  budgetNotifGoalsToggle: document.getElementById("budgetNotifGoalsToggle"),
+  budgetNotifMonthCloseToggle: document.getElementById("budgetNotifMonthCloseToggle"),
+  budgetNotifSaveBtn: document.getElementById("budgetNotifSaveBtn"),
   budgetExpenseTypeInput: document.getElementById("budgetExpenseTypeInput"),
   budgetExpenseTitleInput: document.getElementById("budgetExpenseTitleInput"),
   expenseFieldsRent: document.getElementById("expenseFieldsRent"),
@@ -455,6 +460,7 @@ function setBudgetTab(tab) {
   }
   show(el.budgetMonthCloseCard, tab === "close");
   show(el.budgetLoanCalcCard, tab === "loans");
+  show(el.budgetSettingsCard, tab === "settings");
   if (tab === "income") {
     loadBudgetIncomes().catch(() => {});
   }
@@ -463,6 +469,9 @@ function setBudgetTab(tab) {
   }
   if (tab === "funds") {
     renderBudgetGoalsList((state.budget.dashboard?.funds || []));
+  }
+  if (tab === "settings") {
+    loadBudgetNotificationSettings().catch(() => {});
   }
 }
 
@@ -1162,6 +1171,13 @@ function renderBudgetGoalsList(rows) {
 
 function renderBudgetFunds(rows) {
   renderBudgetGoalsList(rows);
+}
+
+async function loadBudgetNotificationSettings() {
+  const data = await api("/api/miniapp/budget/settings/notifications", { skipLoader: true });
+  if (el.budgetNotifSummaryToggle) el.budgetNotifSummaryToggle.checked = !!data.budget_summary_enabled;
+  if (el.budgetNotifGoalsToggle) el.budgetNotifGoalsToggle.checked = !!data.goal_deadline_enabled;
+  if (el.budgetNotifMonthCloseToggle) el.budgetNotifMonthCloseToggle.checked = !!data.month_close_enabled;
 }
 
 function openBudgetWizard(onboardingMode) {
@@ -1884,14 +1900,33 @@ function setupEvents() {
   el.expenseAddRateBtn?.addEventListener("click", () => addExpenseRateRow());
   el.budgetExpensesCancelEditBtn?.addEventListener("click", () => clearExpenseForm());
   el.budgetResetBtn?.addEventListener("click", async () => {
-    if (!window.confirm("Удалить текущий бюджет? Это деактивирует доходы, расходы и цели.")) return;
+    if (!window.confirm("Удалить текущий бюджет? Это полностью удалит все данные бюджета, включая цели.")) return;
     try {
       const result = await api("/api/miniapp/budget/reset", { method: "POST" });
-      toast(`Бюджет очищен (доходов: ${result.incomes})`);
+      state.budget.goalEditingId = null;
+      state.budget.goalChecklistItems = [];
+      if (el.goalDetailCard) el.goalDetailCard.style.display = "none";
+      toast(`Бюджет очищен (доходов: ${result.incomes}, целей: ${result.funds})`);
       await loadBudgetDashboard();
       setBudgetTab("overview");
     } catch (e) {
       toast(e?.message || "Не удалось удалить бюджет");
+    }
+  });
+  el.budgetNotifSaveBtn?.addEventListener("click", async () => {
+    try {
+      await api("/api/miniapp/budget/settings/notifications", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          budget_summary_enabled: !!el.budgetNotifSummaryToggle?.checked,
+          goal_deadline_enabled: !!el.budgetNotifGoalsToggle?.checked,
+          month_close_enabled: !!el.budgetNotifMonthCloseToggle?.checked,
+        }),
+      });
+      toast("Настройки уведомлений сохранены");
+    } catch (e) {
+      toast(e?.message || "Не удалось сохранить настройки");
     }
   });
   el.budgetExpensesSaveBtn?.addEventListener("click", async () => {

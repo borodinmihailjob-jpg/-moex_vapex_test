@@ -25,6 +25,7 @@ from db import (
     disable_price_target_alert,
     ensure_user_alert_settings,
     get_budget_dashboard,
+    get_budget_notification_settings,
     get_budget_profile,
     get_active_app_text,
     get_user_last_mode,
@@ -40,6 +41,7 @@ from db import (
     list_budget_savings,
     reset_budget_data,
     set_user_last_mode,
+    set_budget_notification_settings,
     set_open_close_alert,
     update_budget_income,
     update_budget_expense,
@@ -1120,6 +1122,23 @@ async def api_budget_reset(request: web.Request) -> web.Response:
     return _json_ok(result)
 
 
+async def api_budget_notification_settings(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    if request.method == "GET":
+        return _json_ok(await get_budget_notification_settings(db_dsn, user_id))
+    payload = await _read_json(request)
+    updated = await set_budget_notification_settings(
+        db_dsn,
+        user_id=user_id,
+        budget_summary_enabled=payload.get("budget_summary_enabled"),
+        goal_deadline_enabled=payload.get("goal_deadline_enabled"),
+        month_close_enabled=payload.get("month_close_enabled"),
+    )
+    return _json_ok(updated)
+
+
 def _calc_fund_strategy(
     target_amount: float,
     already_saved: float,
@@ -1442,6 +1461,8 @@ def attach_miniapp_routes(app: web.Application, db_dsn: str, bot_token: str) -> 
     app.router.add_post("/api/miniapp/budget/expenses", api_budget_expenses)
     app.router.add_post("/api/miniapp/budget/expenses/{expense_id}", api_budget_expense_item)
     app.router.add_post("/api/miniapp/budget/reset", api_budget_reset)
+    app.router.add_get("/api/miniapp/budget/settings/notifications", api_budget_notification_settings)
+    app.router.add_post("/api/miniapp/budget/settings/notifications", api_budget_notification_settings)
     app.router.add_post("/api/miniapp/budget/funds/strategy", api_budget_fund_strategy)
     app.router.add_get("/api/miniapp/budget/funds", api_budget_funds)
     app.router.add_post("/api/miniapp/budget/funds", api_budget_funds)

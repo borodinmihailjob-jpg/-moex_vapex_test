@@ -225,6 +225,15 @@ CREATE TABLE IF NOT EXISTS budget_month_closes (
   UNIQUE (user_id, month_key)
 );
 
+CREATE TABLE IF NOT EXISTS budget_notification_settings (
+  user_id BIGINT PRIMARY KEY,
+  user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+  budget_summary_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  goal_deadline_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  month_close_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS schema_meta (
   key TEXT PRIMARY KEY,
   value TEXT,
@@ -272,6 +281,7 @@ MIGRATION_SQL = [
     "CREATE TABLE IF NOT EXISTS budget_funds (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, target_amount DOUBLE PRECISION NOT NULL, already_saved DOUBLE PRECISION NOT NULL DEFAULT 0, target_month TEXT NOT NULL, payload JSONB NOT NULL DEFAULT '{}'::jsonb, priority TEXT NOT NULL DEFAULT 'medium', status TEXT NOT NULL DEFAULT 'active', autopilot_enabled BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "ALTER TABLE budget_funds ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb",
     "CREATE TABLE IF NOT EXISTS budget_month_closes (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, month_key TEXT NOT NULL, planned_expenses_base DOUBLE PRECISION NOT NULL DEFAULT 0, actual_expenses_base DOUBLE PRECISION NOT NULL DEFAULT 0, extra_income_total DOUBLE PRECISION NOT NULL DEFAULT 0, extra_income_items JSONB NOT NULL DEFAULT '[]'::jsonb, closed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (user_id, month_key))",
+    "CREATE TABLE IF NOT EXISTS budget_notification_settings (user_id BIGINT PRIMARY KEY, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, budget_summary_enabled BOOLEAN NOT NULL DEFAULT TRUE, goal_deadline_enabled BOOLEAN NOT NULL DEFAULT TRUE, month_close_enabled BOOLEAN NOT NULL DEFAULT TRUE, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
 ]
 
@@ -293,6 +303,7 @@ POST_MIGRATION_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS ix_budget_savings_user_active ON budget_savings (user_id, active)",
     "CREATE INDEX IF NOT EXISTS ix_budget_funds_user_status ON budget_funds (user_id, status)",
     "CREATE INDEX IF NOT EXISTS ix_budget_month_closes_user_month ON budget_month_closes (user_id, month_key)",
+    "CREATE INDEX IF NOT EXISTS ix_budget_notification_settings_user_ref ON budget_notification_settings (user_ref_id)",
 ]
 
 _pools: dict[str, asyncpg.Pool] = {}
@@ -2291,6 +2302,86 @@ async def disable_budget_income(db_path: str, user_id: int, income_id: int) -> b
         raise
 
 
+async def get_budget_notification_settings(db_path: str, user_id: int) -> dict[str, Any]:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                user_ref_id, _ = await _ensure_user_context(conn, int(user_id))
+                await conn.execute(
+                    """
+                    INSERT INTO budget_notification_settings (
+                      user_id, user_ref_id, budget_summary_enabled, goal_deadline_enabled, month_close_enabled, updated_at
+                    )
+                    VALUES ($1, $2, TRUE, TRUE, TRUE, NOW())
+                    ON CONFLICT (user_id) DO NOTHING
+                    """,
+                    int(user_id),
+                    int(user_ref_id),
+                )
+                row = await conn.fetchrow(
+                    """
+                    SELECT budget_summary_enabled, goal_deadline_enabled, month_close_enabled
+                    FROM budget_notification_settings
+                    WHERE user_id = $1
+                    """,
+                    int(user_id),
+                )
+        return {
+            "budget_summary_enabled": bool(row["budget_summary_enabled"]) if row else True,
+            "goal_deadline_enabled": bool(row["goal_deadline_enabled"]) if row else True,
+            "month_close_enabled": bool(row["month_close_enabled"]) if row else True,
+        }
+    except Exception:
+        logger.exception("Failed get_budget_notification_settings user=%s", user_id)
+        raise
+
+
+async def set_budget_notification_settings(
+    db_path: str,
+    user_id: int,
+    budget_summary_enabled: bool | None = None,
+    goal_deadline_enabled: bool | None = None,
+    month_close_enabled: bool | None = None,
+) -> dict[str, Any]:
+    try:
+        current = await get_budget_notification_settings(db_path, user_id)
+        next_budget_summary = current["budget_summary_enabled"] if budget_summary_enabled is None else bool(budget_summary_enabled)
+        next_goal_deadline = current["goal_deadline_enabled"] if goal_deadline_enabled is None else bool(goal_deadline_enabled)
+        next_month_close = current["month_close_enabled"] if month_close_enabled is None else bool(month_close_enabled)
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                user_ref_id, _ = await _ensure_user_context(conn, int(user_id))
+                await conn.execute(
+                    """
+                    INSERT INTO budget_notification_settings (
+                      user_id, user_ref_id, budget_summary_enabled, goal_deadline_enabled, month_close_enabled, updated_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, NOW())
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET user_ref_id = EXCLUDED.user_ref_id,
+                        budget_summary_enabled = EXCLUDED.budget_summary_enabled,
+                        goal_deadline_enabled = EXCLUDED.goal_deadline_enabled,
+                        month_close_enabled = EXCLUDED.month_close_enabled,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    int(user_id),
+                    int(user_ref_id),
+                    next_budget_summary,
+                    next_goal_deadline,
+                    next_month_close,
+                )
+        return {
+            "budget_summary_enabled": next_budget_summary,
+            "goal_deadline_enabled": next_goal_deadline,
+            "month_close_enabled": next_month_close,
+        }
+    except Exception:
+        logger.exception("Failed set_budget_notification_settings user=%s", user_id)
+        raise
+
+
 async def reset_budget_data(db_path: str, user_id: int) -> dict[str, int]:
     def _affected_count(status: str) -> int:
         parts = (status or "").split()
@@ -2325,23 +2416,27 @@ async def reset_budget_data(db_path: str, user_id: int) -> dict[str, int]:
                     "UPDATE budget_funds SET status = 'deleted', updated_at = NOW() WHERE user_id = $1 AND status <> 'deleted'",
                     int(user_id),
                 ))
-                await conn.execute(
-                    """
-                    UPDATE budget_profiles
-                    SET onboarding_completed = FALSE,
-                        income_monthly = 0,
-                        expenses_base = 0,
-                        updated_at = NOW()
-                    WHERE user_id = $1
-                    """,
+                month_closes = _affected_count(await conn.execute(
+                    "DELETE FROM budget_month_closes WHERE user_id = $1",
                     int(user_id),
-                )
+                ))
+                profiles = _affected_count(await conn.execute(
+                    "DELETE FROM budget_profiles WHERE user_id = $1",
+                    int(user_id),
+                ))
+                notification_settings = _affected_count(await conn.execute(
+                    "DELETE FROM budget_notification_settings WHERE user_id = $1",
+                    int(user_id),
+                ))
         return {
             "incomes": incomes,
             "expenses": expenses,
             "obligations": obligations,
             "savings": savings,
             "funds": funds,
+            "month_closes": month_closes,
+            "profiles": profiles,
+            "notification_settings": notification_settings,
         }
     except Exception:
         logger.exception("Failed reset_budget_data user=%s", user_id)

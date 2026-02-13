@@ -304,7 +304,6 @@
           </div>
           <button id="budgetIncomeSaveBtn" class="btn primary">Добавить</button>
           <div id="budgetIncomeList" class="list"></div>
-          <button id="budgetResetBtn" class="btn danger">Удалить текущий бюджет</button>
         </article>
 
         <article id="budgetExpensesCard" class="card" style="display:none">
@@ -491,6 +490,38 @@
           </div>
           <div id="loanCalcResult" class="plain"></div>
         </article>
+
+        <article id="budgetSettingsCard" class="card" style="display:none">
+          <h2>Настройки</h2>
+          <h3>Уведомления</h3>
+          <div class="toggle-row">
+            <span>Сводка бюджета</span>
+            <label class="switch">
+              <input id="budgetNotifSummaryToggle" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="toggle-row">
+            <span>Напоминания по целям</span>
+            <label class="switch">
+              <input id="budgetNotifGoalsToggle" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="toggle-row">
+            <span>Напоминание закрыть месяц</span>
+            <label class="switch">
+              <input id="budgetNotifMonthCloseToggle" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="wizard-actions">
+            <button id="budgetNotifSaveBtn" class="btn primary">Сохранить настройки</button>
+          </div>
+          <h3>Данные бюджета</h3>
+          <button id="budgetResetBtn" class="btn danger">Удалить бюджет</button>
+          <p class="hint">Удалит все данные бюджета, включая цели и историю.</p>
+        </article>
       </section>
     </main>
 
@@ -511,6 +542,7 @@
       <button class="tab-btn" data-budget-tab="funds">Цели</button>
       <button class="tab-btn" data-budget-tab="loans">Кредиты</button>
       <button class="tab-btn" data-budget-tab="close">Закрытие</button>
+      <button class="tab-btn" data-budget-tab="settings">Настройки</button>
     </nav>
   </div>
 
