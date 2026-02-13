@@ -33,6 +33,8 @@ const state = {
     strategyDraft: null,
     expenseEditingId: null,
     expenseRateRows: [],
+    goalEditingId: null,
+    goalChecklistItems: [],
   },
 };
 
@@ -168,18 +170,23 @@ const el = {
   budgetExpensesList: document.getElementById("budgetExpensesList"),
   budgetExpensesSaveBtn: document.getElementById("budgetExpensesSaveBtn"),
   budgetFundsList: document.getElementById("budgetFundsList"),
-  planExpenseBtn: document.getElementById("planExpenseBtn"),
-  saveTargetBtn: document.getElementById("saveTargetBtn"),
-  budgetFundPlannerCard: document.getElementById("budgetFundPlannerCard"),
-  fundTitleInput: document.getElementById("fundTitleInput"),
-  fundTargetMonthInput: document.getElementById("fundTargetMonthInput"),
-  fundTargetAmountInput: document.getElementById("fundTargetAmountInput"),
-  fundAlreadySavedInput: document.getElementById("fundAlreadySavedInput"),
-  fundPriorityInput: document.getElementById("fundPriorityInput"),
-  fundCalcBtn: document.getElementById("fundCalcBtn"),
-  fundSaveBtn: document.getElementById("fundSaveBtn"),
-  fundCancelBtn: document.getElementById("fundCancelBtn"),
-  fundStrategyResult: document.getElementById("fundStrategyResult"),
+  addGoalBtn: document.getElementById("addGoalBtn"),
+  goalDetailCard: document.getElementById("goalDetailCard"),
+  goalTitleInput: document.getElementById("goalTitleInput"),
+  goalTargetDateInput: document.getElementById("goalTargetDateInput"),
+  goalDescriptionInput: document.getElementById("goalDescriptionInput"),
+  goalTargetAmountInput: document.getElementById("goalTargetAmountInput"),
+  goalTopupAmountInput: document.getElementById("goalTopupAmountInput"),
+  goalTopupBtn: document.getElementById("goalTopupBtn"),
+  goalSaveBtn: document.getElementById("goalSaveBtn"),
+  goalDeleteBtn: document.getElementById("goalDeleteBtn"),
+  goalCancelBtn: document.getElementById("goalCancelBtn"),
+  goalProgressText: document.getElementById("goalProgressText"),
+  goalProgressFill: document.getElementById("goalProgressFill"),
+  goalChecklistList: document.getElementById("goalChecklistList"),
+  goalChecklistInput: document.getElementById("goalChecklistInput"),
+  goalChecklistTemplateSelect: document.getElementById("goalChecklistTemplateSelect"),
+  goalChecklistAddBtn: document.getElementById("goalChecklistAddBtn"),
   closeMonthOpenBtn: document.getElementById("closeMonthOpenBtn"),
   monthCloseForm: document.getElementById("monthCloseForm"),
   monthCloseActualInput: document.getElementById("monthCloseActualInput"),
@@ -444,7 +451,7 @@ function setBudgetTab(tab) {
   show(el.budgetExpensesCard, tab === "expenses");
   show(el.budgetFundsCard, tab === "funds");
   if (tab !== "funds") {
-    show(el.budgetFundPlannerCard, false);
+    show(el.goalDetailCard, false);
   }
   show(el.budgetMonthCloseCard, tab === "close");
   show(el.budgetLoanCalcCard, tab === "loans");
@@ -453,6 +460,9 @@ function setBudgetTab(tab) {
   }
   if (tab === "expenses") {
     loadBudgetExpenses().catch(() => {});
+  }
+  if (tab === "funds") {
+    renderBudgetGoalsList((state.budget.dashboard?.funds || []));
   }
 }
 
@@ -1126,35 +1136,32 @@ function renderBudgetExpenses(items) {
   });
 }
 
-function renderBudgetFunds(rows) {
+function renderBudgetGoalsList(rows) {
   el.budgetFundsList.innerHTML = "";
   if (!rows.length) {
-    renderEmpty(el.budgetFundsList, "Пока нет фондов. Добавьте цель или крупную трату.");
+    renderEmpty(el.budgetFundsList, "Пока нет целей. Нажмите «Добавить цель».");
     return;
   }
-  rows.forEach((fund) => {
+  rows.forEach((goal) => {
     const item = document.createElement("div");
     item.className = "item";
-    const months = Number(fund.months_left || 0);
-    item.innerHTML = `<div class="left"><div class="name">${fund.title}</div><div class="sub">нужно ${money(fund.required_per_month)}/мес • осталось ${months} мес</div></div><div class="right"><button class="btn ghost">Пополнить</button></div>`;
-    item.querySelector("button").addEventListener("click", async () => {
-      const raw = window.prompt("Сумма пополнения, ₽");
-      if (!raw) return;
-      try {
-        const amount = parseMoneyInput(raw);
-        await api(`/api/miniapp/budget/funds/${fund.id}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "topup", amount }),
-        });
-        toast("Фонд пополнен");
-        await loadBudgetDashboard();
-      } catch (e) {
-        toast(e?.message || "Ошибка пополнения");
-      }
-    });
+    const months = Number(goal.months_left || 0);
+    const progress = Number(goal.progress_pct || 0);
+    item.innerHTML = `
+      <div class="left">
+        <div class="name">${goal.title}</div>
+        <div class="sub">${money(goal.already_saved)} из ${money(goal.target_amount)} • осталось ${months} мес</div>
+        <div class="progress-line"><div class="progress-fill" style="width:${Math.max(0, Math.min(100, progress)).toFixed(1)}%"></div></div>
+      </div>
+      <div class="right"><button class="btn ghost">Открыть</button></div>
+    `;
+    item.querySelector("button")?.addEventListener("click", () => openGoalDetail(goal));
     el.budgetFundsList.appendChild(item);
   });
+}
+
+function renderBudgetFunds(rows) {
+  renderBudgetGoalsList(rows);
 }
 
 function openBudgetWizard(onboardingMode) {
@@ -1409,7 +1416,7 @@ function renderBudgetWizardStep() {
       <button class="chip" data-goal-action="expense">Запланировать трату</button>
       <button class="chip" data-goal-action="none">Пока без целей</button>
     </div>
-    <p class="hint">Цели можно добавить позже в разделе “Фонды”.</p>
+    <p class="hint">Цели можно добавить позже в разделе “Цели”.</p>
   `;
   el.budgetWizardBody.querySelectorAll("[data-goal-action]").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -1456,13 +1463,7 @@ async function completeBudgetOnboarding() {
 }
 
 async function openFundPlanFlow() {
-  el.budgetFundPlannerCard.style.display = "";
-  el.fundTitleInput.value = el.fundTitleInput.value || "Отпуск";
-  el.fundTargetMonthInput.value = el.fundTargetMonthInput.value || "2026-12";
-  el.fundTargetAmountInput.value = el.fundTargetAmountInput.value || "";
-  el.fundAlreadySavedInput.value = el.fundAlreadySavedInput.value || "0";
-  el.fundStrategyResult.textContent = "";
-  el.fundTitleInput.focus();
+  openGoalDetail(null);
 }
 
 async function openMonthCloseFlow() {
@@ -1477,62 +1478,124 @@ async function openMonthCloseFlow() {
   el.monthCloseActualInput.focus();
 }
 
-async function calcFundStrategyFromForm() {
-  const title = (el.fundTitleInput.value || "").trim();
-  const whenRaw = (el.fundTargetMonthInput.value || "").trim();
-  const amountRaw = (el.fundTargetAmountInput.value || "").trim();
-  const alreadyRaw = (el.fundAlreadySavedInput.value || "0").trim();
-  const priority = (el.fundPriorityInput.value || "medium").toLowerCase();
-  if (!title) throw new Error("Заполните поле «На что?»");
-  if (!whenRaw) throw new Error("Заполните поле «Когда?»");
-  const target_amount = parseMoneyInput(amountRaw);
-  const already_saved = Number(alreadyRaw || 0);
-  if (!Number.isFinite(already_saved) || already_saved < 0) {
-    throw new Error("Уже накоплено должно быть числом от 0");
+function renderGoalChecklist() {
+  const items = state.budget.goalChecklistItems || [];
+  if (!items.length) {
+    el.goalChecklistList.textContent = "Пока нет чекбоксов.";
+    return;
   }
-  const strategy = await api("/api/miniapp/budget/funds/strategy", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      title,
-      target_month: whenRaw,
-      target_amount,
-      already_saved,
-      priority,
-    }),
+  el.goalChecklistList.innerHTML = "";
+  items.forEach((row, idx) => {
+    const line = document.createElement("label");
+    line.style.display = "block";
+    line.innerHTML = `<input type="checkbox" ${row.done ? "checked" : ""} data-goal-check="${idx}" /> ${row.text}`;
+    line.querySelector("input")?.addEventListener("change", (ev) => {
+      state.budget.goalChecklistItems[idx].done = !!ev.target.checked;
+    });
+    el.goalChecklistList.appendChild(line);
   });
-  state.budget.strategyDraft = { title, whenRaw, target_amount, already_saved, priority, strategy };
-  el.fundStrategyResult.textContent = [
-    "Стратегия накопления",
-    `Сейчас свободно: ${money(strategy.budget_now.free)}/мес`,
-    `Нужно накопить: ${money(strategy.need)}`,
-    `Осталось: ${strategy.months_left} мес`,
-    `Рекомендуемый взнос: ${money(strategy.required_per_month)}/мес`,
-    strategy.is_feasible ? "✅ План реалистичен" : `⚠️ Не хватает ${money(strategy.gap)}/мес`,
-  ].join("\n");
 }
 
-async function saveFundFromForm() {
-  if (!state.budget.strategyDraft) {
-    await calcFundStrategyFromForm();
+function openGoalDetail(goal) {
+  state.budget.goalEditingId = goal ? Number(goal.id) : null;
+  state.budget.goalChecklistItems = Array.isArray(goal?.checklist)
+    ? goal.checklist.map((x) => (typeof x === "string" ? { text: x, done: false } : { text: String(x.text || ""), done: !!x.done }))
+    : [];
+  el.goalTitleInput.value = goal?.title || "";
+  el.goalTargetDateInput.value = goal?.target_date || "";
+  el.goalDescriptionInput.value = goal?.description || "";
+  el.goalTargetAmountInput.value = goal ? String(Math.round(Number(goal.target_amount || 0))) : "";
+  el.goalTopupAmountInput.value = "";
+  const progress = Number(goal?.progress_pct || 0);
+  const saved = Number(goal?.already_saved || 0);
+  const target = Number(goal?.target_amount || 0);
+  el.goalProgressText.textContent = goal ? `Прогресс: ${progress.toFixed(1)}% (${money(saved)} из ${money(target)})` : "Прогресс: 0%";
+  if (el.goalProgressFill) {
+    el.goalProgressFill.style.width = `${Math.max(0, Math.min(100, progress)).toFixed(1)}%`;
   }
-  const draft = state.budget.strategyDraft;
-  await api("/api/miniapp/budget/funds", {
+  renderGoalChecklist();
+  el.goalDetailCard.style.display = "";
+  el.goalTitleInput.focus();
+}
+
+function collectGoalChecklistPayload() {
+  return (state.budget.goalChecklistItems || [])
+    .map((x) => ({ text: String(x.text || "").trim(), done: !!x.done }))
+    .filter((x) => x.text);
+}
+
+async function saveGoalDetail() {
+  const title = (el.goalTitleInput.value || "").trim();
+  const target_date = (el.goalTargetDateInput.value || "").trim();
+  const description = (el.goalDescriptionInput.value || "").trim();
+  const target_amount = parseMoneyInput(el.goalTargetAmountInput.value || "");
+  if (!title) throw new Error("Введите наименование цели");
+  if (!target_date) throw new Error("Введите дату достижения цели");
+  const checklist = collectGoalChecklistPayload();
+  if (!state.budget.goalEditingId) {
+    await api("/api/miniapp/budget/funds", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title,
+        target_date,
+        target_amount,
+        already_saved: 0,
+        priority: "medium",
+        description,
+        checklist,
+      }),
+    });
+    toast("Цель добавлена");
+  } else {
+    await api(`/api/miniapp/budget/funds/${state.budget.goalEditingId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "edit",
+        title,
+        target_date,
+        target_amount,
+        description,
+        checklist,
+      }),
+    });
+    toast("Цель обновлена");
+  }
+  await loadBudgetDashboard();
+  setBudgetTab("funds");
+}
+
+async function topupGoal() {
+  if (!state.budget.goalEditingId) {
+    throw new Error("Сначала сохраните цель");
+  }
+  const amount = parseMoneyInput(el.goalTopupAmountInput.value || "");
+  await api(`/api/miniapp/budget/funds/${state.budget.goalEditingId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      title: draft.title,
-      target_month: draft.whenRaw,
-      target_amount: draft.target_amount,
-      already_saved: draft.already_saved,
-      priority: draft.priority,
-    }),
+    body: JSON.stringify({ action: "topup", amount }),
   });
-  el.budgetFundPlannerCard.style.display = "none";
-  el.fundStrategyResult.textContent = "";
-  state.budget.strategyDraft = null;
-  toast("Фонд сохранён");
+  el.goalTopupAmountInput.value = "";
+  toast("Сумма добавлена");
   await loadBudgetDashboard();
+  const goal = (state.budget.dashboard?.funds || []).find((x) => Number(x.id) === Number(state.budget.goalEditingId));
+  if (goal) openGoalDetail(goal);
+}
+
+async function deleteGoal() {
+  if (!state.budget.goalEditingId) return;
+  await api(`/api/miniapp/budget/funds/${state.budget.goalEditingId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "delete" }),
+  });
+  state.budget.goalEditingId = null;
+  state.budget.goalChecklistItems = [];
+  el.goalDetailCard.style.display = "none";
+  toast("Цель удалена");
+  await loadBudgetDashboard();
+  setBudgetTab("funds");
 }
 
 async function submitMonthCloseFromForm() {
@@ -1778,8 +1841,7 @@ function setupEvents() {
   el.editBudgetBtn?.addEventListener("click", () => {
     setBudgetTab("income");
   });
-  el.planExpenseBtn?.addEventListener("click", openFundPlanFlow);
-  el.saveTargetBtn?.addEventListener("click", openFundPlanFlow);
+  el.addGoalBtn?.addEventListener("click", () => openGoalDetail(null));
   el.closeMonthOpenBtn?.addEventListener("click", openMonthCloseFlow);
   el.budgetIncomeSaveBtn?.addEventListener("click", async () => {
     try {
@@ -1866,24 +1928,47 @@ function setupEvents() {
       toast(e?.message || "Не удалось сохранить расход");
     }
   });
-  el.fundCalcBtn?.addEventListener("click", async () => {
+  el.goalTopupBtn?.addEventListener("click", async () => {
     try {
-      await calcFundStrategyFromForm();
+      await topupGoal();
     } catch (e) {
-      toast(e?.message || "Ошибка расчёта");
+      toast(e?.message || "Не удалось добавить сумму");
     }
   });
-  el.fundSaveBtn?.addEventListener("click", async () => {
+  el.goalSaveBtn?.addEventListener("click", async () => {
     try {
-      await saveFundFromForm();
+      await saveGoalDetail();
     } catch (e) {
-      toast(e?.message || "Не удалось сохранить фонд");
+      toast(e?.message || "Не удалось сохранить цель");
     }
   });
-  el.fundCancelBtn?.addEventListener("click", () => {
-    el.budgetFundPlannerCard.style.display = "none";
-    state.budget.strategyDraft = null;
-    el.fundStrategyResult.textContent = "";
+  el.goalDeleteBtn?.addEventListener("click", async () => {
+    if (!state.budget.goalEditingId) return;
+    if (!window.confirm("Удалить эту цель?")) return;
+    try {
+      await deleteGoal();
+    } catch (e) {
+      toast(e?.message || "Не удалось удалить цель");
+    }
+  });
+  el.goalCancelBtn?.addEventListener("click", () => {
+    el.goalDetailCard.style.display = "none";
+  });
+  el.goalChecklistTemplateSelect?.addEventListener("change", () => {
+    const value = (el.goalChecklistTemplateSelect.value || "").trim();
+    if (!value) return;
+    el.goalChecklistInput.value = value;
+  });
+  el.goalChecklistAddBtn?.addEventListener("click", () => {
+    const text = (el.goalChecklistInput.value || "").trim();
+    if (!text) {
+      toast("Введите чекбокс цели");
+      return;
+    }
+    state.budget.goalChecklistItems.push({ text, done: false });
+    el.goalChecklistInput.value = "";
+    el.goalChecklistTemplateSelect.value = "";
+    renderGoalChecklist();
   });
   el.monthCloseSubmitBtn?.addEventListener("click", submitMonthCloseFromForm);
   el.monthCloseCancelBtn?.addEventListener("click", () => {

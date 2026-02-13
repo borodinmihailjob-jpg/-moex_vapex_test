@@ -204,6 +204,7 @@ CREATE TABLE IF NOT EXISTS budget_funds (
   target_amount DOUBLE PRECISION NOT NULL,
   already_saved DOUBLE PRECISION NOT NULL DEFAULT 0,
   target_month TEXT NOT NULL,
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
   priority TEXT NOT NULL DEFAULT 'medium',
   status TEXT NOT NULL DEFAULT 'active',
   autopilot_enabled BOOLEAN NOT NULL DEFAULT FALSE,
@@ -268,7 +269,8 @@ MIGRATION_SQL = [
     "CREATE TABLE IF NOT EXISTS budget_expenses (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL DEFAULT 'other', title TEXT NOT NULL, amount_monthly DOUBLE PRECISION NOT NULL, payload JSONB NOT NULL DEFAULT '{}'::jsonb, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS budget_obligations (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'other', amount_monthly DOUBLE PRECISION NOT NULL, debt_details JSONB NOT NULL DEFAULT '{}'::jsonb, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS budget_savings (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL DEFAULT 'other', title TEXT NOT NULL, amount DOUBLE PRECISION NOT NULL, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
-    "CREATE TABLE IF NOT EXISTS budget_funds (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, target_amount DOUBLE PRECISION NOT NULL, already_saved DOUBLE PRECISION NOT NULL DEFAULT 0, target_month TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'medium', status TEXT NOT NULL DEFAULT 'active', autopilot_enabled BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS budget_funds (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, target_amount DOUBLE PRECISION NOT NULL, already_saved DOUBLE PRECISION NOT NULL DEFAULT 0, target_month TEXT NOT NULL, payload JSONB NOT NULL DEFAULT '{}'::jsonb, priority TEXT NOT NULL DEFAULT 'medium', status TEXT NOT NULL DEFAULT 'active', autopilot_enabled BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "ALTER TABLE budget_funds ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb",
     "CREATE TABLE IF NOT EXISTS budget_month_closes (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, month_key TEXT NOT NULL, planned_expenses_base DOUBLE PRECISION NOT NULL DEFAULT 0, actual_expenses_base DOUBLE PRECISION NOT NULL DEFAULT 0, extra_income_total DOUBLE PRECISION NOT NULL DEFAULT 0, extra_income_items JSONB NOT NULL DEFAULT '[]'::jsonb, closed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (user_id, month_key))",
     "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
 ]
@@ -2436,7 +2438,7 @@ async def list_budget_funds(db_path: str, user_id: int) -> list[dict[str, Any]]:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id, title, target_amount, already_saved, target_month, priority, status, autopilot_enabled
+                SELECT id, title, target_amount, already_saved, target_month, payload, priority, status, autopilot_enabled
                 FROM budget_funds
                 WHERE user_id = $1
                 ORDER BY id DESC
@@ -2445,23 +2447,44 @@ async def list_budget_funds(db_path: str, user_id: int) -> list[dict[str, Any]]:
             )
         out: list[dict[str, Any]] = []
         for row in rows:
-            target_month = _safe_month_key(row["target_month"], _next_month_key(now_key))
+            payload = row["payload"] or {}
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except ValueError:
+                    payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            target_date = str(payload.get("target_date") or "").strip()
+            target_month_from_date = ""
+            if len(target_date) >= 7 and target_date[4] == "-":
+                target_month_from_date = target_date[:7]
+            target_month = _safe_month_key(target_month_from_date or row["target_month"], _next_month_key(now_key))
             calc = _fund_metrics(
                 float(row["target_amount"] or 0.0),
                 float(row["already_saved"] or 0.0),
                 target_month,
                 now_key,
             )
+            progress_pct = 0.0
+            target_amount = float(row["target_amount"] or 0.0)
+            already_saved = float(row["already_saved"] or 0.0)
+            if target_amount > 0:
+                progress_pct = max(0.0, min(100.0, already_saved / target_amount * 100.0))
             out.append(
                 {
                     "id": int(row["id"]),
                     "title": row["title"],
-                    "target_amount": float(row["target_amount"] or 0.0),
-                    "already_saved": float(row["already_saved"] or 0.0),
+                    "target_amount": target_amount,
+                    "already_saved": already_saved,
                     "target_month": target_month,
+                    "target_date": target_date or f"{target_month}-01",
+                    "description": str(payload.get("description") or "").strip(),
+                    "checklist": payload.get("checklist") if isinstance(payload.get("checklist"), list) else [],
                     "priority": row["priority"] or "medium",
                     "status": row["status"] or "active",
                     "autopilot_enabled": bool(row["autopilot_enabled"]),
+                    "progress_pct": progress_pct,
                     **calc,
                 }
             )
@@ -2479,6 +2502,7 @@ async def create_budget_fund(
     already_saved: float,
     target_month: str,
     priority: str,
+    payload: dict[str, Any] | None = None,
 ) -> int:
     try:
         pool = await _get_pool(db_path)
@@ -2488,9 +2512,9 @@ async def create_budget_fund(
                 row = await conn.fetchrow(
                     """
                     INSERT INTO budget_funds (
-                      user_id, user_ref_id, title, target_amount, already_saved, target_month, priority, status, autopilot_enabled, created_at, updated_at
+                      user_id, user_ref_id, title, target_amount, already_saved, target_month, payload, priority, status, autopilot_enabled, created_at, updated_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', FALSE, NOW(), NOW())
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, 'active', FALSE, NOW(), NOW())
                     RETURNING id
                     """,
                     int(user_id),
@@ -2499,6 +2523,7 @@ async def create_budget_fund(
                     float(target_amount),
                     float(already_saved),
                     target_month,
+                    json.dumps(payload or {}),
                     priority,
                 )
         return int(row["id"])
@@ -2511,18 +2536,20 @@ async def update_budget_fund(
     db_path: str,
     user_id: int,
     fund_id: int,
+    title: str | None = None,
     target_amount: float | None = None,
     already_saved: float | None = None,
     target_month: str | None = None,
     status: str | None = None,
     autopilot_enabled: bool | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> bool:
     try:
         pool = await _get_pool(db_path)
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT target_amount, already_saved, target_month, status, autopilot_enabled
+                SELECT title, target_amount, already_saved, target_month, status, autopilot_enabled, payload
                 FROM budget_funds
                 WHERE id = $1 AND user_id = $2
                 """,
@@ -2531,28 +2558,42 @@ async def update_budget_fund(
             )
             if not row:
                 return False
+            new_title = str(title).strip() if title is not None else str(row["title"] or "")
             new_target_amount = float(target_amount) if target_amount is not None else float(row["target_amount"] or 0.0)
             new_already_saved = float(already_saved) if already_saved is not None else float(row["already_saved"] or 0.0)
             new_target_month = str(target_month) if target_month is not None else str(row["target_month"] or "")
             new_status = str(status) if status is not None else str(row["status"] or "active")
             new_autopilot = bool(autopilot_enabled) if autopilot_enabled is not None else bool(row["autopilot_enabled"])
+            current_payload = row["payload"] if row["payload"] is not None else {}
+            if isinstance(current_payload, str):
+                try:
+                    current_payload = json.loads(current_payload)
+                except ValueError:
+                    current_payload = {}
+            if not isinstance(current_payload, dict):
+                current_payload = {}
+            new_payload = payload if payload is not None else current_payload
             result = await conn.fetchrow(
                 """
                 UPDATE budget_funds
-                SET target_amount = $1,
-                    already_saved = $2,
-                    target_month = $3,
-                    status = $4,
-                    autopilot_enabled = $5,
+                SET title = $1,
+                    target_amount = $2,
+                    already_saved = $3,
+                    target_month = $4,
+                    status = $5,
+                    autopilot_enabled = $6,
+                    payload = $7::jsonb,
                     updated_at = NOW()
-                WHERE id = $6 AND user_id = $7
+                WHERE id = $8 AND user_id = $9
                 RETURNING id
                 """,
+                new_title,
                 new_target_amount,
                 new_already_saved,
                 new_target_month,
                 new_status,
                 new_autopilot,
+                json.dumps(new_payload),
                 int(fund_id),
                 int(user_id),
             )

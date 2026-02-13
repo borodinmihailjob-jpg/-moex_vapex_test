@@ -392,46 +392,57 @@
         </article>
 
         <article id="budgetFundsCard" class="card" style="display:none">
-          <h2>Фонды</h2>
+          <h2>Цели</h2>
+          <button id="addGoalBtn" class="btn primary">Добавить цель</button>
           <div id="budgetFundsList" class="list"></div>
-          <div class="chips">
-            <button id="planExpenseBtn" class="chip">Запланировать трату</button>
-            <button id="saveTargetBtn" class="chip">Накопить сумму</button>
-          </div>
         </article>
 
-        <article id="budgetFundPlannerCard" class="card" style="display:none">
-          <h2>Запланировать трату</h2>
-          <p class="hint">Накопим к нужной дате без стресса.</p>
+        <article id="goalDetailCard" class="card" style="display:none">
+          <h2>Цель</h2>
           <div class="form-grid two">
-            <label>На что?
-              <input id="fundTitleInput" type="text" placeholder="Например: отпуск" />
+            <label>Наименование цели
+              <input id="goalTitleInput" type="text" placeholder="Например: отпуск" />
             </label>
-            <label>Когда? (YYYY-MM)
-              <input id="fundTargetMonthInput" type="text" placeholder="Например: 2026-12" />
+            <label>Дата достижения
+              <input id="goalTargetDateInput" type="date" />
             </label>
           </div>
-          <div class="form-grid three">
-            <label>Сумма, ₽
-              <input id="fundTargetAmountInput" type="text" placeholder="Например: 5000000" />
+          <label>Описание цели
+            <textarea id="goalDescriptionInput" rows="3" placeholder="Например: отпуск с семьёй в августе"></textarea>
+          </label>
+          <div class="form-grid two">
+            <label>Сумма цели, ₽
+              <input id="goalTargetAmountInput" type="text" placeholder="Например: 500000" />
             </label>
-            <label>Уже накоплено, ₽
-              <input id="fundAlreadySavedInput" type="text" placeholder="0" />
-            </label>
-            <label>Приоритет
-              <select id="fundPriorityInput">
-                <option value="high">Высокий</option>
-                <option value="medium" selected>Средний</option>
-                <option value="low">Низкий</option>
-              </select>
+            <label>Отложено на цель, ₽
+              <input id="goalTopupAmountInput" type="text" placeholder="Например: 10000" />
             </label>
           </div>
           <div class="wizard-actions">
-            <button id="fundCalcBtn" class="btn primary">Посчитать стратегию</button>
-            <button id="fundSaveBtn" class="btn ghost">Сохранить фонд</button>
-            <button id="fundCancelBtn" class="btn ghost">Отмена</button>
+            <button id="goalTopupBtn" class="btn ghost">Добавить сумму</button>
+            <button id="goalSaveBtn" class="btn primary">Сохранить редактирование цели</button>
+            <button id="goalDeleteBtn" class="btn danger">Удалить цель</button>
+            <button id="goalCancelBtn" class="btn ghost">Закрыть</button>
           </div>
-          <div id="fundStrategyResult" class="plain"></div>
+          <div id="goalProgressText" class="plain"></div>
+          <div class="progress-line"><div id="goalProgressFill" class="progress-fill" style="width:0%"></div></div>
+          <h3>Чекбоксы цели</h3>
+          <div id="goalChecklistList" class="plain"></div>
+          <div class="form-grid two">
+            <label>Новый чекбокс
+              <input id="goalChecklistInput" type="text" placeholder="Например: купить билеты" />
+            </label>
+            <label>Шаблоны
+              <select id="goalChecklistTemplateSelect">
+                <option value="">Выберите шаблон</option>
+                <option value="Найти новую работу">Найти новую работу</option>
+                <option value="Съездить в отпуск">Съездить в отпуск</option>
+                <option value="Купить вещи">Купить вещи</option>
+                <option value="Купить билеты">Купить билеты</option>
+              </select>
+            </label>
+          </div>
+          <button id="goalChecklistAddBtn" class="btn ghost">Добавить чекбокс</button>
         </article>
 
         <article id="budgetMonthCloseCard" class="card" style="display:none">
@@ -497,7 +508,7 @@
       <button class="tab-btn" data-budget-tab="overview">Обзор</button>
       <button class="tab-btn" data-budget-tab="income">Доходы</button>
       <button class="tab-btn" data-budget-tab="expenses">Расходы</button>
-      <button class="tab-btn" data-budget-tab="funds">Фонды</button>
+      <button class="tab-btn" data-budget-tab="funds">Цели</button>
       <button class="tab-btn" data-budget-tab="loans">Кредиты</button>
       <button class="tab-btn" data-budget-tab="close">Закрытие</button>
     </nav>

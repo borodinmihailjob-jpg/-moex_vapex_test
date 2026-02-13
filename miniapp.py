@@ -1145,6 +1145,24 @@ def _calc_fund_strategy(
     }
 
 
+def _normalize_goal_checklist(raw: object) -> list[dict]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise web.HTTPBadRequest(text="checklist must be list")
+    out: list[dict] = []
+    for item in raw:
+        if isinstance(item, dict):
+            text = str(item.get("text") or "").strip()
+            done = bool(item.get("done"))
+        else:
+            text = str(item or "").strip()
+            done = False
+        if text:
+            out.append({"text": text, "done": done})
+    return out
+
+
 async def api_budget_fund_strategy(request: web.Request) -> web.Response:
     bot_token = request.app["bot_token"]
     db_dsn = request.app["db_dsn"]
@@ -1160,10 +1178,17 @@ async def api_budget_fund_strategy(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="invalid amounts") from exc
     if already_saved < 0:
         raise web.HTTPBadRequest(text="already_saved must be >= 0")
-    try:
-        target_month = _parse_month_key(str(payload.get("target_month") or ""))
-    except ValueError as exc:
-        raise web.HTTPBadRequest(text=str(exc)) from exc
+    target_date_raw = str(payload.get("target_date") or "").strip()
+    if target_date_raw:
+        try:
+            target_month = _parse_date_ymd(target_date_raw).strftime("%Y-%m")
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+    else:
+        try:
+            target_month = _parse_month_key(str(payload.get("target_month") or ""))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
 
     dashboard = await get_budget_dashboard(db_dsn, user_id)
     strategy = _calc_fund_strategy(
@@ -1206,10 +1231,19 @@ async def api_budget_funds(request: web.Request) -> web.Response:
         target_amount = _parse_money_text(payload.get("target_amount"))
     except ValueError as exc:
         raise web.HTTPBadRequest(text="invalid target_amount") from exc
-    try:
-        target_month = _parse_month_key(str(payload.get("target_month") or ""))
-    except ValueError as exc:
-        raise web.HTTPBadRequest(text=str(exc)) from exc
+    target_date_raw = str(payload.get("target_date") or "").strip()
+    if target_date_raw:
+        try:
+            target_date = _parse_date_ymd(target_date_raw)
+            target_month = target_date.strftime("%Y-%m")
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+    else:
+        target_date = None
+        try:
+            target_month = _parse_month_key(str(payload.get("target_month") or ""))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
     already_saved_raw = payload.get("already_saved")
     try:
         already_saved = float(already_saved_raw or 0.0)
@@ -1220,6 +1254,13 @@ async def api_budget_funds(request: web.Request) -> web.Response:
     priority = str(payload.get("priority") or "medium").strip().lower()
     if priority not in {"high", "medium", "low"}:
         raise web.HTTPBadRequest(text="priority must be high|medium|low")
+    description = str(payload.get("description") or "").strip()
+    checklist = _normalize_goal_checklist(payload.get("checklist"))
+    fund_payload = {
+        "description": description,
+        "target_date": target_date.isoformat() if target_date else f"{target_month}-01",
+        "checklist": checklist,
+    }
     fund_id = await create_budget_fund(
         db_dsn,
         user_id=user_id,
@@ -1228,6 +1269,7 @@ async def api_budget_funds(request: web.Request) -> web.Response:
         already_saved=already_saved,
         target_month=target_month,
         priority=priority,
+        payload=fund_payload,
     )
     return _json_ok({"id": fund_id})
 
@@ -1264,16 +1306,38 @@ async def api_budget_fund_item(request: web.Request) -> web.Response:
 
     if action == "edit":
         kwargs = {}
+        if payload.get("title") is not None:
+            title = str(payload.get("title") or "").strip()
+            if not title:
+                raise web.HTTPBadRequest(text="title required")
+            kwargs["title"] = title
         if payload.get("target_amount") is not None:
             try:
                 kwargs["target_amount"] = _parse_money_text(payload.get("target_amount"))
             except ValueError as exc:
                 raise web.HTTPBadRequest(text="invalid target_amount") from exc
-        if payload.get("target_month") is not None:
+        target_date_raw = payload.get("target_date")
+        if target_date_raw is not None:
+            try:
+                d = _parse_date_ymd(str(target_date_raw))
+                kwargs["target_month"] = d.strftime("%Y-%m")
+            except ValueError as exc:
+                raise web.HTTPBadRequest(text=str(exc)) from exc
+        elif payload.get("target_month") is not None:
             try:
                 kwargs["target_month"] = _parse_month_key(str(payload.get("target_month")))
             except ValueError as exc:
                 raise web.HTTPBadRequest(text=str(exc)) from exc
+        current_rows = await list_budget_funds(db_dsn, user_id)
+        current = next((x for x in current_rows if int(x["id"]) == fund_id), None)
+        if current:
+            description = str(payload.get("description") if payload.get("description") is not None else current.get("description") or "").strip()
+            checklist = _normalize_goal_checklist(payload.get("checklist") if payload.get("checklist") is not None else current.get("checklist"))
+            kwargs["payload"] = {
+                "description": description,
+                "target_date": str(payload.get("target_date") or current.get("target_date") or f"{current.get('target_month')}-01"),
+                "checklist": checklist,
+            }
         ok = await update_budget_fund(db_dsn, user_id=user_id, fund_id=fund_id, **kwargs)
         return _json_ok({"updated": ok})
 
