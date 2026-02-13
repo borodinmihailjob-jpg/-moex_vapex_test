@@ -383,7 +383,12 @@ async def get_last_price_metal(session: aiohttp.ClientSession, secid: str, board
     return price
 
 
-async def get_last_price_fiat(session: aiohttp.ClientSession, secid: str, boardid: str | None = "CETS") -> float | None:
+async def get_last_price_fiat(
+    session: aiohttp.ClientSession,
+    secid: str,
+    boardid: str | None = "CETS",
+    allow_iss_fallback: bool = True,
+) -> float | None:
     """
     Цена валютной пары на валютном рынке MOEX.
     """
@@ -425,6 +430,13 @@ async def get_last_price_fiat(session: aiohttp.ClientSession, secid: str, boardi
             continue
         price = _parse_marketdata_price(data)
         if price is None and not delayed:
+            if not allow_iss_fallback:
+                logger.info(
+                    "Skip ISS fallback for fiat secid=%s boardid=%s (fast mode)",
+                    candidate,
+                    norm_boardid,
+                )
+                continue
             now_msk = datetime.now(MSK_TZ)
             if now_msk.hour < ISS_FALLBACK_FROM_HOUR_MSK:
                 logger.info(
@@ -459,7 +471,7 @@ async def get_usd_rub_rate(session: aiohttp.ClientSession) -> float | None:
     Курс USD/RUB с валютного рынка MOEX.
     Основной инструмент: USD000UTSTOM (alias: USDRUB_TOM), board CETS.
     """
-    return await get_last_price_fiat(session, "USD000UTSTOM", "CETS")
+    return await get_last_price_fiat(session, "USD000UTSTOM", "CETS", allow_iss_fallback=True)
 
 
 async def get_last_price_by_asset_type(
@@ -471,7 +483,7 @@ async def get_last_price_by_asset_type(
     if asset_type == ASSET_TYPE_METAL:
         return await get_last_price_metal(session, secid, boardid)
     if asset_type == ASSET_TYPE_FIAT:
-        return await get_last_price_fiat(session, secid, boardid)
+        return await get_last_price_fiat(session, secid, boardid, allow_iss_fallback=True)
     return await get_last_price_stock_shares(session, secid, boardid)
 
 

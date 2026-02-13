@@ -485,7 +485,13 @@ async def api_price(request: web.Request) -> web.Response:
     try:
         async with aiohttp.ClientSession() as session:
             if asset_type == ASSET_TYPE_FIAT:
-                price = await get_last_price_fiat(session, secid, boardid or "CETS")
+                # Fast preview for Mini App: do not block on ISS fallback timeouts.
+                price = await get_last_price_fiat(
+                    session,
+                    secid,
+                    boardid or "CETS",
+                    allow_iss_fallback=False,
+                )
             else:
                 price = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
     except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
