@@ -18,8 +18,6 @@ from aiogram.filters import Command, StateFilter
 from aiogram.types import (
     CallbackQuery,
     Message,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
     BufferedInputFile,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -29,6 +27,46 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 
+from bot_keyboards import (
+    make_alert_asset_type_kb,
+    make_alert_candidates_kb,
+    make_alert_disable_confirm_kb,
+    make_alert_range_confirm_kb,
+    make_alert_search_back_kb,
+    make_alerts_list_kb,
+    make_asset_type_kb,
+    make_candidates_kb,
+    make_clear_portfolio_kb,
+    make_confirm_kb,
+    make_date_mode_kb,
+    make_edit_step_kb,
+    make_lookup_asset_type_kb,
+    make_lookup_candidates_kb,
+    make_lookup_search_back_kb,
+    make_main_menu_kb,
+    make_portfolio_map_mode_kb,
+    make_price_back_kb,
+    make_qty_back_kb,
+    make_search_back_kb,
+    make_trade_side_kb,
+)
+from bot_formatters import (
+    board_mode_ru,
+    fmt_pct,
+    money,
+    money_signed,
+    parse_ddmmyyyy,
+    pnl_emoji,
+    pnl_label,
+    rub_amount,
+)
+from broker_import_service import import_broker_xml_trades
+from portfolio_service import (
+    build_portfolio_map_rows as svc_build_portfolio_map_rows,
+    compute_portfolio_return_30d as svc_compute_portfolio_return_30d,
+    load_prices_for_positions as svc_load_prices_for_positions,
+    refresh_price_cache_once as svc_refresh_price_cache_once,
+)
 from db import (
     acquire_single_instance_lock,
     release_single_instance_lock,
@@ -54,9 +92,6 @@ from db import (
     update_day_open_value,
     get_price_alert_states_bulk,
     set_price_alert_states_bulk,
-    list_active_position_instruments,
-    upsert_price_cache_bulk,
-    get_price_cache_map,
     get_active_app_text,
     list_active_app_texts,
     create_price_target_alert,
@@ -82,7 +117,6 @@ from moex_iss import (
     search_metals,
     search_securities,
 )
-from broker_report_xml import parse_broker_report_xml
 from miniapp import attach_miniapp_routes
 
 load_dotenv()
@@ -213,24 +247,6 @@ class PriceTargetAlertFlow(StatesGroup):
     waiting_target_price = State()
     waiting_range_confirm = State()
 
-def money(x: float) -> str:
-    return f"{x:,.2f}".replace(",", " ")
-
-def money_signed(x: float) -> str:
-    if x > 0:
-        return f"+{money(x)}"
-    if x < 0:
-        return f"-{money(abs(x))}"
-    return money(0.0)
-
-def rub_amount(x: float | None) -> str:
-    if x is None:
-        return "н/д"
-    try:
-        return money(float(x))
-    except (TypeError, ValueError):
-        return "н/д"
-
 
 def _ru_weekday_short(d: date) -> str:
     names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
@@ -336,217 +352,8 @@ async def make_articles_kb():
     kb.adjust(1)
     return kb.as_markup(), items
 
-async def make_candidates_kb(cands: list[dict]):
-    kb = InlineKeyboardBuilder()
-    for i, c in enumerate(cands):
-        secid = (c.get("secid") or "").strip()
-        boardid = (c.get("boardid") or "").strip()
-        display_name = (c.get("shortname") or c.get("name") or "").strip()
-        available_qty = c.get("available_qty")
-        if display_name and boardid:
-            title = f"{secid} - {display_name} ({boardid})"
-        elif display_name:
-            title = f"{secid} - {display_name}"
-        elif boardid:
-            title = f"{secid} ({boardid})"
-        else:
-            title = secid
-        if available_qty is not None:
-            unit = "гр" if c.get("asset_type") == ASSET_TYPE_METAL else "шт"
-            title = f"{title} | доступно {float(available_qty):g} {unit}"
-        kb.button(text=title[:64], callback_data=f"pick:{i}")
-    kb.button(text="⬅️ Назад", callback_data="back:query")
-    kb.adjust(1)
-    return kb.as_markup()
-
-async def make_asset_type_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📈 Акции", callback_data=f"atype:{ASSET_TYPE_STOCK}")
-    kb.button(text="🥇 Металл", callback_data=f"atype:{ASSET_TYPE_METAL}")
-    kb.button(text="⬅️ Назад", callback_data="back:side")
-    kb.adjust(1)
-    return kb.as_markup()
-
-async def make_trade_side_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🟢 Покупка", callback_data=f"side:{TRADE_SIDE_BUY}")
-    kb.button(text="🔴 Продажа", callback_data=f"side:{TRADE_SIDE_SELL}")
-    kb.adjust(1)
-    return kb.as_markup()
-
-async def make_lookup_candidates_kb(cands: list[dict]):
-    kb = InlineKeyboardBuilder()
-    for i, c in enumerate(cands):
-        secid = (c.get("secid") or "").strip()
-        boardid = (c.get("boardid") or "").strip()
-        display_name = (c.get("shortname") or c.get("name") or "").strip()
-        if display_name and boardid:
-            title = f"{secid} - {display_name} ({boardid})"
-        elif display_name:
-            title = f"{secid} - {display_name}"
-        elif boardid:
-            title = f"{secid} ({boardid})"
-        else:
-            title = secid
-        kb.button(text=title[:64], callback_data=f"lpick:{i}")
-    kb.button(text="⬅️ Назад", callback_data="lback:query")
-    kb.adjust(1)
-    return kb.as_markup()
-
-async def make_lookup_asset_type_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📈 Акции", callback_data=f"latype:{ASSET_TYPE_STOCK}")
-    kb.button(text="🥇 Металл", callback_data=f"latype:{ASSET_TYPE_METAL}")
-    kb.adjust(1)
-    return kb.as_markup()
-
-
-async def make_alert_asset_type_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📈 Акции", callback_data=f"aatype:{ASSET_TYPE_STOCK}")
-    kb.button(text="🥇 Металлы", callback_data=f"aatype:{ASSET_TYPE_METAL}")
-    kb.button(text="💵 Фиат", callback_data=f"aatype:{ASSET_TYPE_FIAT}")
-    kb.adjust(1)
-    return kb.as_markup()
-
-
-async def make_alert_search_back_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Назад", callback_data="aaback:asset_type")
-    return kb.as_markup()
-
-
-async def make_alert_candidates_kb(cands: list[dict]):
-    kb = InlineKeyboardBuilder()
-    for i, c in enumerate(cands):
-        secid = (c.get("secid") or "").strip()
-        boardid = (c.get("boardid") or "").strip()
-        display_name = (c.get("shortname") or c.get("name") or "").strip()
-        if display_name and boardid:
-            title = f"{secid} - {display_name} ({boardid})"
-        elif display_name:
-            title = f"{secid} - {display_name}"
-        elif boardid:
-            title = f"{secid} ({boardid})"
-        else:
-            title = secid
-        kb.button(text=title[:64], callback_data=f"aapick:{i}")
-    kb.button(text="⬅️ Назад", callback_data="aaback:query")
-    kb.adjust(1)
-    return kb.as_markup()
-
-
-async def make_alert_range_confirm_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Да, ±5%", callback_data="aarange:yes")
-    kb.button(text="Только точное значение", callback_data="aarange:no")
-    kb.adjust(1)
-    return kb.as_markup()
-
-
-async def make_alerts_list_kb(alerts: list[dict]):
-    kb = InlineKeyboardBuilder()
-    for alert in alerts:
-        secid = alert.get("secid") or "?"
-        shortname = (alert.get("shortname") or "").strip()
-        target_price = float(alert.get("target_price") or 0.0)
-        range_percent = float(alert.get("range_percent") or 0.0)
-        label = f"{shortname} ({secid})" if shortname else secid
-        if range_percent > 0:
-            text = f"🔔 {label}: {money(target_price)} ±{range_percent:g}%"
-        else:
-            text = f"🔔 {label}: {money(target_price)}"
-        kb.button(text=text[:64], callback_data=f"talert:{int(alert['id'])}")
-    kb.adjust(1)
-    return kb.as_markup()
-
-
-async def make_alert_disable_confirm_kb(alert_id: int):
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Отключить", callback_data=f"talertoff:{alert_id}")
-    kb.button(text="Отмена", callback_data="talertlist")
-    kb.adjust(1)
-    return kb.as_markup()
-
-async def make_date_mode_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Сегодня", callback_data="date:today")
-    kb.button(text="Ввести дату", callback_data="date:manual")
-    kb.adjust(1)
-    return kb.as_markup()
-
-async def make_search_back_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Назад", callback_data="back:asset_type")
-    return kb.as_markup()
-
-async def make_lookup_search_back_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Назад", callback_data="lback:asset_type")
-    return kb.as_markup()
-
-async def make_qty_back_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Назад", callback_data="back:instrument")
-    return kb.as_markup()
-
-async def make_price_back_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Назад", callback_data="back:qty")
-    return kb.as_markup()
-
-async def make_confirm_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="💾 Сохранить", callback_data="confirm:save")
-    kb.button(text="✏️ Редактировать", callback_data="confirm:edit")
-    kb.adjust(1)
-    return kb.as_markup()
-
-async def make_edit_step_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Дата", callback_data="edit:date")
-    kb.button(text="Покупка/продажа", callback_data="edit:side")
-    kb.button(text="Тип актива", callback_data="edit:asset_type")
-    kb.button(text="Инструмент", callback_data="edit:instrument")
-    kb.button(text="Количество", callback_data="edit:qty")
-    kb.button(text="Цена за единицу", callback_data="edit:price")
-    kb.adjust(1)
-    return kb.as_markup()
-
-async def make_portfolio_map_mode_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🧩 Карта для себя", callback_data=CB_PORTFOLIO_MAP_SELF)
-    kb.button(text="📤 Поделиться картой портфеля", callback_data=CB_PORTFOLIO_MAP_SHARE)
-    kb.adjust(1)
-    return kb.as_markup()
-
-def make_main_menu_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=BTN_ADD_TRADE), KeyboardButton(text=BTN_PORTFOLIO)],
-            [KeyboardButton(text=BTN_ASSET_LOOKUP), KeyboardButton(text=BTN_PORTFOLIO_MAP)],
-            [KeyboardButton(text=BTN_TOP_MOVERS), KeyboardButton(text=BTN_USD_RUB)],
-            [KeyboardButton(text=BTN_WHY_INVEST)],
-            [KeyboardButton(text=BTN_ALERTS)],
-        ],
-        resize_keyboard=True,
-    )
-
 def today_ddmmyyyy() -> str:
     return datetime.now(MSK_TZ).strftime("%d.%m.%Y")
-
-def parse_ddmmyyyy(value: str) -> str | None:
-    d = (value or "").strip()
-    if len(d) != 10 or d[2] != "." or d[5] != ".":
-        return None
-    dd, mm, yyyy = d[:2], d[3:5], d[6:10]
-    if not (dd.isdigit() and mm.isdigit() and yyyy.isdigit()):
-        return None
-    try:
-        datetime.strptime(d, "%d.%m.%Y")
-    except ValueError:
-        return None
-    return d
 
 def build_trade_preview(data: dict) -> str:
     chosen = data["chosen"]
@@ -567,47 +374,6 @@ def build_trade_preview(data: dict) -> str:
         f"Цена за единицу: {money(price)} RUB\n"
         f"Сумма: {money(total)} RUB\n"
     )
-
-def board_mode_ru(boardid: str | None, asset_type: str) -> str:
-    b = (boardid or "").strip().upper()
-    stock_modes = {
-        "TQBR": "Основной режим торгов акциями (Т+)",
-        "TQTF": "Режим торгов ETF (Т+)",
-        "TQTD": "Режим торгов депозитарными расписками (Т+)",
-        "TQIF": "Режим торгов паями БПИФ/ПИФ (Т+)",
-    }
-    metal_modes = {
-        "CETS": "Валютный рынок (сделки с драгоценными металлами)",
-        "TOM": "Поставка TOM (расчеты завтра)",
-    }
-
-    if asset_type == ASSET_TYPE_METAL:
-        if b in metal_modes:
-            return metal_modes[b]
-        return f"Режим торгов металлами ({b or 'не указан'})"
-
-    if b in stock_modes:
-        return stock_modes[b]
-    return f"Режим торгов ({b or 'не указан'})"
-
-def pnl_label(pnl_amount: float, pnl_percent: float | None) -> str:
-    if pnl_amount > 0:
-        emoji = "📈"
-    elif pnl_amount < 0:
-        emoji = "📉"
-    else:
-        emoji = "➖"
-
-    if pnl_percent is None:
-        return f"{emoji} P&L: {money_signed(pnl_amount)} RUB"
-    return f"{emoji} P&L: {pnl_percent:+.2f}% ({money_signed(pnl_amount)} RUB)"
-
-def pnl_emoji(pnl_amount: float) -> str:
-    return "📈" if pnl_amount >= 0 else "📉"
-
-def fmt_pct(pct: float) -> str:
-    return f"{pct:+.2f}%"
-
 
 def append_delayed_warning(text: str) -> str:
     if delayed_data_used():
@@ -659,89 +425,20 @@ async def build_asset_dynamics_text(chosen: dict, asset_type: str) -> str:
             )
     return append_delayed_warning("\n".join(lines))
 
-def _cache_age_seconds(updated_at: datetime | None, now_utc: datetime) -> float | None:
-    if updated_at is None:
-        return None
-    dt = updated_at
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return max(0.0, (now_utc - dt.astimezone(timezone.utc)).total_seconds())
-
-
-async def _fetch_prices_limited(rows: list[dict]) -> list[tuple[dict, float | None]]:
-    if not rows:
-        return []
-
-    sem = asyncio.Semaphore(PRICE_FETCH_CONCURRENCY)
-    out: list[tuple[dict, float | None]] = []
-
-    async with aiohttp.ClientSession() as session:
-        async def load_price(row: dict) -> tuple[dict, float | None]:
-            async with sem:
-                try:
-                    last = await get_last_price_by_asset_type(
-                        session,
-                        row["secid"],
-                        row.get("boardid"),
-                        row.get("asset_type") or ASSET_TYPE_STOCK,
-                    )
-                    return row, last
-                except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError):
-                    logger.warning(
-                        "Failed to load price secid=%s boardid=%s",
-                        row.get("secid"),
-                        row.get("boardid"),
-                    )
-                    return row, None
-
-        for i in range(0, len(rows), PRICE_FETCH_BATCH_SIZE):
-            batch = rows[i:i + PRICE_FETCH_BATCH_SIZE]
-            out.extend(await asyncio.gather(*(load_price(row) for row in batch)))
-    return out
-
 async def refresh_price_cache_once() -> None:
-    instruments = await list_active_position_instruments(DB_DSN)
-    if not instruments:
-        return
-
-    priced = await _fetch_prices_limited(instruments)
-    now_utc = datetime.now(timezone.utc)
-    cache_rows = [
-        (int(row["instrument_id"]), float(last))
-        for row, last in priced
-        if last is not None
-    ]
-    await upsert_price_cache_bulk(DB_DSN, cache_rows, now_utc)
+    await svc_refresh_price_cache_once(
+        DB_DSN,
+        price_fetch_concurrency=PRICE_FETCH_CONCURRENCY,
+        price_fetch_batch_size=PRICE_FETCH_BATCH_SIZE,
+    )
 
 async def _load_prices_for_positions(positions: list[dict]) -> dict[int, float | None]:
-    now_utc = datetime.now(timezone.utc)
-    instrument_ids = [int(pos["id"]) for pos in positions]
-    cache = await get_price_cache_map(DB_DSN, instrument_ids)
-
-    prices: dict[int, float | None] = {}
-    missing_positions: list[dict] = []
-    for pos in positions:
-        iid = int(pos["id"])
-        rec = cache.get(iid)
-        if rec:
-            age = _cache_age_seconds(rec.get("updated_at"), now_utc)
-            if age is not None and age <= 120:
-                prices[iid] = float(rec["last_price"])
-                continue
-        missing_positions.append(pos)
-
-    if not missing_positions:
-        return prices
-
-    loaded = await _fetch_prices_limited(missing_positions)
-    cache_rows: list[tuple[int, float]] = []
-    for pos, last in loaded:
-        iid = int(pos["id"])
-        prices[iid] = last
-        if last is not None:
-            cache_rows.append((iid, float(last)))
-    await upsert_price_cache_bulk(DB_DSN, cache_rows, now_utc)
-    return prices
+    return await svc_load_prices_for_positions(
+        DB_DSN,
+        positions,
+        price_fetch_concurrency=PRICE_FETCH_CONCURRENCY,
+        price_fetch_batch_size=PRICE_FETCH_BATCH_SIZE,
+    )
 
 async def build_portfolio_report(user_id: int) -> tuple[str, float | None, list[dict]]:
     positions = await get_user_positions(DB_DSN, user_id)
@@ -838,91 +535,24 @@ async def _load_sell_candidates(user_id: int, asset_type: str) -> list[dict]:
     return out
 
 
-def _pick_stock_candidate_by_isin(cands: list[dict], isin: str) -> dict | None:
-    isin_upper = isin.strip().upper()
-    if not isin_upper:
-        return cands[0] if cands else None
-    for c in cands:
-        if str(c.get("isin") or "").strip().upper() == isin_upper:
-            return c
-    return cands[0] if cands else None
-
-
 async def _import_broker_xml_trades(user_id: int, file_name: str, xml_bytes: bytes) -> str:
-    parsed_trades = parse_broker_report_xml(xml_bytes)
-    if not parsed_trades:
-        raise ValueError("В выписке не найдены сделки в блоке trades_finished.")
-
-    imported = 0
-    duplicates = 0
-    skipped = 0
-    unresolved_isins: set[str] = set()
-    stock_cache: dict[str, dict | None] = {}
-    source_name = (file_name or "broker_report.xml")[:255]
-
-    async with aiohttp.ClientSession() as session:
-        for t in parsed_trades:
-            secid = None
-            boardid = ""
-            shortname = (t.asset_name or "").strip() or None
-            asset_type = t.asset_type
-
-            if asset_type == ASSET_TYPE_METAL:
-                secid = t.metal_secid
-            else:
-                cached = stock_cache.get(t.isin_reg)
-                if cached is None and t.isin_reg not in stock_cache:
-                    cands = await search_securities(session, t.isin_reg)
-                    cached = _pick_stock_candidate_by_isin(cands, t.isin_reg)
-                    stock_cache[t.isin_reg] = cached
-                else:
-                    cached = stock_cache.get(t.isin_reg)
-                if cached:
-                    secid = str(cached.get("secid") or "").strip() or None
-                    boardid = str(cached.get("boardid") or "").strip()
-                    if not shortname:
-                        shortname = (cached.get("shortname") or cached.get("name") or "").strip() or None
-                else:
-                    unresolved_isins.add(t.isin_reg)
-
-            if not secid:
-                skipped += 1
-                continue
-
-            instrument_id = await upsert_instrument(
-                DB_DSN,
-                secid=secid,
-                isin=t.isin_reg,
-                boardid=boardid,
-                shortname=shortname,
-                asset_type=asset_type,
-            )
-            was_inserted = await add_trade(
-                DB_DSN,
-                user_id=user_id,
-                instrument_id=instrument_id,
-                trade_date=t.trade_date,
-                qty=t.qty,
-                price=t.price,
-                commission=t.commission,
-                external_trade_id=f"broker_xml:{t.trade_no}",
-                import_source=source_name,
-            )
-            if was_inserted:
-                imported += 1
-            else:
-                duplicates += 1
+    result = await import_broker_xml_trades(
+        db_dsn=DB_DSN,
+        user_id=user_id,
+        file_name=file_name,
+        xml_bytes=xml_bytes,
+    )
 
     lines = [
-        f"Импорт завершен: {source_name}",
-        f"Сделок в выписке: {len(parsed_trades)}",
-        f"Добавлено: {imported}",
-        f"Пропущено как дубликаты: {duplicates}",
-        f"Пропущено (не удалось сопоставить инструмент): {skipped}",
+        f"Импорт завершен: {result.file}",
+        f"Сделок в выписке: {result.rows}",
+        f"Добавлено: {result.imported}",
+        f"Пропущено как дубликаты: {result.duplicates}",
+        f"Пропущено (не удалось сопоставить инструмент): {result.skipped}",
     ]
-    if unresolved_isins:
-        show = ", ".join(sorted(unresolved_isins)[:12])
-        tail = "" if len(unresolved_isins) <= 12 else f" и еще {len(unresolved_isins) - 12}"
+    if result.unresolved_isins:
+        show = ", ".join(list(result.unresolved_isins)[:12])
+        tail = "" if len(result.unresolved_isins) <= 12 else f" и еще {len(result.unresolved_isins) - 12}"
         lines.append(f"Не сопоставлены ISIN: {show}{tail}")
     return "\n".join(lines)
 
@@ -950,7 +580,16 @@ async def cmd_start(message: Message):
         "/import_broker_xml — загрузить XML брокерской выписки и импортировать сделки (Доступен только АльфаБанк)\n"
         "📚 Полезное\n"
         "/why_invest — зачем инвестировать и почему важна дисциплина\n",
-        reply_markup=make_main_menu_kb(),
+        reply_markup=make_main_menu_kb(
+            btn_add_trade=BTN_ADD_TRADE,
+            btn_portfolio=BTN_PORTFOLIO,
+            btn_asset_lookup=BTN_ASSET_LOOKUP,
+            btn_portfolio_map=BTN_PORTFOLIO_MAP,
+            btn_top_movers=BTN_TOP_MOVERS,
+            btn_usd_rub=BTN_USD_RUB,
+            btn_why_invest=BTN_WHY_INVEST,
+            btn_alerts=BTN_ALERTS,
+        ),
     )
 
 async def cmd_set_interval(message: Message):
@@ -1315,13 +954,6 @@ async def on_top_movers_date_pick(call: CallbackQuery):
     await call.answer()
 
 
-async def make_clear_portfolio_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🗑️ Да, очистить", callback_data="pfclear:yes")
-    kb.button(text="Отмена", callback_data="pfclear:no")
-    kb.adjust(1)
-    return kb.as_markup()
-
 async def cmd_clear_portfolio(message: Message):
     await message.answer(
         "Это удалит все ваши сделки и обнулит портфель. Действие необратимо.\n"
@@ -1636,85 +1268,21 @@ async def cmd_portfolio(message: Message):
 
 
 async def _build_portfolio_map_rows(user_id: int) -> tuple[list[dict], int]:
-    positions = await get_user_positions(DB_DSN, user_id)
-    if not positions:
-        return [], 0
-
-    prices = await _load_prices_for_positions(positions)
-    rows: list[dict] = []
-    unknown_prices = 0
-    for pos in positions:
-        qty = float(pos.get("total_qty") or 0.0)
-        if qty <= 1e-12:
-            continue
-        last = prices.get(int(pos["id"]))
-        if last is None:
-            unknown_prices += 1
-            continue
-        total_cost = float(pos.get("total_cost") or 0.0)
-        value = qty * float(last)
-        if value <= 0:
-            continue
-        pnl_pct = (value - total_cost) / total_cost * 100.0 if abs(total_cost) > 1e-12 else None
-        rows.append(
-            {
-                "instrument_id": int(pos["id"]),
-                "secid": str(pos.get("secid") or "").strip() or "UNKNOWN",
-                "shortname": (pos.get("shortname") or "").strip(),
-                "boardid": pos.get("boardid"),
-                "asset_type": pos.get("asset_type") or ASSET_TYPE_STOCK,
-                "qty": qty,
-                "last": float(last),
-                "value": float(value),
-                "pnl_pct": pnl_pct,
-            }
-        )
-    rows.sort(key=lambda x: float(x["value"]), reverse=True)
-    return rows, unknown_prices
+    return await svc_build_portfolio_map_rows(
+        DB_DSN,
+        user_id,
+        price_fetch_concurrency=PRICE_FETCH_CONCURRENCY,
+        price_fetch_batch_size=PRICE_FETCH_BATCH_SIZE,
+    )
 
 
 async def _compute_portfolio_return_30d(
     rows: list[dict],
 ) -> tuple[float | None, dict[int, float]]:
-    if not rows:
-        return None, {}
-    from_date = datetime.now(MSK_TZ).date() - timedelta(days=30)
-    till_date = datetime.now(MSK_TZ).date()
-    sem = asyncio.Semaphore(PRICE_FETCH_CONCURRENCY)
-    base_price_map: dict[int, float] = {}
-
-    async with aiohttp.ClientSession() as session:
-        async def load_base(row: dict) -> None:
-            async with sem:
-                try:
-                    history = await get_history_prices_by_asset_type(
-                        session,
-                        secid=row["secid"],
-                        boardid=row.get("boardid"),
-                        asset_type=row.get("asset_type") or ASSET_TYPE_STOCK,
-                        from_date=from_date,
-                        till_date=till_date,
-                    )
-                    if history and history[0][1] > 0:
-                        base_price_map[int(row["instrument_id"])] = float(history[0][1])
-                except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError):
-                    logger.warning("Failed loading 30d history for secid=%s", row.get("secid"))
-
-        await asyncio.gather(*(load_base(row) for row in rows))
-
-    base_total = 0.0
-    current_total = 0.0
-    for row in rows:
-        iid = int(row["instrument_id"])
-        base_price = base_price_map.get(iid)
-        if base_price is None or base_price <= 0:
-            continue
-        qty = float(row["qty"])
-        base_total += qty * base_price
-        current_total += qty * float(row["last"])
-    if base_total <= 1e-12:
-        return None, base_price_map
-    return (current_total - base_total) / base_total * 100.0, base_price_map
+    return await svc_compute_portfolio_return_30d(
+        rows,
+        price_fetch_concurrency=PRICE_FETCH_CONCURRENCY,
+    )
 
 
 async def cmd_portfolio_map(message: Message):

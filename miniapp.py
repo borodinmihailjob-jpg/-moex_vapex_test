@@ -1,17 +1,15 @@
 import asyncio
-import hashlib
-import hmac
-import json
 import logging
 import os
 from datetime import date, datetime, timedelta
+from json import JSONDecodeError
 from pathlib import Path
-from urllib.parse import parse_qsl
 
 import aiohttp
 from aiohttp import web
 
-from broker_report_xml import parse_broker_report_xml
+from broker_import_service import import_broker_xml_trades
+from common_utils import safe_float
 from db import (
     add_trade,
     clear_user_portfolio,
@@ -40,6 +38,7 @@ from moex_iss import (
     search_metals,
     search_securities,
 )
+from miniapp_auth import MiniAppAuthError, parse_and_validate_init_data
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +47,8 @@ TRADE_SIDE_SELL = "sell"
 MAX_XML_UPLOAD_BYTES = 5 * 1024 * 1024
 _api_cache: dict[str, tuple[float, dict]] = {}
 _API_CACHE_TTL_SEC = int((os.getenv("MINIAPP_API_CACHE_TTL_SEC") or "900").strip() or "900")
+_API_CACHE_MAX_SIZE = int((os.getenv("MINIAPP_API_CACHE_MAX_SIZE") or "2048").strip() or "2048")
+_PRICE_LOAD_CONCURRENCY = int((os.getenv("MINIAPP_PRICE_LOAD_CONCURRENCY") or "12").strip() or "12")
 
 
 def _cache_get(key: str) -> dict | None:
@@ -56,45 +57,36 @@ def _cache_get(key: str) -> dict | None:
         return None
     ts, data = row
     if asyncio.get_running_loop().time() - ts > _API_CACHE_TTL_SEC:
+        _api_cache.pop(key, None)
         return None
     return data
 
 
 def _cache_set(key: str, data: dict) -> None:
-    _api_cache[key] = (asyncio.get_running_loop().time(), data)
+    now = asyncio.get_running_loop().time()
+    _api_cache[key] = (now, data)
+    if len(_api_cache) <= _API_CACHE_MAX_SIZE:
+        return
+    cutoff = now - _API_CACHE_TTL_SEC
+    stale_keys = [k for k, (ts, _) in _api_cache.items() if ts < cutoff]
+    for stale_key in stale_keys:
+        _api_cache.pop(stale_key, None)
+    if len(_api_cache) <= _API_CACHE_MAX_SIZE:
+        return
+    to_remove = len(_api_cache) - _API_CACHE_MAX_SIZE
+    oldest_keys = sorted(_api_cache.items(), key=lambda item: item[1][0])[:to_remove]
+    for cache_key, _ in oldest_keys:
+        _api_cache.pop(cache_key, None)
 
 
-class MiniAppAuthError(Exception):
-    pass
-
-
-def _parse_init_data(init_data: str) -> dict[str, str]:
-    pairs = dict(parse_qsl(init_data, keep_blank_values=True, strict_parsing=False))
-    return {str(k): str(v) for k, v in pairs.items()}
-
-
-def _calc_webapp_hash(bot_token: str, fields: dict[str, str]) -> str:
-    data_check_arr = [f"{k}={v}" for k, v in sorted(fields.items()) if k != "hash"]
-    data_check_string = "\n".join(data_check_arr)
-    secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
-    return hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def parse_and_validate_init_data(bot_token: str, init_data: str) -> dict:
-    fields = _parse_init_data(init_data)
-    got_hash = fields.get("hash")
-    if not got_hash:
-        raise MiniAppAuthError("initData hash is missing")
-    expected = _calc_webapp_hash(bot_token, fields)
-    if not hmac.compare_digest(got_hash, expected):
-        raise MiniAppAuthError("initData hash mismatch")
-    user_raw = fields.get("user")
-    if not user_raw:
-        raise MiniAppAuthError("initData user is missing")
+async def _read_json(request: web.Request) -> dict:
     try:
-        return json.loads(user_raw)
-    except json.JSONDecodeError as exc:
-        raise MiniAppAuthError("initData user is invalid JSON") from exc
+        payload = await request.json()
+    except (JSONDecodeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="invalid JSON body") from exc
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="JSON body must be an object")
+    return payload
 
 
 async def _auth_user_id(request: web.Request, bot_token: str) -> int:
@@ -124,6 +116,7 @@ async def _load_prices_for_positions(positions: list[dict]) -> dict[int, float |
     if not positions:
         return {}
     prices: dict[int, float | None] = {}
+    sem = asyncio.Semaphore(max(1, _PRICE_LOAD_CONCURRENCY))
     async with aiohttp.ClientSession() as session:
 
         async def one(pos: dict) -> tuple[int, float | None]:
@@ -131,19 +124,20 @@ async def _load_prices_for_positions(positions: list[dict]) -> dict[int, float |
             asset_type = pos.get("asset_type") or ASSET_TYPE_STOCK
             secid = str(pos.get("secid") or "")
             boardid = pos.get("boardid")
-            try:
-                if asset_type == ASSET_TYPE_FIAT:
-                    px = await get_last_price_fiat(session, secid, boardid or "CETS")
-                else:
-                    px = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
-                return iid, px
-            except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
-                logger.warning(
-                    "MiniApp price load failed secid=%s error=%s",
-                    secid,
-                    exc.__class__.__name__,
-                )
-                return iid, None
+            async with sem:
+                try:
+                    if asset_type == ASSET_TYPE_FIAT:
+                        px = await get_last_price_fiat(session, secid, boardid or "CETS")
+                    else:
+                        px = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
+                    return iid, px
+                except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+                    logger.warning(
+                        "MiniApp price load failed secid=%s error=%s",
+                        secid,
+                        exc.__class__.__name__,
+                    )
+                    return iid, None
 
         rows = await asyncio.gather(*(one(p) for p in positions))
     for iid, px in rows:
@@ -153,23 +147,6 @@ async def _load_prices_for_positions(positions: list[dict]) -> dict[int, float |
 
 def _json_ok(payload: dict | list) -> web.Response:
     return web.json_response({"ok": True, "data": payload})
-
-
-def _safe_float(value, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return default
-
-
-def _pick_stock_candidate_by_isin(cands: list[dict], isin: str) -> dict | None:
-    isin_upper = isin.strip().upper()
-    if not isin_upper:
-        return cands[0] if cands else None
-    for c in cands:
-        if str(c.get("isin") or "").strip().upper() == isin_upper:
-            return c
-    return cands[0] if cands else None
 
 
 async def miniapp_index(request: web.Request) -> web.Response:
@@ -183,7 +160,7 @@ async def miniapp_asset(request: web.Request) -> web.Response:
     if "/" in name or ".." in name:
         raise web.HTTPNotFound()
     path = root / name
-    if not path.exists() or not path.is_file():
+    if not path.is_file():
         raise web.HTTPNotFound()
     return web.FileResponse(path)
 
@@ -277,7 +254,7 @@ async def api_trade_post(request: web.Request) -> web.Response:
     bot_token = request.app["bot_token"]
     db_dsn = request.app["db_dsn"]
     user_id = await _auth_user_id(request, bot_token)
-    payload = await request.json()
+    payload = await _read_json(request)
 
     secid = str(payload.get("secid") or "").strip().upper()
     if not secid:
@@ -295,9 +272,9 @@ async def api_trade_post(request: web.Request) -> web.Response:
     if not trade_date:
         trade_date = datetime.now().strftime("%d.%m.%Y")
 
-    qty = _safe_float(payload.get("qty"), 0.0)
-    price = _safe_float(payload.get("price"), 0.0)
-    commission = max(0.0, _safe_float(payload.get("commission"), 0.0))
+    qty = safe_float(payload.get("qty"), 0.0)
+    price = safe_float(payload.get("price"), 0.0)
+    commission = max(0.0, safe_float(payload.get("commission"), 0.0))
     if qty <= 0 or price <= 0:
         raise web.HTTPBadRequest(text="qty and price must be > 0")
 
@@ -338,8 +315,8 @@ async def api_trade_post(request: web.Request) -> web.Response:
                 last = await get_last_price_fiat(session, secid, boardid)
             else:
                 last = await get_last_price_by_asset_type(session, secid, boardid, asset_type)
-    except Exception:
-        logger.exception("MiniApp trade price load failed secid=%s", secid)
+    except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+        logger.warning("MiniApp trade price load failed secid=%s error=%s", secid, exc.__class__.__name__)
 
     return _json_ok(
         {
@@ -360,7 +337,7 @@ async def api_trade_post(request: web.Request) -> web.Response:
 async def api_asset_lookup_post(request: web.Request) -> web.Response:
     bot_token = request.app["bot_token"]
     _ = await _auth_user_id(request, bot_token)
-    payload = await request.json()
+    payload = await _read_json(request)
 
     secid = str(payload.get("secid") or "").strip().upper()
     if not secid:
@@ -406,8 +383,8 @@ async def api_asset_lookup_post(request: web.Request) -> web.Response:
             if not history:
                 dynamics.append({"period": key, "pct": None, "delta": None})
                 continue
-            base = _safe_float(history[0][1], 0.0)
-            end = _safe_float(current, 0.0) if current is not None else _safe_float(history[-1][1], 0.0)
+            base = safe_float(history[0][1], 0.0)
+            end = safe_float(current, 0.0) if current is not None else safe_float(history[-1][1], 0.0)
             if base <= 0:
                 dynamics.append({"period": key, "pct": None, "delta": None})
                 continue
@@ -447,7 +424,7 @@ async def api_top_movers(request: web.Request) -> web.Response:
         logger.warning("MiniApp top movers failed date=%s error=%s", day.isoformat(), exc.__class__.__name__)
         movers = []
 
-    movers_sorted = sorted(movers, key=lambda x: _safe_float(x.get("pct"), -10**9), reverse=True)
+    movers_sorted = sorted(movers, key=lambda x: safe_float(x.get("pct"), -10**9), reverse=True)
     top = movers_sorted[:10]
     bottom = list(reversed(movers_sorted[-10:])) if movers_sorted else []
     return _json_ok({"date": day.isoformat(), "top": top, "bottom": bottom, "count": len(movers_sorted)})
@@ -474,7 +451,7 @@ async def api_usd_rub(request: web.Request) -> web.Response:
 async def api_price(request: web.Request) -> web.Response:
     bot_token = request.app["bot_token"]
     _ = await _auth_user_id(request, bot_token)
-    payload = await request.json()
+    payload = await _read_json(request)
     secid = str(payload.get("secid") or "").strip().upper()
     if not secid:
         raise web.HTTPBadRequest(text="secid is required")
@@ -524,7 +501,7 @@ async def api_open_close_settings(request: web.Request) -> web.Response:
         settings = await get_user_alert_settings(db_dsn, user_id)
         return _json_ok({"open_close_enabled": bool(settings.get("open_close_enabled"))})
 
-    payload = await request.json()
+    payload = await _read_json(request)
     enabled = bool(payload.get("enabled"))
     await set_open_close_alert(db_dsn, user_id, enabled)
     return _json_ok({"open_close_enabled": enabled})
@@ -577,79 +554,24 @@ async def api_import_xml(request: web.Request) -> web.Response:
         chunks.append(chunk)
     xml_bytes = b"".join(chunks)
 
-    parsed_trades = parse_broker_report_xml(xml_bytes)
-    if not parsed_trades:
-        raise web.HTTPBadRequest(text="В выписке не найдены сделки")
-
-    imported = 0
-    duplicates = 0
-    skipped = 0
-    unresolved_isins: set[str] = set()
-    stock_cache: dict[str, dict | None] = {}
-    source_name = filename[:255]
-
-    async with aiohttp.ClientSession() as session:
-        for t in parsed_trades:
-            secid = None
-            boardid = ""
-            shortname = (t.asset_name or "").strip() or None
-            asset_type = t.asset_type
-
-            if asset_type == ASSET_TYPE_METAL:
-                secid = t.metal_secid
-            else:
-                cached = stock_cache.get(t.isin_reg)
-                if cached is None and t.isin_reg not in stock_cache:
-                    cands = await search_securities(session, t.isin_reg)
-                    cached = _pick_stock_candidate_by_isin(cands, t.isin_reg)
-                    stock_cache[t.isin_reg] = cached
-                else:
-                    cached = stock_cache.get(t.isin_reg)
-
-                if cached:
-                    secid = str(cached.get("secid") or "").strip() or None
-                    boardid = str(cached.get("boardid") or "").strip()
-                    if not shortname:
-                        shortname = (cached.get("shortname") or cached.get("name") or "").strip() or None
-                else:
-                    unresolved_isins.add(t.isin_reg)
-
-            if not secid:
-                skipped += 1
-                continue
-
-            instrument_id = await upsert_instrument(
-                db_dsn,
-                secid=secid,
-                isin=t.isin_reg,
-                boardid=boardid,
-                shortname=shortname,
-                asset_type=asset_type,
-            )
-            was_inserted = await add_trade(
-                db_dsn,
-                user_id=user_id,
-                instrument_id=instrument_id,
-                trade_date=t.trade_date,
-                qty=t.qty,
-                price=t.price,
-                commission=t.commission,
-                external_trade_id=f"broker_xml:{t.trade_no}",
-                import_source=source_name,
-            )
-            if was_inserted:
-                imported += 1
-            else:
-                duplicates += 1
+    try:
+        result = await import_broker_xml_trades(
+            db_dsn=db_dsn,
+            user_id=user_id,
+            file_name=filename,
+            xml_bytes=xml_bytes,
+        )
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
 
     return _json_ok(
         {
-            "file": source_name,
-            "rows": len(parsed_trades),
-            "imported": imported,
-            "duplicates": duplicates,
-            "skipped": skipped,
-            "unresolved_isins": sorted(unresolved_isins),
+            "file": result.file,
+            "rows": result.rows,
+            "imported": result.imported,
+            "duplicates": result.duplicates,
+            "skipped": result.skipped,
+            "unresolved_isins": list(result.unresolved_isins),
         }
     )
 
@@ -666,7 +588,7 @@ async def api_alerts_post(request: web.Request) -> web.Response:
     bot_token = request.app["bot_token"]
     db_dsn = request.app["db_dsn"]
     user_id = await _auth_user_id(request, bot_token)
-    payload = await request.json()
+    payload = await _read_json(request)
 
     secid = str(payload.get("secid") or "").strip()
     if not secid:
@@ -682,14 +604,14 @@ async def api_alerts_post(request: web.Request) -> web.Response:
 
     try:
         target_price = float(payload.get("target_price"))
-    except Exception as exc:
+    except (TypeError, ValueError) as exc:
         raise web.HTTPBadRequest(text="target_price is required") from exc
     if target_price <= 0:
         raise web.HTTPBadRequest(text="target_price must be > 0")
 
     try:
         range_percent = float(payload.get("range_percent", 5.0))
-    except Exception:
+    except (TypeError, ValueError):
         range_percent = 5.0
     if range_percent < 0 or range_percent > 50:
         raise web.HTTPBadRequest(text="range_percent out of bounds")
@@ -718,7 +640,7 @@ async def api_alerts_delete(request: web.Request) -> web.Response:
     user_id = await _auth_user_id(request, bot_token)
     try:
         alert_id = int(request.match_info["alert_id"])
-    except Exception as exc:
+    except (TypeError, ValueError) as exc:
         raise web.HTTPBadRequest(text="invalid alert_id") from exc
     ok = await disable_price_target_alert(db_dsn, user_id, alert_id)
     return _json_ok({"disabled": bool(ok)})

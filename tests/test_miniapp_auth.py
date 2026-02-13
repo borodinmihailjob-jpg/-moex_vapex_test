@@ -4,7 +4,7 @@ import json
 import unittest
 from urllib.parse import urlencode
 
-from miniapp import parse_and_validate_init_data, MiniAppAuthError
+from miniapp_auth import MiniAppAuthError, parse_and_validate_init_data
 
 
 def make_init_data(bot_token: str, user_payload: dict) -> str:
