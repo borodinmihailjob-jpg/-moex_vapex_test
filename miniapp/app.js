@@ -133,9 +133,11 @@ const el = {
   budgetGoalsOverview: document.getElementById("budgetGoalsOverview"),
   editBudgetBtn: document.getElementById("editBudgetBtn"),
   budgetIncomeTypeInput: document.getElementById("budgetIncomeTypeInput"),
-  budgetPaydayInput: document.getElementById("budgetPaydayInput"),
+  budgetIncomeTitleInput: document.getElementById("budgetIncomeTitleInput"),
   budgetIncomeInput: document.getElementById("budgetIncomeInput"),
   budgetIncomeSaveBtn: document.getElementById("budgetIncomeSaveBtn"),
+  budgetIncomeList: document.getElementById("budgetIncomeList"),
+  budgetResetBtn: document.getElementById("budgetResetBtn"),
   budgetExpensesInput: document.getElementById("budgetExpensesInput"),
   budgetExpensesSaveBtn: document.getElementById("budgetExpensesSaveBtn"),
   budgetFundsList: document.getElementById("budgetFundsList"),
@@ -419,6 +421,9 @@ function setBudgetTab(tab) {
   }
   show(el.budgetMonthCloseCard, tab === "close");
   show(el.budgetLoanCalcCard, tab === "loans");
+  if (tab === "income") {
+    loadBudgetIncomes().catch(() => {});
+  }
 }
 
 function renderEmpty(container, text) {
@@ -719,9 +724,15 @@ async function loadBudgetDashboard() {
   ].join("\n");
   renderBudgetOverviewGoals(data.funds || []);
   renderBudgetFunds(data.funds || []);
-  el.budgetIncomeTypeInput.value = data.profile?.income_type || "fixed";
-  el.budgetPaydayInput.value = data.profile?.payday_day || "";
-  el.budgetIncomeInput.value = income ? String(Math.round(income)) : "";
+  if (el.budgetIncomeTypeInput && !el.budgetIncomeTypeInput.value) {
+    el.budgetIncomeTypeInput.value = "salary";
+  }
+  if (el.budgetIncomeTitleInput && !el.budgetIncomeTitleInput.value) {
+    el.budgetIncomeTitleInput.value = "Зарплата";
+  }
+  if (el.budgetIncomeInput) {
+    el.budgetIncomeInput.value = "";
+  }
   el.budgetExpensesInput.value = living ? String(Math.round(living)) : "";
   setBudgetTab(state.budget.activeTab || "overview");
 }
@@ -749,6 +760,113 @@ function renderBudgetOverviewGoals(funds) {
       <div class="right"><div>${pctVal.toFixed(0)}%</div></div>
     `;
     el.budgetGoalsOverview.appendChild(item);
+  });
+}
+
+function incomeKindLabel(kind) {
+  const map = {
+    salary: "Зарплата",
+    freelance: "Фриланс",
+    business: "Бизнес",
+    rent: "Аренда",
+    passive: "Пассивный",
+    other: "Другое",
+  };
+  return map[String(kind || "").toLowerCase()] || "Другое";
+}
+
+async function loadBudgetIncomes() {
+  const data = await api("/api/miniapp/budget/incomes", { skipLoader: true });
+  renderBudgetIncomes(data.items || []);
+}
+
+function renderBudgetIncomes(items) {
+  if (!el.budgetIncomeList) return;
+  el.budgetIncomeList.innerHTML = "";
+  if (!items.length) {
+    renderEmpty(el.budgetIncomeList, "Пока тут пусто");
+    return;
+  }
+  items.forEach((row) => {
+    const item = document.createElement("div");
+    item.className = "item";
+    item.innerHTML = `
+      <div class="left">
+        <div class="name">${row.title}</div>
+        <div class="sub">${incomeKindLabel(row.kind)} • ${money(row.amount_monthly)}/мес</div>
+      </div>
+      <div class="right">
+        <button class="btn ghost" data-action="edit">Изменить</button>
+        <button class="btn danger" data-action="delete">Удалить</button>
+      </div>
+    `;
+    item.querySelector("[data-action='edit']")?.addEventListener("click", async () => {
+      const editWrap = document.createElement("div");
+      editWrap.className = "form-grid three";
+      editWrap.innerHTML = `
+        <label>Тип
+          <select id="incomeEditKind-${row.id}">
+            <option value="salary" ${row.kind === "salary" ? "selected" : ""}>Зарплата</option>
+            <option value="freelance" ${row.kind === "freelance" ? "selected" : ""}>Фриланс</option>
+            <option value="business" ${row.kind === "business" ? "selected" : ""}>Бизнес</option>
+            <option value="rent" ${row.kind === "rent" ? "selected" : ""}>Аренда</option>
+            <option value="passive" ${row.kind === "passive" ? "selected" : ""}>Пассивный</option>
+            <option value="other" ${row.kind === "other" ? "selected" : ""}>Другое</option>
+          </select>
+        </label>
+        <label>Название
+          <input id="incomeEditTitle-${row.id}" type="text" value="${row.title}" />
+        </label>
+        <label>Сумма, ₽/мес
+          <input id="incomeEditAmount-${row.id}" type="text" value="${Math.round(Number(row.amount_monthly || 0))}" />
+        </label>
+      `;
+      const actions = document.createElement("div");
+      actions.className = "wizard-actions";
+      actions.innerHTML = `<button class="btn primary">Сохранить</button><button class="btn ghost">Отмена</button>`;
+      actions.querySelector(".btn.primary")?.addEventListener("click", async () => {
+        try {
+          const kind = document.getElementById(`incomeEditKind-${row.id}`)?.value || "other";
+          const title = (document.getElementById(`incomeEditTitle-${row.id}`)?.value || "").trim();
+          const amount = parseMoneyInput(document.getElementById(`incomeEditAmount-${row.id}`)?.value || "");
+          await api(`/api/miniapp/budget/incomes/${row.id}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "edit", kind, title, amount_monthly: amount }),
+          });
+          toast("Доход обновлён");
+          await loadBudgetDashboard();
+          await loadBudgetIncomes();
+        } catch (e) {
+          toast(e?.message || "Не удалось обновить доход");
+        }
+      });
+      actions.querySelector(".btn.ghost")?.addEventListener("click", () => {
+        item.querySelector(".left").style.display = "";
+        item.querySelector(".right").style.display = "";
+        editWrap.remove();
+        actions.remove();
+      });
+      item.querySelector(".left").style.display = "none";
+      item.querySelector(".right").style.display = "none";
+      item.appendChild(editWrap);
+      item.appendChild(actions);
+    });
+    item.querySelector("[data-action='delete']")?.addEventListener("click", async () => {
+      try {
+        await api(`/api/miniapp/budget/incomes/${row.id}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "delete" }),
+        });
+        toast("Доход удалён");
+        await loadBudgetDashboard();
+        await loadBudgetIncomes();
+      } catch (e) {
+        toast(e?.message || "Не удалось удалить доход");
+      }
+    });
+    el.budgetIncomeList.appendChild(item);
   });
 }
 
@@ -1402,35 +1520,43 @@ function setupEvents() {
     }
   });
   el.editBudgetBtn?.addEventListener("click", () => {
-    state.budget.step = 1;
-    el.budgetDashboardCard.style.display = "none";
-    el.budgetFundsCard.style.display = "none";
-    el.budgetMonthCloseCard.style.display = "none";
-    el.budgetWizardCard.style.display = "";
-    renderBudgetWizardStep();
+    setBudgetTab("income");
   });
   el.planExpenseBtn?.addEventListener("click", openFundPlanFlow);
   el.saveTargetBtn?.addEventListener("click", openFundPlanFlow);
   el.closeMonthOpenBtn?.addEventListener("click", openMonthCloseFlow);
   el.budgetIncomeSaveBtn?.addEventListener("click", async () => {
     try {
-      const incomeType = el.budgetIncomeTypeInput.value || "fixed";
-      const income = parseMoneyInput(el.budgetIncomeInput.value || "");
-      const payday = (el.budgetPaydayInput.value || "").trim();
-      await api("/api/miniapp/budget/profile", {
+      const kind = el.budgetIncomeTypeInput.value || "other";
+      const title = (el.budgetIncomeTitleInput.value || "").trim() || incomeKindLabel(kind);
+      const amount = parseMoneyInput(el.budgetIncomeInput.value || "");
+      await api("/api/miniapp/budget/incomes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          income_type: incomeType,
-          income_monthly: income,
-          payday_day: payday ? Number(payday) : null,
+          kind,
+          title,
+          amount_monthly: amount,
         }),
       });
-      toast("Доходы сохранены");
+      el.budgetIncomeInput.value = "";
+      toast("Доход добавлен");
       await loadBudgetDashboard();
+      await loadBudgetIncomes();
       setBudgetTab("income");
     } catch (e) {
-      toast(e?.message || "Не удалось сохранить доходы");
+      toast(e?.message || "Не удалось добавить доход");
+    }
+  });
+  el.budgetResetBtn?.addEventListener("click", async () => {
+    if (!window.confirm("Удалить текущий бюджет? Это деактивирует доходы, расходы и цели.")) return;
+    try {
+      const result = await api("/api/miniapp/budget/reset", { method: "POST" });
+      toast(`Бюджет очищен (доходов: ${result.incomes})`);
+      await loadBudgetDashboard();
+      setBudgetTab("overview");
+    } catch (e) {
+      toast(e?.message || "Не удалось удалить бюджет");
     }
   });
   el.budgetExpensesSaveBtn?.addEventListener("click", async () => {

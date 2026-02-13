@@ -148,6 +148,18 @@ CREATE TABLE IF NOT EXISTS budget_profiles (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS budget_incomes (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'other',
+  title TEXT NOT NULL,
+  amount_monthly DOUBLE PRECISION NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS budget_obligations (
   id BIGSERIAL PRIMARY KEY,
   user_id BIGINT NOT NULL,
@@ -239,6 +251,7 @@ MIGRATION_SQL = [
     "ALTER TABLE price_target_alerts ADD COLUMN IF NOT EXISTS range_percent DOUBLE PRECISION NOT NULL DEFAULT 5",
     "CREATE TABLE IF NOT EXISTS user_modes (user_id BIGINT PRIMARY KEY, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, last_mode TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS budget_profiles (user_id BIGINT PRIMARY KEY, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, onboarding_mode TEXT, income_type TEXT NOT NULL DEFAULT 'fixed', income_monthly DOUBLE PRECISION NOT NULL DEFAULT 0, payday_day INTEGER, expenses_base DOUBLE PRECISION NOT NULL DEFAULT 0, onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS budget_incomes (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL DEFAULT 'other', title TEXT NOT NULL, amount_monthly DOUBLE PRECISION NOT NULL, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS budget_obligations (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'other', amount_monthly DOUBLE PRECISION NOT NULL, debt_details JSONB NOT NULL DEFAULT '{}'::jsonb, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS budget_savings (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, kind TEXT NOT NULL DEFAULT 'other', title TEXT NOT NULL, amount DOUBLE PRECISION NOT NULL, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS budget_funds (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, target_amount DOUBLE PRECISION NOT NULL, already_saved DOUBLE PRECISION NOT NULL DEFAULT 0, target_month TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'medium', status TEXT NOT NULL DEFAULT 'active', autopilot_enabled BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
@@ -258,6 +271,7 @@ POST_MIGRATION_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS ix_price_target_alerts_instr_enabled ON price_target_alerts (instrument_id, enabled)",
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_price_target_alerts_unique ON price_target_alerts (user_id, instrument_id, target_price, range_percent)",
     "CREATE INDEX IF NOT EXISTS ix_user_modes_user_ref ON user_modes (user_ref_id)",
+    "CREATE INDEX IF NOT EXISTS ix_budget_incomes_user_active ON budget_incomes (user_id, active)",
     "CREATE INDEX IF NOT EXISTS ix_budget_obligations_user_active ON budget_obligations (user_id, active)",
     "CREATE INDEX IF NOT EXISTS ix_budget_savings_user_active ON budget_savings (user_id, active)",
     "CREATE INDEX IF NOT EXISTS ix_budget_funds_user_status ON budget_funds (user_id, status)",
@@ -1995,6 +2009,177 @@ async def list_budget_obligations(db_path: str, user_id: int) -> list[dict[str, 
         raise
 
 
+async def list_budget_incomes(db_path: str, user_id: int) -> list[dict[str, Any]]:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, kind, title, amount_monthly
+                FROM budget_incomes
+                WHERE user_id = $1 AND active = TRUE
+                ORDER BY id DESC
+                """,
+                int(user_id),
+            )
+        return [
+            {
+                "id": int(row["id"]),
+                "kind": row["kind"] or "other",
+                "title": row["title"],
+                "amount_monthly": float(row["amount_monthly"] or 0.0),
+            }
+            for row in rows
+        ]
+    except Exception:
+        logger.exception("Failed list_budget_incomes user=%s", user_id)
+        raise
+
+
+async def add_budget_income(db_path: str, user_id: int, kind: str, title: str, amount_monthly: float) -> int:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                user_ref_id, _ = await _ensure_user_context(conn, int(user_id))
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO budget_incomes (user_id, user_ref_id, kind, title, amount_monthly, active, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, TRUE, NOW(), NOW())
+                    RETURNING id
+                    """,
+                    int(user_id),
+                    int(user_ref_id),
+                    kind.strip() or "other",
+                    title.strip(),
+                    float(amount_monthly),
+                )
+        return int(row["id"])
+    except Exception:
+        logger.exception("Failed add_budget_income user=%s title=%s", user_id, title)
+        raise
+
+
+async def update_budget_income(
+    db_path: str,
+    user_id: int,
+    income_id: int,
+    kind: str | None = None,
+    title: str | None = None,
+    amount_monthly: float | None = None,
+) -> bool:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT kind, title, amount_monthly
+                FROM budget_incomes
+                WHERE id = $1 AND user_id = $2 AND active = TRUE
+                """,
+                int(income_id),
+                int(user_id),
+            )
+            if not row:
+                return False
+            new_kind = str(kind).strip() if kind is not None else str(row["kind"] or "other")
+            new_title = str(title).strip() if title is not None else str(row["title"] or "")
+            new_amount = float(amount_monthly) if amount_monthly is not None else float(row["amount_monthly"] or 0.0)
+            upd = await conn.fetchrow(
+                """
+                UPDATE budget_incomes
+                SET kind = $1,
+                    title = $2,
+                    amount_monthly = $3,
+                    updated_at = NOW()
+                WHERE id = $4 AND user_id = $5 AND active = TRUE
+                RETURNING id
+                """,
+                new_kind,
+                new_title,
+                new_amount,
+                int(income_id),
+                int(user_id),
+            )
+        return upd is not None
+    except Exception:
+        logger.exception("Failed update_budget_income user=%s income=%s", user_id, income_id)
+        raise
+
+
+async def disable_budget_income(db_path: str, user_id: int, income_id: int) -> bool:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE budget_incomes
+                SET active = FALSE,
+                    updated_at = NOW()
+                WHERE id = $1 AND user_id = $2 AND active = TRUE
+                RETURNING id
+                """,
+                int(income_id),
+                int(user_id),
+            )
+        return row is not None
+    except Exception:
+        logger.exception("Failed disable_budget_income user=%s income=%s", user_id, income_id)
+        raise
+
+
+async def reset_budget_data(db_path: str, user_id: int) -> dict[str, int]:
+    def _affected_count(status: str) -> int:
+        parts = (status or "").split()
+        if not parts:
+            return 0
+        try:
+            return int(parts[-1])
+        except (TypeError, ValueError):
+            return 0
+
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                incomes = _affected_count(await conn.execute(
+                    "UPDATE budget_incomes SET active = FALSE, updated_at = NOW() WHERE user_id = $1 AND active = TRUE",
+                    int(user_id),
+                ))
+                obligations = _affected_count(await conn.execute(
+                    "UPDATE budget_obligations SET active = FALSE WHERE user_id = $1 AND active = TRUE",
+                    int(user_id),
+                ))
+                savings = _affected_count(await conn.execute(
+                    "UPDATE budget_savings SET active = FALSE WHERE user_id = $1 AND active = TRUE",
+                    int(user_id),
+                ))
+                funds = _affected_count(await conn.execute(
+                    "UPDATE budget_funds SET status = 'deleted', updated_at = NOW() WHERE user_id = $1 AND status <> 'deleted'",
+                    int(user_id),
+                ))
+                await conn.execute(
+                    """
+                    UPDATE budget_profiles
+                    SET onboarding_completed = FALSE,
+                        income_monthly = 0,
+                        expenses_base = 0,
+                        updated_at = NOW()
+                    WHERE user_id = $1
+                    """,
+                    int(user_id),
+                )
+        return {
+            "incomes": incomes,
+            "obligations": obligations,
+            "savings": savings,
+            "funds": funds,
+        }
+    except Exception:
+        logger.exception("Failed reset_budget_data user=%s", user_id)
+        raise
+
+
 async def add_budget_obligation(
     db_path: str,
     user_id: int,
@@ -2301,12 +2486,15 @@ async def close_budget_month(
 
 async def get_budget_dashboard(db_path: str, user_id: int) -> dict[str, Any]:
     profile = await get_budget_profile(db_path, user_id)
+    incomes = await list_budget_incomes(db_path, user_id)
     obligations = await list_budget_obligations(db_path, user_id)
     savings = await list_budget_savings(db_path, user_id)
     funds = await list_budget_funds(db_path, user_id)
+    incomes_total = sum(float(x.get("amount_monthly") or 0.0) for x in incomes)
     obligations_total = sum(float(x.get("amount_monthly") or 0.0) for x in obligations)
     savings_total = sum(float(x.get("amount") or 0.0) for x in savings)
-    income = float(profile.get("income_monthly") or 0.0)
+    legacy_income = float(profile.get("income_monthly") or 0.0)
+    income = incomes_total if incomes_total > 0 else legacy_income
     expenses_base = float(profile.get("expenses_base") or 0.0)
     free = income - obligations_total - expenses_base
     today = date.today()
@@ -2323,6 +2511,8 @@ async def get_budget_dashboard(db_path: str, user_id: int) -> dict[str, Any]:
 
     return {
         "profile": profile,
+        "incomes": incomes,
+        "incomes_total": incomes_total,
         "income": income,
         "obligations_total": obligations_total,
         "expenses_base": expenses_base,

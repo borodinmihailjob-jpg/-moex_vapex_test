@@ -26,14 +26,19 @@ from db import (
     list_active_app_texts,
     list_active_price_target_alerts,
     list_budget_funds,
+    list_budget_incomes,
     list_budget_obligations,
     list_budget_savings,
     set_user_last_mode,
+    add_budget_income,
     add_budget_obligation,
     add_budget_saving,
+    disable_budget_income,
     upsert_budget_profile,
     create_budget_fund,
     close_budget_month,
+    reset_budget_data,
+    update_budget_income,
     update_budget_fund,
     upsert_instrument,
     set_open_close_alert,
@@ -828,6 +833,67 @@ async def api_budget_savings(request: web.Request) -> web.Response:
     return _json_ok({"id": item_id})
 
 
+async def api_budget_incomes(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    if request.method == "GET":
+        rows = await list_budget_incomes(db_dsn, user_id)
+        total = sum(float(x.get("amount_monthly") or 0.0) for x in rows)
+        return _json_ok({"items": rows, "total": total})
+    payload = await _read_json(request)
+    kind = str(payload.get("kind") or "other").strip().lower()
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise web.HTTPBadRequest(text="title required")
+    try:
+        amount = _parse_money_text(payload.get("amount_monthly"))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text="invalid amount_monthly") from exc
+    item_id = await add_budget_income(db_dsn, user_id, kind=kind, title=title, amount_monthly=amount)
+    return _json_ok({"id": item_id})
+
+
+async def api_budget_income_item(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    try:
+        income_id = int(request.match_info["income_id"])
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="invalid income_id") from exc
+    payload = await _read_json(request)
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in {"edit", "delete"}:
+        raise web.HTTPBadRequest(text="invalid action")
+    if action == "delete":
+        ok = await disable_budget_income(db_dsn, user_id, income_id)
+        return _json_ok({"deleted": ok})
+    kwargs = {}
+    if payload.get("kind") is not None:
+        kwargs["kind"] = str(payload.get("kind") or "other").strip().lower()
+    if payload.get("title") is not None:
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            raise web.HTTPBadRequest(text="title required")
+        kwargs["title"] = title
+    if payload.get("amount_monthly") is not None:
+        try:
+            kwargs["amount_monthly"] = _parse_money_text(payload.get("amount_monthly"))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text="invalid amount_monthly") from exc
+    ok = await update_budget_income(db_dsn, user_id, income_id, **kwargs)
+    return _json_ok({"updated": ok})
+
+
+async def api_budget_reset(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    result = await reset_budget_data(db_dsn, user_id)
+    return _json_ok(result)
+
+
 def _calc_fund_strategy(
     target_amount: float,
     already_saved: float,
@@ -1079,6 +1145,10 @@ def attach_miniapp_routes(app: web.Application, db_dsn: str, bot_token: str) -> 
     app.router.add_post("/api/miniapp/budget/obligations", api_budget_obligations)
     app.router.add_get("/api/miniapp/budget/savings", api_budget_savings)
     app.router.add_post("/api/miniapp/budget/savings", api_budget_savings)
+    app.router.add_get("/api/miniapp/budget/incomes", api_budget_incomes)
+    app.router.add_post("/api/miniapp/budget/incomes", api_budget_incomes)
+    app.router.add_post("/api/miniapp/budget/incomes/{income_id}", api_budget_income_item)
+    app.router.add_post("/api/miniapp/budget/reset", api_budget_reset)
     app.router.add_post("/api/miniapp/budget/funds/strategy", api_budget_fund_strategy)
     app.router.add_get("/api/miniapp/budget/funds", api_budget_funds)
     app.router.add_post("/api/miniapp/budget/funds", api_budget_funds)

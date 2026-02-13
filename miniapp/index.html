@@ -284,21 +284,27 @@
 
         <article id="budgetIncomeCard" class="card" style="display:none">
           <h2>Доходы</h2>
-          <div class="form-grid two">
+          <div class="form-grid three">
             <label>Тип дохода
               <select id="budgetIncomeTypeInput">
-                <option value="fixed">Фиксированный</option>
-                <option value="irregular">Нерегулярный</option>
+                <option value="salary">Зарплата</option>
+                <option value="freelance">Фриланс</option>
+                <option value="business">Бизнес</option>
+                <option value="rent">Аренда</option>
+                <option value="passive">Пассивный</option>
+                <option value="other">Другое</option>
               </select>
             </label>
-            <label>День зарплаты (опц.)
-              <input id="budgetPaydayInput" type="number" min="1" max="31" placeholder="Например: 10" />
+            <label>Название
+              <input id="budgetIncomeTitleInput" type="text" placeholder="Например: Зарплата" />
+            </label>
+            <label>Сумма ежемесячного дохода, ₽
+              <input id="budgetIncomeInput" type="text" placeholder="Например: 150000" />
             </label>
           </div>
-          <label>Доход в месяц, ₽
-            <input id="budgetIncomeInput" type="text" placeholder="Например: 150000" />
-          </label>
-          <button id="budgetIncomeSaveBtn" class="btn primary">Сохранить</button>
+          <button id="budgetIncomeSaveBtn" class="btn primary">Добавить</button>
+          <div id="budgetIncomeList" class="list"></div>
+          <button id="budgetResetBtn" class="btn danger">Удалить текущий бюджет</button>
         </article>
 
         <article id="budgetExpensesCard" class="card" style="display:none">
