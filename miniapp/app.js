@@ -303,6 +303,19 @@ function getBudgetGoals() {
   return rows.filter((x) => String(x?.status || "active") !== "deleted");
 }
 
+function addMonthsYmd(ymd, monthsToAdd) {
+  const text = String(ymd || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return "";
+  const [y, m, d] = text.split("-").map((x) => Number(x));
+  const dt = new Date(y, m - 1, d);
+  if (Number.isNaN(dt.getTime())) return "";
+  dt.setMonth(dt.getMonth() + Number(monthsToAdd || 0));
+  const yy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
 function formatQty(value, assetType) {
   const n = Number(value || 0);
   const text = Number.isInteger(n)
@@ -1068,11 +1081,33 @@ function buildExpensePayloadFromForm() {
         months: Number(el.expenseLoanMonthsInput?.value || 0),
         payment_type: el.expenseLoanPaymentTypeInput?.value || "annuity",
       };
-  const rate_periods = state.budget.expenseRateRows.map((row) => ({
-    annual_rate: Number(String(row.annual_rate || "").replace(",", ".")),
-    start_date: row.start_date,
-    end_date: row.end_date,
+  if (!base.start_date) throw new Error("Укажите дату начала");
+  if (!Number.isFinite(base.months) || base.months <= 0) throw new Error("Укажите срок в месяцах");
+  const loanEnd = addMonthsYmd(base.start_date, base.months - 1);
+  const rows = state.budget.expenseRateRows.map((row) => ({
+    annual_rate: String(row?.annual_rate ?? "").trim(),
+    start_date: String(row?.start_date ?? "").trim(),
+    end_date: String(row?.end_date ?? "").trim(),
   }));
+  if (rows.length === 1) {
+    if (!rows[0].start_date) rows[0].start_date = base.start_date;
+    if (!rows[0].end_date) rows[0].end_date = loanEnd;
+  }
+  const rate_periods = rows.map((row) => {
+    if (!row.annual_rate) throw new Error("Укажите ставку для каждого периода");
+    if (!row.start_date || !row.end_date) {
+      throw new Error("Укажите даты начала и конца для каждого периода ставки");
+    }
+    const annualRate = Number(row.annual_rate.replace(",", "."));
+    if (!Number.isFinite(annualRate) || annualRate < 0) {
+      throw new Error("Ставка должна быть числом от 0");
+    }
+    return {
+      annual_rate: annualRate,
+      start_date: row.start_date,
+      end_date: row.end_date,
+    };
+  });
   return { kind, title, ...base, rate_periods };
 }
 
@@ -1918,11 +1953,7 @@ function setupEvents() {
     }
     showExpenseFields(kind);
     if ((kind === "mortgage" || kind === "loan") && !state.budget.expenseRateRows.length) {
-      const today = new Date();
-      const year = today.getFullYear();
-      const start = `${year}-01-01`;
-      const end = `${year}-12-31`;
-      state.budget.expenseRateRows = [{ annual_rate: "", start_date: start, end_date: end }];
+      state.budget.expenseRateRows = [{ annual_rate: "", start_date: "", end_date: "" }];
       renderExpenseRateRows();
     }
   });
