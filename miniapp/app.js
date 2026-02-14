@@ -204,6 +204,9 @@ const el = {
   budgetGoalsOverview: document.getElementById("budgetGoalsOverview"),
   editBudgetBtn: document.getElementById("editBudgetBtn"),
   budgetIncomeTypeInput: document.getElementById("budgetIncomeTypeInput"),
+  budgetIncomeOpenAddBtn: document.getElementById("budgetIncomeOpenAddBtn"),
+  budgetIncomeBackBtn: document.getElementById("budgetIncomeBackBtn"),
+  budgetIncomeFormWrap: document.getElementById("budgetIncomeFormWrap"),
   budgetIncomeTitleInput: document.getElementById("budgetIncomeTitleInput"),
   budgetIncomeInput: document.getElementById("budgetIncomeInput"),
   budgetIncomeSaveBtn: document.getElementById("budgetIncomeSaveBtn"),
@@ -214,6 +217,9 @@ const el = {
   budgetNotifMonthCloseToggle: document.getElementById("budgetNotifMonthCloseToggle"),
   budgetNotifSaveBtn: document.getElementById("budgetNotifSaveBtn"),
   budgetExpenseTypeInput: document.getElementById("budgetExpenseTypeInput"),
+  budgetExpensesOpenAddBtn: document.getElementById("budgetExpensesOpenAddBtn"),
+  budgetExpensesBackBtn: document.getElementById("budgetExpensesBackBtn"),
+  budgetExpensesFormWrap: document.getElementById("budgetExpensesFormWrap"),
   budgetExpenseTitleInput: document.getElementById("budgetExpenseTitleInput"),
   expenseFieldsRent: document.getElementById("expenseFieldsRent"),
   expenseFieldsMortgage: document.getElementById("expenseFieldsMortgage"),
@@ -244,6 +250,9 @@ const el = {
   budgetExpensesSaveBtn: document.getElementById("budgetExpensesSaveBtn"),
   budgetFundsList: document.getElementById("budgetFundsList"),
   budgetSavingTypeInput: document.getElementById("budgetSavingTypeInput"),
+  budgetSavingsOpenAddBtn: document.getElementById("budgetSavingsOpenAddBtn"),
+  budgetSavingsBackBtn: document.getElementById("budgetSavingsBackBtn"),
+  budgetSavingsFormWrap: document.getElementById("budgetSavingsFormWrap"),
   budgetSavingTitleInput: document.getElementById("budgetSavingTitleInput"),
   budgetSavingAmountInput: document.getElementById("budgetSavingAmountInput"),
   budgetSavingAddBtn: document.getElementById("budgetSavingAddBtn"),
@@ -566,6 +575,9 @@ function setBudgetTab(tab) {
   show(el.budgetMonthCloseCard, tab === "close");
   show(el.budgetSavingsCard, tab === "savings");
   show(el.budgetSettingsCard, tab === "settings");
+  setBudgetIncomeFormOpen(false);
+  setBudgetExpensesFormOpen(false);
+  setBudgetSavingsFormOpen(false);
   if (tab === "income") {
     loadBudgetIncomes().catch(() => {});
   }
@@ -582,6 +594,24 @@ function setBudgetTab(tab) {
   if (tab === "settings") {
     loadBudgetNotificationSettings().catch(() => {});
   }
+}
+
+function setBudgetIncomeFormOpen(open) {
+  if (el.budgetIncomeFormWrap) el.budgetIncomeFormWrap.style.display = open ? "" : "none";
+  if (el.budgetIncomeOpenAddBtn) el.budgetIncomeOpenAddBtn.style.display = open ? "none" : "";
+  if (el.budgetIncomeList) el.budgetIncomeList.style.display = open ? "none" : "";
+}
+
+function setBudgetExpensesFormOpen(open) {
+  if (el.budgetExpensesFormWrap) el.budgetExpensesFormWrap.style.display = open ? "" : "none";
+  if (el.budgetExpensesOpenAddBtn) el.budgetExpensesOpenAddBtn.style.display = open ? "none" : "";
+  if (el.budgetExpensesList) el.budgetExpensesList.style.display = open ? "none" : "";
+}
+
+function setBudgetSavingsFormOpen(open) {
+  if (el.budgetSavingsFormWrap) el.budgetSavingsFormWrap.style.display = open ? "" : "none";
+  if (el.budgetSavingsOpenAddBtn) el.budgetSavingsOpenAddBtn.style.display = open ? "none" : "";
+  if (el.budgetSavingsList) el.budgetSavingsList.style.display = open ? "none" : "";
 }
 
 function renderEmpty(container, text) {
@@ -1493,7 +1523,7 @@ function clearExpenseForm() {
   if (el.expenseUtilitiesDateInput) el.expenseUtilitiesDateInput.value = "";
   if (el.expenseUtilitiesAmountInput) el.expenseUtilitiesAmountInput.value = "";
   if (el.expenseOtherAmountInput) el.expenseOtherAmountInput.value = "";
-  if (el.budgetExpensesSaveBtn) el.budgetExpensesSaveBtn.textContent = "Добавить";
+  if (el.budgetExpensesSaveBtn) el.budgetExpensesSaveBtn.textContent = "Сохранить";
   if (el.budgetExpensesCancelEditBtn) el.budgetExpensesCancelEditBtn.style.display = "none";
   if (el.budgetExpensesCalcResult) el.budgetExpensesCalcResult.textContent = "";
   showExpenseFields("rent");
@@ -1635,6 +1665,7 @@ function renderBudgetExpenses(items) {
       el.budgetExpensesSaveBtn.textContent = "Сохранить изменения";
       el.budgetExpensesCancelEditBtn.style.display = "";
       el.budgetExpensesCalcResult.textContent = "";
+      setBudgetExpensesFormOpen(true);
       el.content.scrollTo({ top: 0, behavior: "smooth" });
     });
     item.querySelector("[data-expense-action='delete']")?.addEventListener("click", async () => {
@@ -2369,6 +2400,14 @@ function setupEvents() {
   });
   el.addGoalBtn?.addEventListener("click", () => openGoalDetail(null));
   el.closeMonthOpenBtn?.addEventListener("click", openMonthCloseFlow);
+  el.budgetIncomeOpenAddBtn?.addEventListener("click", () => {
+    resetIncomeForm();
+    setBudgetIncomeFormOpen(true);
+    el.budgetIncomeTitleInput?.focus();
+  });
+  el.budgetIncomeBackBtn?.addEventListener("click", () => {
+    setBudgetIncomeFormOpen(false);
+  });
   el.budgetIncomeTypeInput?.addEventListener("change", () => {
     if (!el.budgetIncomeTitleInput) return;
     if (el.budgetIncomeTitleInput.dataset.autoTitle === "1" || !el.budgetIncomeTitleInput.value.trim()) {
@@ -2399,10 +2438,19 @@ function setupEvents() {
       toast("Доход добавлен");
       await loadBudgetDashboard();
       await loadBudgetIncomes();
+      setBudgetIncomeFormOpen(false);
       setBudgetTab("income");
     } catch (e) {
       toast(e?.message || "Не удалось добавить доход");
     }
+  });
+  el.budgetSavingsOpenAddBtn?.addEventListener("click", () => {
+    resetSavingForm();
+    setBudgetSavingsFormOpen(true);
+    el.budgetSavingTitleInput?.focus();
+  });
+  el.budgetSavingsBackBtn?.addEventListener("click", () => {
+    setBudgetSavingsFormOpen(false);
   });
   el.budgetSavingTypeInput?.addEventListener("change", () => {
     if (!el.budgetSavingTitleInput) return;
@@ -2431,10 +2479,20 @@ function setupEvents() {
       await loadBudgetDashboard();
       await loadBudgetSavings();
       await loadBudgetHistory();
+      setBudgetSavingsFormOpen(false);
       setBudgetTab("savings");
     } catch (e) {
       toast(e?.message || "Не удалось добавить накопление");
     }
+  });
+  el.budgetExpensesOpenAddBtn?.addEventListener("click", () => {
+    clearExpenseForm();
+    setBudgetExpensesFormOpen(true);
+    el.budgetExpenseTitleInput?.focus();
+  });
+  el.budgetExpensesBackBtn?.addEventListener("click", () => {
+    clearExpenseForm();
+    setBudgetExpensesFormOpen(false);
   });
   el.budgetExpenseTypeInput?.addEventListener("change", () => {
     const kind = el.budgetExpenseTypeInput.value || "rent";
@@ -2542,6 +2600,7 @@ function setupEvents() {
       clearExpenseForm();
       await loadBudgetDashboard();
       await loadBudgetExpenses();
+      setBudgetExpensesFormOpen(false);
       setBudgetTab("expenses");
     } catch (e) {
       toast(e?.message || "Не удалось сохранить расход");

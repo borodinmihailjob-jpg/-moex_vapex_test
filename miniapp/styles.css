@@ -335,7 +335,8 @@ button:focus-visible,
 .btn.ghost {
   background: color-mix(in srgb, var(--surface-elevated) 82%, transparent);
   color: var(--text-primary);
-  border-color: var(--separator);
+  border-color: color-mix(in srgb, var(--text-primary) 28%, transparent);
+  border-width: 1.5px;
 }
 
 .btn.tertiary {
@@ -413,6 +414,20 @@ button:focus-visible,
   justify-content: space-between;
   gap: var(--s8);
   flex-wrap: wrap;
+}
+
+.section-actions {
+  display: flex;
+  justify-content: flex-start;
+  margin-bottom: var(--s12);
+}
+
+.form-panel {
+  border: var(--field-border);
+  border-radius: var(--radius-card);
+  padding: var(--s16);
+  margin-bottom: var(--s12);
+  background: color-mix(in srgb, var(--surface-elevated) 86%, transparent);
 }
 
 .upload-form {

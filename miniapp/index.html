@@ -289,115 +289,129 @@
 
         <article id="budgetIncomeCard" class="card" style="display:none">
           <h2>Доходы</h2>
-          <div class="form-grid three">
-            <label>Тип дохода
-              <select id="budgetIncomeTypeInput">
-                <option value="salary">Зарплата</option>
-                <option value="freelance">Фриланс</option>
-                <option value="business">Бизнес</option>
-                <option value="rent">Аренда</option>
-                <option value="passive">Пассивный</option>
-                <option value="other">Другое</option>
-              </select>
-            </label>
-            <label>Название
-              <input id="budgetIncomeTitleInput" type="text" placeholder="Например: Зарплата" />
-            </label>
-            <label>Сумма ежемесячного дохода, ₽
-              <input id="budgetIncomeInput" type="text" placeholder="Например: 150000" />
-            </label>
+          <div class="section-actions">
+            <button id="budgetIncomeOpenAddBtn" class="btn primary">Добавить</button>
           </div>
-          <button id="budgetIncomeSaveBtn" class="btn primary">Добавить</button>
+          <div id="budgetIncomeFormWrap" class="form-panel" style="display:none">
+            <div class="form-grid three">
+              <label>Тип дохода
+                <select id="budgetIncomeTypeInput">
+                  <option value="salary">Зарплата</option>
+                  <option value="freelance">Фриланс</option>
+                  <option value="business">Бизнес</option>
+                  <option value="rent">Аренда</option>
+                  <option value="passive">Пассивный</option>
+                  <option value="other">Другое</option>
+                </select>
+              </label>
+              <label>Название
+                <input id="budgetIncomeTitleInput" type="text" placeholder="Например: Зарплата" />
+              </label>
+              <label>Сумма ежемесячного дохода, ₽
+                <input id="budgetIncomeInput" type="text" placeholder="Например: 150000" />
+              </label>
+            </div>
+            <div class="wizard-actions">
+              <button id="budgetIncomeSaveBtn" class="btn primary">Сохранить</button>
+              <button id="budgetIncomeBackBtn" class="btn ghost">Назад</button>
+            </div>
+          </div>
           <div id="budgetIncomeList" class="list"></div>
         </article>
 
         <article id="budgetExpensesCard" class="card" style="display:none">
           <h2>Расходы</h2>
-          <div class="form-grid two">
-            <label>Тип расхода
-              <select id="budgetExpenseTypeInput">
-                <option value="rent">Аренда</option>
-                <option value="mortgage">Ипотека</option>
-                <option value="loan">Кредит</option>
-                <option value="utilities">ЖКХ</option>
-                <option value="other">Прочие расходы</option>
-              </select>
-            </label>
-            <label>Название
-              <input id="budgetExpenseTitleInput" type="text" placeholder="Например: аренда квартиры" />
-            </label>
+          <div class="section-actions">
+            <button id="budgetExpensesOpenAddBtn" class="btn primary">Добавить</button>
           </div>
-          <div id="expenseFieldsRent" class="form-grid two">
-            <label>Дата платежа
-              <input id="expenseRentDateInput" type="date" />
-            </label>
-            <label>Сумма платежа, ₽
-              <input id="expenseRentAmountInput" type="text" placeholder="Например: 45000" />
-            </label>
+          <div id="budgetExpensesFormWrap" class="form-panel" style="display:none">
+            <div class="form-grid two">
+              <label>Тип расхода
+                <select id="budgetExpenseTypeInput">
+                  <option value="rent">Аренда</option>
+                  <option value="mortgage">Ипотека</option>
+                  <option value="loan">Кредит</option>
+                  <option value="utilities">ЖКХ</option>
+                  <option value="other">Прочие расходы</option>
+                </select>
+              </label>
+              <label>Название
+                <input id="budgetExpenseTitleInput" type="text" placeholder="Например: аренда квартиры" />
+              </label>
+            </div>
+            <div id="expenseFieldsRent" class="form-grid two">
+              <label>Дата платежа
+                <input id="expenseRentDateInput" type="date" />
+              </label>
+              <label>Сумма платежа, ₽
+                <input id="expenseRentAmountInput" type="text" placeholder="Например: 45000" />
+              </label>
+            </div>
+            <div id="expenseFieldsMortgage" class="form-grid three" style="display:none">
+              <label>Дата начала ипотеки
+                <input id="expenseMortgageStartInput" type="date" />
+              </label>
+              <label>Дата окончания (авто)
+                <input id="expenseMortgageEndInput" type="date" readonly />
+              </label>
+              <label>Общая сумма задолженности, ₽
+                <input id="expenseMortgagePrincipalInput" type="text" placeholder="Например: 3500000" />
+              </label>
+              <label>Срок, месяцев
+                <input id="expenseMortgageMonthsInput" type="number" min="1" step="1" placeholder="Например: 240" />
+              </label>
+              <label>Тип платежа
+                <select id="expenseMortgagePaymentTypeInput">
+                  <option value="annuity">Аннуитетный</option>
+                  <option value="diff">Дифференцированный</option>
+                </select>
+              </label>
+            </div>
+            <div id="expenseFieldsLoan" class="form-grid three" style="display:none">
+              <label>Дата начала кредита
+                <input id="expenseLoanStartInput" type="date" />
+              </label>
+              <label>Дата окончания (авто)
+                <input id="expenseLoanEndInput" type="date" readonly />
+              </label>
+              <label>Сумма кредита, ₽
+                <input id="expenseLoanPrincipalInput" type="text" placeholder="Например: 500000" />
+              </label>
+              <label>Срок, месяцев
+                <input id="expenseLoanMonthsInput" type="number" min="1" step="1" placeholder="Например: 36" />
+              </label>
+              <label>Тип платежа
+                <select id="expenseLoanPaymentTypeInput">
+                  <option value="annuity">Аннуитетный</option>
+                  <option value="diff">Дифференцированный</option>
+                </select>
+              </label>
+            </div>
+            <div id="expenseFieldsUtilities" class="form-grid two" style="display:none">
+              <label>Дата оплаты
+                <input id="expenseUtilitiesDateInput" type="date" />
+              </label>
+              <label>Сумма платежа, ₽
+                <input id="expenseUtilitiesAmountInput" type="text" placeholder="Например: 8500" />
+              </label>
+            </div>
+            <div id="expenseFieldsOther" class="form-grid one" style="display:none">
+              <label>Сумма расходов, ₽
+                <input id="expenseOtherAmountInput" type="text" placeholder="Например: 12000" />
+              </label>
+            </div>
+            <div id="expenseRatePeriodsCard" class="card-inline" style="display:none">
+              <h3>Ставки и периоды</h3>
+              <div id="expenseRatePeriodsList" class="form-grid"></div>
+              <button id="expenseAddRateBtn" class="btn ghost">Добавить ставку</button>
+            </div>
+            <div class="wizard-actions">
+              <button id="budgetExpensesSaveBtn" class="btn primary">Сохранить</button>
+              <button id="budgetExpensesBackBtn" class="btn ghost">Назад</button>
+              <button id="budgetExpensesCancelEditBtn" class="btn ghost" style="display:none">Отмена редактирования</button>
+            </div>
+            <div id="budgetExpensesCalcResult" class="plain"></div>
           </div>
-          <div id="expenseFieldsMortgage" class="form-grid three" style="display:none">
-            <label>Дата начала ипотеки
-              <input id="expenseMortgageStartInput" type="date" />
-            </label>
-            <label>Дата окончания (авто)
-              <input id="expenseMortgageEndInput" type="date" readonly />
-            </label>
-            <label>Общая сумма задолженности, ₽
-              <input id="expenseMortgagePrincipalInput" type="text" placeholder="Например: 3500000" />
-            </label>
-            <label>Срок, месяцев
-              <input id="expenseMortgageMonthsInput" type="number" min="1" step="1" placeholder="Например: 240" />
-            </label>
-            <label>Тип платежа
-              <select id="expenseMortgagePaymentTypeInput">
-                <option value="annuity">Аннуитетный</option>
-                <option value="diff">Дифференцированный</option>
-              </select>
-            </label>
-          </div>
-          <div id="expenseFieldsLoan" class="form-grid three" style="display:none">
-            <label>Дата начала кредита
-              <input id="expenseLoanStartInput" type="date" />
-            </label>
-            <label>Дата окончания (авто)
-              <input id="expenseLoanEndInput" type="date" readonly />
-            </label>
-            <label>Сумма кредита, ₽
-              <input id="expenseLoanPrincipalInput" type="text" placeholder="Например: 500000" />
-            </label>
-            <label>Срок, месяцев
-              <input id="expenseLoanMonthsInput" type="number" min="1" step="1" placeholder="Например: 36" />
-            </label>
-            <label>Тип платежа
-              <select id="expenseLoanPaymentTypeInput">
-                <option value="annuity">Аннуитетный</option>
-                <option value="diff">Дифференцированный</option>
-              </select>
-            </label>
-          </div>
-          <div id="expenseFieldsUtilities" class="form-grid two" style="display:none">
-            <label>Дата оплаты
-              <input id="expenseUtilitiesDateInput" type="date" />
-            </label>
-            <label>Сумма платежа, ₽
-              <input id="expenseUtilitiesAmountInput" type="text" placeholder="Например: 8500" />
-            </label>
-          </div>
-          <div id="expenseFieldsOther" class="form-grid one" style="display:none">
-            <label>Сумма расходов, ₽
-              <input id="expenseOtherAmountInput" type="text" placeholder="Например: 12000" />
-            </label>
-          </div>
-          <div id="expenseRatePeriodsCard" class="card-inline" style="display:none">
-            <h3>Ставки и периоды</h3>
-            <div id="expenseRatePeriodsList" class="form-grid"></div>
-            <button id="expenseAddRateBtn" class="btn ghost">Добавить ставку</button>
-          </div>
-          <div class="wizard-actions">
-            <button id="budgetExpensesSaveBtn" class="btn primary">Добавить</button>
-            <button id="budgetExpensesCancelEditBtn" class="btn ghost" style="display:none">Отмена редактирования</button>
-          </div>
-          <div id="budgetExpensesCalcResult" class="plain"></div>
           <div id="budgetExpensesList" class="list"></div>
         </article>
 
@@ -478,24 +492,32 @@
 
         <article id="budgetSavingsCard" class="card" style="display:none">
           <h2>Накопления</h2>
-          <div class="form-grid three">
-            <label>Тип накопления
-              <select id="budgetSavingTypeInput">
-                <option value="deposit">Депозит</option>
-                <option value="stocks">Акции</option>
-                <option value="crypto">Крипта</option>
-                <option value="cash">Наличные</option>
-                <option value="other">Другое</option>
-              </select>
-            </label>
-            <label>Название
-              <input id="budgetSavingTitleInput" type="text" placeholder="Например: брокерский счёт" />
-            </label>
-            <label>Сумма, ₽
-              <input id="budgetSavingAmountInput" type="text" placeholder="Например: 250000" />
-            </label>
+          <div class="section-actions">
+            <button id="budgetSavingsOpenAddBtn" class="btn primary">Добавить</button>
           </div>
-          <button id="budgetSavingAddBtn" class="btn primary">Добавить накопление</button>
+          <div id="budgetSavingsFormWrap" class="form-panel" style="display:none">
+            <div class="form-grid three">
+              <label>Тип накопления
+                <select id="budgetSavingTypeInput">
+                  <option value="deposit">Депозит</option>
+                  <option value="stocks">Акции</option>
+                  <option value="crypto">Крипта</option>
+                  <option value="cash">Наличные</option>
+                  <option value="other">Другое</option>
+                </select>
+              </label>
+              <label>Название
+                <input id="budgetSavingTitleInput" type="text" placeholder="Например: брокерский счёт" />
+              </label>
+              <label>Сумма, ₽
+                <input id="budgetSavingAmountInput" type="text" placeholder="Например: 250000" />
+              </label>
+            </div>
+            <div class="wizard-actions">
+              <button id="budgetSavingAddBtn" class="btn primary">Сохранить</button>
+              <button id="budgetSavingsBackBtn" class="btn ghost">Назад</button>
+            </div>
+          </div>
           <div id="budgetSavingsList" class="list"></div>
           <h3>История бюджета</h3>
           <div id="budgetHistoryList" class="list compact"></div>
