@@ -281,6 +281,31 @@ class LoansApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(schedule["page"], 1)
         self.assertGreater(len(schedule["items"]), 0)
 
+    async def test_corrupted_schedule_cache_is_recomputed(self):
+        loan_id = await self._create_loan()
+
+        first = await self.client.get(f"/api/miniapp/loans/{loan_id}")
+        self.assertEqual(first.status, 200)
+        first_data = (await first.json())["data"]
+        self.assertGreater(int(first_data["summary"]["payments_count"]), 0)
+
+        cached = self.repo.cache.get(loan_id)
+        self.assertIsNotNone(cached)
+        assert cached is not None
+        self.repo.cache[loan_id] = {
+            "loan_id": loan_id,
+            "version": cached["version"],
+            "version_hash": cached["version_hash"],
+            "summary_json": {},
+            "payload_json": [],
+            "computed_at": None,
+        }
+
+        second = await self.client.get(f"/api/miniapp/loans/{loan_id}")
+        self.assertEqual(second.status, 200)
+        second_data = (await second.json())["data"]
+        self.assertGreater(int(second_data["summary"]["payments_count"]), 0)
+
     async def test_extra_payment_idempotency(self):
         loan_id = await self._create_loan()
 

@@ -3532,12 +3532,25 @@ async def get_loan_schedule_cache(db_path: str, user_id: int, loan_id: int) -> d
             )
         if not row:
             return None
+        summary_raw = row["summary_json"]
+        if isinstance(summary_raw, str):
+            try:
+                summary_raw = json.loads(summary_raw)
+            except ValueError:
+                summary_raw = {}
+        payload_raw = row["payload_json"]
+        if isinstance(payload_raw, str):
+            try:
+                payload_raw = json.loads(payload_raw)
+            except ValueError:
+                payload_raw = []
+
         return {
             "loan_id": int(row["loan_id"]),
             "version": int(row["version"]),
             "version_hash": row["version_hash"],
-            "summary_json": row["summary_json"] if isinstance(row["summary_json"], dict) else {},
-            "payload_json": row["payload_json"] if isinstance(row["payload_json"], list) else [],
+            "summary_json": summary_raw if isinstance(summary_raw, dict) else {},
+            "payload_json": payload_raw if isinstance(payload_raw, list) else [],
             "computed_at": row["computed_at"].isoformat() if row["computed_at"] else None,
         }
     except _LOGGABLE_DB_ERRORS:

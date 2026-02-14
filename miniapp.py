@@ -1820,6 +1820,16 @@ def _loan_event_from_row(row: dict[str, Any]) -> ExtraPaymentEvent | RateChangeE
     return None
 
 
+def _is_valid_loan_summary(summary: dict[str, Any]) -> bool:
+    if not isinstance(summary, dict):
+        return False
+    required = ("monthly_payment", "remaining_balance", "payments_count")
+    for key in required:
+        if summary.get(key) is None:
+            return False
+    return True
+
+
 async def _compute_loan_cached(
     db_dsn: str,
     user_id: int,
@@ -1849,7 +1859,11 @@ async def _compute_loan_cached(
 
     version, vhash = loan_version_hash(loan_input, events)
     cached = await get_loan_schedule_cache(db_dsn, user_id, int(loan_row["id"]))
-    if cached and str(cached.get("version_hash")) == vhash:
+    if (
+        cached
+        and str(cached.get("version_hash")) == vhash
+        and _is_valid_loan_summary(cached.get("summary_json") or {})
+    ):
         return (
             cached.get("summary_json") or {},
             cached.get("payload_json") or [],
