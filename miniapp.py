@@ -79,6 +79,8 @@ from loan_engine import (
     RateChangeEvent,
     build_version_hash as loan_version_hash,
     calculate as calculate_loan_schedule,
+    month_diff,
+    q_money,
 )
 from moex_iss import (
     ASSET_TYPE_FIAT,
@@ -109,6 +111,8 @@ _LOAN_RATE_LIMIT: dict[str, list[float]] = {}
 _LOAN_RATE_WINDOW_SEC = 60.0
 _LOAN_RATE_MAX_EVENTS = int((os.getenv("LOAN_RATE_MAX_EVENTS_PER_MIN") or "30").strip() or "30")
 MSK_TZ = ZoneInfo("Europe/Moscow")
+APP_DB_DSN: web.AppKey[str] = web.AppKey("db_dsn", str)
+APP_BOT_TOKEN: web.AppKey[str] = web.AppKey("bot_token", str)
 
 
 def _utc_now_iso() -> str:
@@ -422,14 +426,14 @@ async def miniapp_asset(request: web.Request) -> web.Response:
 
 
 async def api_me(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
+    bot_token = request.app[APP_BOT_TOKEN]
     user_id = await _auth_user_id(request, bot_token)
     return _json_ok({"user_id": user_id})
 
 
 async def api_portfolio(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     positions = await get_user_positions(db_dsn, user_id)
     if not positions:
@@ -488,7 +492,7 @@ async def api_portfolio(request: web.Request) -> web.Response:
 
 
 async def api_search(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
+    bot_token = request.app[APP_BOT_TOKEN]
     _ = await _auth_user_id(request, bot_token)
     q = (request.query.get("q") or "").strip()
     asset_type = (request.query.get("asset_type") or ASSET_TYPE_STOCK).strip().lower()
@@ -507,8 +511,8 @@ async def api_search(request: web.Request) -> web.Response:
 
 
 async def api_trade_post(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     payload = await _read_json(request)
 
@@ -595,7 +599,7 @@ async def api_trade_post(request: web.Request) -> web.Response:
 
 
 async def api_asset_lookup_post(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
+    bot_token = request.app[APP_BOT_TOKEN]
     _ = await _auth_user_id(request, bot_token)
     payload = await _read_json(request)
 
@@ -665,7 +669,7 @@ async def api_asset_lookup_post(request: web.Request) -> web.Response:
 
 
 async def api_top_movers(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
+    bot_token = request.app[APP_BOT_TOKEN]
     _ = await _auth_user_id(request, bot_token)
 
     day_str = (request.query.get("date") or "").strip()
@@ -691,7 +695,7 @@ async def api_top_movers(request: web.Request) -> web.Response:
 
 
 async def api_usd_rub(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
+    bot_token = request.app[APP_BOT_TOKEN]
     _ = await _auth_user_id(request, bot_token)
     try:
         async with aiohttp.ClientSession() as session:
@@ -709,7 +713,7 @@ async def api_usd_rub(request: web.Request) -> web.Response:
 
 
 async def api_price(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
+    bot_token = request.app[APP_BOT_TOKEN]
     _ = await _auth_user_id(request, bot_token)
     payload = await _read_json(request)
     secid = str(payload.get("secid") or "").strip().upper()
@@ -744,16 +748,16 @@ async def api_price(request: web.Request) -> web.Response:
 
 
 async def api_portfolio_clear(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     deleted = await clear_user_portfolio(db_dsn, user_id)
     return _json_ok({"deleted_trades": deleted})
 
 
 async def api_open_close_settings(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
 
     if request.method == "GET":
@@ -768,16 +772,16 @@ async def api_open_close_settings(request: web.Request) -> web.Response:
 
 
 async def api_articles_list(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     _ = await _auth_user_id(request, bot_token)
     items = await list_active_app_texts(db_dsn)
     return _json_ok(items)
 
 
 async def api_article_item(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     _ = await _auth_user_id(request, bot_token)
     text_code = str(request.match_info.get("text_code") or "").strip()
     if not text_code:
@@ -789,8 +793,8 @@ async def api_article_item(request: web.Request) -> web.Response:
 
 
 async def api_import_xml(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
 
     reader = await request.multipart()
@@ -837,16 +841,16 @@ async def api_import_xml(request: web.Request) -> web.Response:
 
 
 async def api_alerts_get(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     alerts = await list_active_price_target_alerts(db_dsn, user_id)
     return _json_ok(alerts)
 
 
 async def api_alerts_post(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     payload = await _read_json(request)
 
@@ -899,8 +903,8 @@ async def api_alerts_post(request: web.Request) -> web.Response:
 
 
 async def api_alerts_delete(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         alert_id = int(request.match_info["alert_id"])
@@ -911,8 +915,8 @@ async def api_alerts_delete(request: web.Request) -> web.Response:
 
 
 async def api_mode(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     if request.method == "GET":
         mode = await get_user_last_mode(db_dsn, user_id)
@@ -926,16 +930,16 @@ async def api_mode(request: web.Request) -> web.Response:
 
 
 async def api_budget_dashboard(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     data = await get_budget_dashboard(db_dsn, user_id)
     return _json_ok(data)
 
 
 async def api_budget_profile(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     if request.method == "GET":
         return _json_ok(await get_budget_profile(db_dsn, user_id))
@@ -1002,8 +1006,8 @@ async def api_budget_profile(request: web.Request) -> web.Response:
 
 
 async def api_budget_obligations(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     if request.method == "GET":
         rows = await list_budget_obligations(db_dsn, user_id)
@@ -1041,8 +1045,8 @@ async def api_budget_obligations(request: web.Request) -> web.Response:
 
 
 async def api_budget_savings(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     if request.method == "GET":
         rows = await list_budget_savings(db_dsn, user_id)
@@ -1068,8 +1072,8 @@ async def api_budget_savings(request: web.Request) -> web.Response:
 
 
 async def api_budget_saving_item(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         saving_id = int(request.match_info["saving_id"])
@@ -1134,8 +1138,8 @@ async def api_budget_saving_item(request: web.Request) -> web.Response:
 
 
 async def api_budget_incomes(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     if request.method == "GET":
         rows = await list_budget_incomes(db_dsn, user_id)
@@ -1163,8 +1167,8 @@ async def api_budget_incomes(request: web.Request) -> web.Response:
 
 
 async def api_budget_income_item(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         income_id = int(request.match_info["income_id"])
@@ -1282,8 +1286,8 @@ def _build_expense_payload(payload: dict) -> tuple[str, str, float, dict]:
 
 
 async def api_budget_expenses(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     if request.method == "GET":
         rows = await list_budget_expenses(db_dsn, user_id)
@@ -1311,8 +1315,8 @@ async def api_budget_expenses(request: web.Request) -> web.Response:
 
 
 async def api_budget_expense_item(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         expense_id = int(request.match_info["expense_id"])
@@ -1357,8 +1361,8 @@ async def api_budget_expense_item(request: web.Request) -> web.Response:
 
 
 async def api_budget_reset(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     result = await reset_budget_data(db_dsn, user_id)
     await add_budget_history_event(
@@ -1372,8 +1376,8 @@ async def api_budget_reset(request: web.Request) -> web.Response:
 
 
 async def api_budget_notification_settings(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     if request.method == "GET":
         return _json_ok(await get_budget_notification_settings(db_dsn, user_id))
@@ -1439,8 +1443,8 @@ def _normalize_goal_checklist(raw: object) -> list[dict]:
 
 
 async def api_budget_fund_strategy(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     payload = await _read_json(request)
     title = str(payload.get("title") or "").strip()
@@ -1493,8 +1497,8 @@ async def api_budget_fund_strategy(request: web.Request) -> web.Response:
 
 
 async def api_budget_funds(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     if request.method == "GET":
         return _json_ok(await list_budget_funds(db_dsn, user_id))
@@ -1558,8 +1562,8 @@ async def api_budget_funds(request: web.Request) -> web.Response:
 
 
 async def api_budget_fund_item(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         fund_id = int(request.match_info["fund_id"])
@@ -1671,8 +1675,8 @@ async def api_budget_fund_item(request: web.Request) -> web.Response:
 
 
 async def api_budget_month_close(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     payload = await _read_json(request)
 
@@ -1727,8 +1731,8 @@ async def api_budget_month_close(request: web.Request) -> web.Response:
 
 
 async def api_budget_history(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     limit_raw = (request.query.get("limit") or "").strip()
     try:
@@ -1865,8 +1869,8 @@ async def _compute_loan_cached(
 
 
 async def api_loans(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     if request.method == "GET":
         items = await list_loan_accounts(db_dsn, user_id)
@@ -1939,8 +1943,8 @@ async def api_loans(request: web.Request) -> web.Response:
 
 
 async def api_loan_item(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         loan_id = int(request.match_info["loan_id"])
@@ -1959,8 +1963,8 @@ async def api_loan_item(request: web.Request) -> web.Response:
 
 
 async def api_loan_schedule(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         loan_id = int(request.match_info["loan_id"])
@@ -1993,8 +1997,8 @@ async def api_loan_schedule(request: web.Request) -> web.Response:
 
 
 async def api_loan_events_extra(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         _loan_rate_limit(user_id, "loan_event")
@@ -2040,8 +2044,8 @@ async def api_loan_events_extra(request: web.Request) -> web.Response:
 
 
 async def api_loan_events_rate(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         _loan_rate_limit(user_id, "loan_event")
@@ -2073,8 +2077,8 @@ async def api_loan_events_rate(request: web.Request) -> web.Response:
 
 
 async def api_loan_events_holiday(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         _loan_rate_limit(user_id, "loan_event")
@@ -2115,8 +2119,8 @@ async def api_loan_events_holiday(request: web.Request) -> web.Response:
 
 
 async def api_loan_scenario_preview(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         _loan_rate_limit(user_id, "loan_preview")
@@ -2191,8 +2195,8 @@ async def api_loan_scenario_preview(request: web.Request) -> web.Response:
 
 
 async def api_loan_tips(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         loan_id = int(request.match_info["loan_id"])
@@ -2289,8 +2293,8 @@ def _render_simple_pdf(title: str, lines: list[str]) -> bytes:
 
 
 async def api_loan_actual_payments(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         loan_id = int(request.match_info["loan_id"])
@@ -2331,8 +2335,8 @@ async def api_loan_actual_payments(request: web.Request) -> web.Response:
 
 
 async def api_loan_refinance_preview(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         loan_id = int(request.match_info["loan_id"])
@@ -2373,8 +2377,8 @@ async def api_loan_refinance_preview(request: web.Request) -> web.Response:
 
 
 async def api_loan_optimizer(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         loan_id = int(request.match_info["loan_id"])
@@ -2413,8 +2417,8 @@ async def api_loan_optimizer(request: web.Request) -> web.Response:
 
 
 async def api_loan_export(request: web.Request) -> web.StreamResponse:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         loan_id = int(request.match_info["loan_id"])
@@ -2450,8 +2454,8 @@ async def api_loan_export(request: web.Request) -> web.StreamResponse:
 
 async def api_loan_share_create(request: web.Request) -> web.Response:
     import secrets
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     try:
         loan_id = int(request.match_info["loan_id"])
@@ -2475,7 +2479,7 @@ async def api_loan_share_create(request: web.Request) -> web.Response:
 
 
 async def api_loan_share_get(request: web.Request) -> web.Response:
-    db_dsn = request.app["db_dsn"]
+    db_dsn = request.app[APP_DB_DSN]
     token = str(request.match_info.get("token") or "").strip()
     if not token:
         return _json_error("VALIDATION_ERROR", "token required", status=400)
@@ -2497,8 +2501,8 @@ async def api_loan_share_get(request: web.Request) -> web.Response:
 
 
 async def api_loan_reminders(request: web.Request) -> web.Response:
-    bot_token = request.app["bot_token"]
-    db_dsn = request.app["db_dsn"]
+    bot_token = request.app[APP_BOT_TOKEN]
+    db_dsn = request.app[APP_DB_DSN]
     user_id = await _auth_user_id(request, bot_token)
     if request.method == "GET":
         return _json_ok(await get_loan_reminder_settings(db_dsn, user_id))
@@ -2513,8 +2517,8 @@ async def api_loan_reminders(request: web.Request) -> web.Response:
 
 
 def attach_miniapp_routes(app: web.Application, db_dsn: str, bot_token: str) -> None:
-    app["db_dsn"] = db_dsn
-    app["bot_token"] = bot_token
+    app[APP_DB_DSN] = db_dsn
+    app[APP_BOT_TOKEN] = bot_token
 
     app.router.add_get("/miniapp", miniapp_index)
     app.router.add_get("/miniapp/{name}", miniapp_asset)
