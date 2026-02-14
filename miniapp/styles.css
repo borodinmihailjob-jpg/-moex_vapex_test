@@ -499,6 +499,33 @@ button:focus-visible,
   background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 75%, #4db4ff 25%), var(--success));
 }
 
+.loan-balance-wrap {
+  margin-top: var(--s12);
+}
+
+.loan-balance-line {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  min-height: 120px;
+  padding: var(--s8);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--separator);
+  background: color-mix(in srgb, var(--surface-elevated) 86%, transparent);
+}
+
+.loan-balance-line .bar {
+  flex: 1 1 0;
+  min-width: 6px;
+  border-radius: 6px 6px 2px 2px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 82%, #4db4ff 18%), color-mix(in srgb, var(--accent) 35%, #1a3149 65%));
+  opacity: 0.95;
+}
+
+.loan-next-wrap {
+  margin-top: var(--s12);
+}
+
 .switch {
   position: relative;
   width: 52px;

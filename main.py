@@ -97,6 +97,8 @@ from db import (
     list_active_price_target_alerts,
     update_price_target_alert_last_sent,
     disable_price_target_alert,
+    get_loan_account,
+    list_loan_accounts,
 )
 from portfolio_cards import build_portfolio_map_png, build_portfolio_share_card_png
 from moex_iss import (
@@ -539,6 +541,13 @@ async def cmd_start(message: Message):
         "/alert — поставить ценовой алерт по акции/металлу/фиату\n"
         "/alerts_list — список и отключение ценовых алертов\n"
         "/miniapp — открыть Mini App интерфейс\n"
+        "🏠 Ипотека и кредиты\n"
+        "/loans — список кредитов\n"
+        "/loan_add — добавить кредит\n"
+        "/loan <id> — карточка кредита\n"
+        "/loan_extra — добавить досрочку\n"
+        "/loan_schedule — план платежей\n"
+        "/loan_tips — советы по кредиту\n"
         "🔔 Отчёты дня\n"
         "/trading_day_on — включить отчёт по итогам торгов (открытие/закрытие)\n"
         "/trading_day_off — выключить отчёт\n"
@@ -621,6 +630,101 @@ async def cmd_miniapp(message: Message):
         ]
     )
     await message.answer("Открой интерфейс бота в Mini App:", reply_markup=kb)
+
+
+def _miniapp_open_kb(text: str = "📱 Открыть Mini App") -> InlineKeyboardMarkup | None:
+    if not MINIAPP_URL:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=text, web_app=WebAppInfo(url=MINIAPP_URL))]
+        ]
+    )
+
+
+async def cmd_loans(message: Message):
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        await message.answer("Не удалось определить пользователя.")
+        return
+    rows = await list_loan_accounts(DB_DSN, user_id)
+    if not rows:
+        await message.answer(
+            "Ипотека и кредиты\n\nДобавьте кредит в Mini App, и я посчитаю график, переплату и сценарии досрочки.",
+            reply_markup=_miniapp_open_kb("+ Добавить кредит"),
+        )
+        return
+    lines = ["Ваши кредиты:"]
+    for item in rows[:20]:
+        title = (item.get("name") or f"Кредит #{item['id']}").strip()
+        lines.append(
+            f"• #{item['id']} {title}: {money(float(item['principal']))}, "
+            f"{float(item['annual_rate']):.2f}% на {int(item['term_months'])} мес."
+        )
+    lines.append("")
+    lines.append("Команды: /loan <id>, /loan_schedule, /loan_extra, /loan_tips")
+    await message.answer("\n".join(lines), reply_markup=_miniapp_open_kb())
+
+
+async def cmd_loan_add(message: Message):
+    await message.answer(
+        "Новый кредит\nВведите условия в Mini App, и я построю график и рекомендации.",
+        reply_markup=_miniapp_open_kb("+ Добавить кредит"),
+    )
+
+
+async def cmd_loan(message: Message):
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        await message.answer("Не удалось определить пользователя.")
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) < 2:
+        await message.answer("Использование: /loan <id>")
+        return
+    try:
+        loan_id = int(parts[1])
+    except ValueError:
+        await message.answer("ID кредита должен быть числом.")
+        return
+    loan = await get_loan_account(DB_DSN, user_id, loan_id)
+    if not loan:
+        await message.answer("Кредит не найден.")
+        return
+    title = (loan.get("name") or f"Кредит #{loan_id}").strip()
+    await message.answer(
+        (
+            f"{title}\n"
+            f"Сумма: {money(float(loan['principal']))}\n"
+            f"Ставка: {float(loan['annual_rate']):.2f}%\n"
+            f"Тип: {'Аннуитет' if loan['payment_type'] == 'ANNUITY' else 'Дифференцированный'}\n"
+            f"Срок: {int(loan['term_months'])} мес\n"
+            f"Первый платёж: {loan['first_payment_date']}\n\n"
+            "Подробная карта, график и сценарии доступны в Mini App."
+        ),
+        reply_markup=_miniapp_open_kb("Открыть карту кредита"),
+    )
+
+
+async def cmd_loan_extra(message: Message):
+    await message.answer(
+        "Досрочное погашение удобнее добавить в Mini App: там сразу видно эффект по сроку и переплате.",
+        reply_markup=_miniapp_open_kb("Добавить досрочку"),
+    )
+
+
+async def cmd_loan_schedule(message: Message):
+    await message.answer(
+        "План платежей доступен в Mini App с фильтрами и событиями по ставке/досрочке.",
+        reply_markup=_miniapp_open_kb("Открыть план"),
+    )
+
+
+async def cmd_loan_tips(message: Message):
+    await message.answer(
+        "Советы по кредиту формируются по вашим данным в Mini App: стратегия досрочки, переплата и срок закрытия.",
+        reply_markup=_miniapp_open_kb("Открыть советы"),
+    )
 
 
 async def cmd_alert(message: Message, state: FSMContext):
@@ -2139,6 +2243,12 @@ async def main():
     dp.message.register(cmd_top_movers, Command("top_movers"), StateFilter("*"))
     dp.message.register(cmd_usd_rub, Command("usd_rub"), StateFilter("*"))
     dp.message.register(cmd_miniapp, Command("miniapp"), StateFilter("*"))
+    dp.message.register(cmd_loans, Command("loans"), StateFilter("*"))
+    dp.message.register(cmd_loan_add, Command("loan_add"), StateFilter("*"))
+    dp.message.register(cmd_loan, Command("loan"), StateFilter("*"))
+    dp.message.register(cmd_loan_extra, Command("loan_extra"), StateFilter("*"))
+    dp.message.register(cmd_loan_schedule, Command("loan_schedule"), StateFilter("*"))
+    dp.message.register(cmd_loan_tips, Command("loan_tips"), StateFilter("*"))
     dp.message.register(cmd_alert, Command("alert"), StateFilter("*"))
     dp.message.register(cmd_alerts_list, Command("alerts_list"), StateFilter("*"))
     dp.message.register(cmd_clear_portfolio, Command("clear_portfolio"), StateFilter("*"))

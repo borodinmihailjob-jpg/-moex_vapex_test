@@ -35,6 +35,10 @@ const state = {
     expenseRateRows: [],
     goalEditingId: null,
     goalChecklistItems: [],
+    activeLoanId: null,
+    activeLoan: null,
+    activeLoanSummary: null,
+    loanView: "list",
   },
 };
 
@@ -186,6 +190,13 @@ const el = {
   budgetIncomeCard: document.getElementById("budgetIncomeCard"),
   budgetExpensesCard: document.getElementById("budgetExpensesCard"),
   budgetFundsCard: document.getElementById("budgetFundsCard"),
+  budgetLoansCard: document.getElementById("budgetLoansCard"),
+  budgetLoanCreateCard: document.getElementById("budgetLoanCreateCard"),
+  budgetLoanCard: document.getElementById("budgetLoanCard"),
+  budgetLoanScheduleCard: document.getElementById("budgetLoanScheduleCard"),
+  budgetLoanExtraCard: document.getElementById("budgetLoanExtraCard"),
+  budgetLoanScenarioCard: document.getElementById("budgetLoanScenarioCard"),
+  budgetLoanTipsCard: document.getElementById("budgetLoanTipsCard"),
   budgetMonthCloseCard: document.getElementById("budgetMonthCloseCard"),
   budgetSavingsCard: document.getElementById("budgetSavingsCard"),
   budgetSettingsCard: document.getElementById("budgetSettingsCard"),
@@ -249,6 +260,50 @@ const el = {
   budgetExpensesList: document.getElementById("budgetExpensesList"),
   budgetExpensesSaveBtn: document.getElementById("budgetExpensesSaveBtn"),
   budgetFundsList: document.getElementById("budgetFundsList"),
+  loansOpenCreateBtn: document.getElementById("loansOpenCreateBtn"),
+  loansList: document.getElementById("loansList"),
+  loanNameInput: document.getElementById("loanNameInput"),
+  loanPrincipalInput: document.getElementById("loanPrincipalInput"),
+  loanAnnualRateInput: document.getElementById("loanAnnualRateInput"),
+  loanPaymentTypeInput: document.getElementById("loanPaymentTypeInput"),
+  loanTermMonthsInput: document.getElementById("loanTermMonthsInput"),
+  loanFirstPaymentDateInput: document.getElementById("loanFirstPaymentDateInput"),
+  loanIssueDateInput: document.getElementById("loanIssueDateInput"),
+  loanCurrencyInput: document.getElementById("loanCurrencyInput"),
+  loanCreateError: document.getElementById("loanCreateError"),
+  loanCreateSaveBtn: document.getElementById("loanCreateSaveBtn"),
+  loanCreateCancelBtn: document.getElementById("loanCreateCancelBtn"),
+  loanCardTitle: document.getElementById("loanCardTitle"),
+  loanCardSubtitle: document.getElementById("loanCardSubtitle"),
+  loanKeyStats: document.getElementById("loanKeyStats"),
+  loanStructureDonut: document.getElementById("loanStructureDonut"),
+  loanStructureShare: document.getElementById("loanStructureShare"),
+  loanBalanceLine: document.getElementById("loanBalanceLine"),
+  loanNextPayment: document.getElementById("loanNextPayment"),
+  loanActionExtraBtn: document.getElementById("loanActionExtraBtn"),
+  loanActionScheduleBtn: document.getElementById("loanActionScheduleBtn"),
+  loanActionScenarioBtn: document.getElementById("loanActionScenarioBtn"),
+  loanActionTipsBtn: document.getElementById("loanActionTipsBtn"),
+  loanBackToListBtn: document.getElementById("loanBackToListBtn"),
+  loanSchedulePageInput: document.getElementById("loanSchedulePageInput"),
+  loanSchedulePageSizeInput: document.getElementById("loanSchedulePageSizeInput"),
+  loanScheduleApplyBtn: document.getElementById("loanScheduleApplyBtn"),
+  loanScheduleMeta: document.getElementById("loanScheduleMeta"),
+  loanScheduleList: document.getElementById("loanScheduleList"),
+  loanScheduleBackBtn: document.getElementById("loanScheduleBackBtn"),
+  loanExtraAmountInput: document.getElementById("loanExtraAmountInput"),
+  loanExtraDateInput: document.getElementById("loanExtraDateInput"),
+  loanExtraModeInput: document.getElementById("loanExtraModeInput"),
+  loanExtraStrategyInput: document.getElementById("loanExtraStrategyInput"),
+  loanExtraPreviewBtn: document.getElementById("loanExtraPreviewBtn"),
+  loanExtraPreview: document.getElementById("loanExtraPreview"),
+  loanExtraSaveBtn: document.getElementById("loanExtraSaveBtn"),
+  loanExtraBackBtn: document.getElementById("loanExtraBackBtn"),
+  loanScenarioResult: document.getElementById("loanScenarioResult"),
+  loanScenarioSchedule: document.getElementById("loanScenarioSchedule"),
+  loanScenarioBackBtn: document.getElementById("loanScenarioBackBtn"),
+  loanTipsList: document.getElementById("loanTipsList"),
+  loanTipsBackBtn: document.getElementById("loanTipsBackBtn"),
   budgetSavingTypeInput: document.getElementById("budgetSavingTypeInput"),
   budgetSavingsOpenAddBtn: document.getElementById("budgetSavingsOpenAddBtn"),
   budgetSavingsBackBtn: document.getElementById("budgetSavingsBackBtn"),
@@ -568,6 +623,13 @@ function setBudgetTab(tab) {
   show(el.budgetDashboardCard, tab === "overview");
   show(el.budgetIncomeCard, tab === "income");
   show(el.budgetExpensesCard, tab === "expenses");
+  show(el.budgetLoansCard, tab === "loans");
+  show(el.budgetLoanCreateCard, false);
+  show(el.budgetLoanCard, false);
+  show(el.budgetLoanScheduleCard, false);
+  show(el.budgetLoanExtraCard, false);
+  show(el.budgetLoanScenarioCard, false);
+  show(el.budgetLoanTipsCard, false);
   show(el.budgetFundsCard, tab === "funds");
   if (tab !== "funds") {
     show(el.goalDetailCard, false);
@@ -586,6 +648,10 @@ function setBudgetTab(tab) {
   }
   if (tab === "funds") {
     renderBudgetGoalsList(getBudgetGoals());
+  }
+  if (tab === "loans") {
+    state.budget.loanView = "list";
+    loadLoansList().catch(() => {});
   }
   if (tab === "savings") {
     loadBudgetSavings().catch(() => {});
@@ -1111,6 +1177,341 @@ function resetSavingForm() {
   }
   if (el.budgetSavingAmountInput) {
     el.budgetSavingAmountInput.value = "";
+  }
+}
+
+function formatDateRu(isoDate) {
+  const text = String(isoDate || "").trim();
+  if (!text) return "—";
+  const d = new Date(`${text}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return text;
+  return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "long", year: "numeric" });
+}
+
+function setLoanView(view) {
+  state.budget.loanView = view;
+  const show = (node, visible) => {
+    if (!node) return;
+    node.style.display = visible ? "" : "none";
+  };
+  show(el.budgetLoansCard, view === "list");
+  show(el.budgetLoanCreateCard, view === "create");
+  show(el.budgetLoanCard, view === "card");
+  show(el.budgetLoanScheduleCard, view === "schedule");
+  show(el.budgetLoanExtraCard, view === "extra");
+  show(el.budgetLoanScenarioCard, view === "scenario");
+  show(el.budgetLoanTipsCard, view === "tips");
+}
+
+function setLoanActionChip(active) {
+  const pairs = [
+    [el.loanActionExtraBtn, "extra"],
+    [el.loanActionScheduleBtn, "schedule"],
+    [el.loanActionScenarioBtn, "scenario"],
+    [el.loanActionTipsBtn, "tips"],
+  ];
+  pairs.forEach(([btn, key]) => {
+    if (!btn) return;
+    btn.classList.toggle("active", key === active);
+  });
+}
+
+function resetLoanCreateForm() {
+  if (el.loanNameInput) el.loanNameInput.value = "";
+  if (el.loanPrincipalInput) el.loanPrincipalInput.value = "";
+  if (el.loanAnnualRateInput) el.loanAnnualRateInput.value = "";
+  if (el.loanPaymentTypeInput) el.loanPaymentTypeInput.value = "ANNUITY";
+  if (el.loanTermMonthsInput) el.loanTermMonthsInput.value = "240";
+  if (el.loanFirstPaymentDateInput) el.loanFirstPaymentDateInput.value = addMonthsYmd(fmtDate(0), 1) || fmtDate(0);
+  if (el.loanIssueDateInput) el.loanIssueDateInput.value = fmtDate(0);
+  if (el.loanCurrencyInput) el.loanCurrencyInput.value = "RUB";
+  if (el.loanCreateError) {
+    el.loanCreateError.style.display = "none";
+    el.loanCreateError.textContent = "";
+  }
+}
+
+function showLoanCreateError(text) {
+  if (!el.loanCreateError) return;
+  el.loanCreateError.style.display = "";
+  el.loanCreateError.textContent = String(text || "Проверьте данные");
+  el.loanCreateError.style.color = "var(--danger)";
+}
+
+async function apiLoanCreate(payload) {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (state.initData) headers.set("X-Telegram-Init-Data", state.initData);
+  beginLoading("Сохраняю кредит…");
+  try {
+    const res = await fetch("/api/miniapp/loans", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(body?.message || body?.error_code || "Не удалось создать кредит");
+    }
+    return body;
+  } finally {
+    endLoading();
+  }
+}
+
+function renderLoanListRows(items) {
+  if (!el.loansList) return;
+  el.loansList.innerHTML = "";
+  if (!items.length) {
+    renderEmpty(el.loansList, "Тут появятся ваши кредиты. Добавьте ипотеку, и я соберу план выплат и подсказки.");
+    return;
+  }
+  items.forEach((loan) => {
+    const row = createListRow({
+      title: String(loan.name || `Кредит #${loan.id}`),
+      subtitle: `${money(loan.principal)} • ${Number(loan.annual_rate).toFixed(2)}% • ${loan.term_months} мес.`,
+      actionLabel: "Открыть",
+      onAction: async () => {
+        await openLoanCard(Number(loan.id));
+      },
+    });
+    el.loansList.appendChild(row);
+  });
+}
+
+async function loadLoansList() {
+  if (!el.loansList) return;
+  renderSkeletonList(el.loansList, 3);
+  const data = await api("/api/miniapp/loans", { skipLoader: true });
+  const items = data.items || [];
+  state.budget.loans = items;
+  renderLoanListRows(items);
+}
+
+function renderLoanStructure(summary) {
+  if (!el.loanStructureDonut || !el.loanStructureShare) return;
+  const interest = Math.max(0, Number(summary.total_interest || 0));
+  const principal = Math.max(0, Number(summary.total_principal_paid || 0));
+  const total = Math.max(0.01, interest + principal);
+  const intPct = (interest / total) * 100;
+  const princPct = 100 - intPct;
+  const intDeg = intPct * 3.6;
+  el.loanStructureDonut.style.background =
+    `conic-gradient(#d1497a 0deg ${intDeg.toFixed(2)}deg, #1ea86c ${intDeg.toFixed(2)}deg 360deg)`;
+  el.loanStructureShare.innerHTML = "";
+  [
+    { label: "Проценты", amount: interest, pct: intPct, cls: "expenses" },
+    { label: "Тело долга", amount: principal, pct: princPct, cls: "savings" },
+  ].forEach((x) => {
+    const item = document.createElement("div");
+    item.className = "item";
+    item.innerHTML = `
+      <div class="left">
+        <span class="dot ${x.cls}"></span>
+        <div>
+          <div class="name">${x.label}</div>
+          <div class="sub">${money(x.amount)}</div>
+        </div>
+      </div>
+      <div class="right"><div>${x.pct.toFixed(1)}%</div></div>
+    `;
+    el.loanStructureShare.appendChild(item);
+  });
+}
+
+function renderLoanBalanceBars(schedule) {
+  if (!el.loanBalanceLine) return;
+  el.loanBalanceLine.innerHTML = "";
+  if (!Array.isArray(schedule) || !schedule.length) return;
+  const points = schedule.filter((_, idx) => idx % Math.max(1, Math.floor(schedule.length / 24)) === 0).slice(0, 24);
+  const maxBalance = Math.max(...points.map((x) => Number(x.balance || 0)), 1);
+  points.forEach((p) => {
+    const h = Math.max(4, Math.round((Number(p.balance || 0) / maxBalance) * 100));
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    bar.style.height = `${h}%`;
+    bar.title = `${formatDateRu(p.date)}: ${money(p.balance)}`;
+    el.loanBalanceLine.appendChild(bar);
+  });
+}
+
+function renderLoanCard(loan, summary, schedulePreview) {
+  if (el.loanCardTitle) el.loanCardTitle.textContent = String(loan.name || `Кредит #${loan.id}`);
+  if (el.loanCardSubtitle) {
+    el.loanCardSubtitle.textContent = `Вы платите ${money(summary.monthly_payment)} в месяц. Закрытие: ${formatDateRu(summary.payoff_date)}.`;
+  }
+  if (el.loanKeyStats) {
+    const items = [
+      { title: "Остаток долга", value: money(summary.remaining_balance) },
+      { title: "Ежемесячный платеж", value: money(summary.monthly_payment) },
+      { title: "Переплата по процентам", value: money(summary.total_interest) },
+      { title: "Выплачено", value: `${money(summary.total_paid)} (${summary.payments_count} платежей)` },
+    ];
+    el.loanKeyStats.innerHTML = "";
+    items.forEach((x) => {
+      const row = createListRow({ title: x.title, right: x.value });
+      el.loanKeyStats.appendChild(row);
+    });
+  }
+  renderLoanStructure(summary);
+  renderLoanBalanceBars(schedulePreview || []);
+  if (el.loanNextPayment) {
+    const n = summary.next_payment || {};
+    if (!n.date) {
+      el.loanNextPayment.textContent = "Кредит закрыт.";
+    } else {
+      el.loanNextPayment.textContent = [
+        `Следующий платеж: ${formatDateRu(n.date)}`,
+        `В нем: проценты ${money(n.interest)}, тело ${money(n.principal)}`,
+        `После платежа остаток: ${money(n.balance)}`,
+      ].join("\n");
+    }
+  }
+}
+
+async function openLoanCard(loanId) {
+  state.budget.activeLoanId = Number(loanId);
+  const data = await api(`/api/miniapp/loans/${loanId}`, { loadingText: "Собираю карту кредита…" });
+  state.budget.activeLoan = data.loan || null;
+  state.budget.activeLoanSummary = data.summary || null;
+  const sch = await api(`/api/miniapp/loans/${loanId}/schedule?page=1&page_size=24`, { skipLoader: true });
+  renderLoanCard(data.loan, data.summary, sch.items || []);
+  setLoanView("card");
+  setLoanActionChip("extra");
+}
+
+async function loadLoanSchedule() {
+  const loanId = Number(state.budget.activeLoanId || 0);
+  if (!loanId) return;
+  const page = Math.max(1, Number(el.loanSchedulePageInput?.value || 1));
+  const pageSize = Math.min(120, Math.max(10, Number(el.loanSchedulePageSizeInput?.value || 60)));
+  const data = await api(`/api/miniapp/loans/${loanId}/schedule?page=${page}&page_size=${pageSize}`, { loadingText: "Загружаю график…" });
+  if (el.loanScheduleMeta) {
+    el.loanScheduleMeta.textContent = `Версия ${data.version} • Периодов: ${data.total} • Стр. ${data.page}`;
+  }
+  if (el.loanScheduleList) {
+    el.loanScheduleList.innerHTML = "";
+    (data.items || []).forEach((row) => {
+      const node = createListRow({
+        title: formatDateRu(row.date),
+        subtitle: `Проценты ${money(row.interest)} • Тело ${money(row.principal)}`,
+        right: `${money(row.payment)}\nОстаток ${money(row.balance)}`,
+      });
+      el.loanScheduleList.appendChild(node);
+    });
+    if (!(data.items || []).length) {
+      renderEmpty(el.loanScheduleList, "Список платежей пуст.");
+    }
+  }
+}
+
+async function previewExtraPayment() {
+  const loanId = Number(state.budget.activeLoanId || 0);
+  if (!loanId || !el.loanExtraPreview) return;
+  const amount = parseMoneyInput(el.loanExtraAmountInput?.value || "");
+  const date = String(el.loanExtraDateInput?.value || "").trim();
+  const mode = String(el.loanExtraModeInput?.value || "ONE_TIME");
+  const strategy = String(el.loanExtraStrategyInput?.value || "REDUCE_TERM");
+  const data = await api(`/api/miniapp/loans/${loanId}/scenarios/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      events: [{ type: "EXTRA_PAYMENT", date, amount, mode, strategy }],
+    }),
+    loadingText: "Считаю эффект досрочки…",
+  });
+  el.loanExtraPreview.textContent = [
+    `Минус: ${Math.max(0, Number(data.months_diff || 0))} мес`,
+    `Экономия процентов: ${money(data.interest_saving || 0)}`,
+    `Новая дата закрытия: ${formatDateRu(data.scenario_summary?.payoff_date)}`,
+    `Новый платеж: ${money(data.scenario_summary?.monthly_payment || 0)}`,
+  ].join("\n");
+}
+
+async function saveExtraPayment() {
+  const loanId = Number(state.budget.activeLoanId || 0);
+  if (!loanId) return;
+  const amount = parseMoneyInput(el.loanExtraAmountInput?.value || "");
+  const date = String(el.loanExtraDateInput?.value || "").trim();
+  const mode = String(el.loanExtraModeInput?.value || "ONE_TIME");
+  const strategy = String(el.loanExtraStrategyInput?.value || "REDUCE_TERM");
+  await api(`/api/miniapp/loans/${loanId}/events/extra-payment`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": `loan-extra-${loanId}-${date}-${amount}-${mode}-${strategy}`,
+    },
+    body: JSON.stringify({ date, amount, mode, strategy }),
+    loadingText: "Сохраняю досрочку…",
+  });
+}
+
+function buildLoanPresetEvent(preset) {
+  const baseDate = el.loanExtraDateInput?.value || fmtDate(0);
+  if (preset === "plus5k") {
+    return [{ type: "EXTRA_PAYMENT", date: baseDate, amount: 5000, mode: "MONTHLY", strategy: "REDUCE_TERM" }];
+  }
+  if (preset === "one100k") {
+    return [{ type: "EXTRA_PAYMENT", date: baseDate, amount: 100000, mode: "ONE_TIME", strategy: "REDUCE_TERM" }];
+  }
+  if (preset === "rateMinus2") {
+    const d = addMonthsYmd(baseDate, 6);
+    const currentRate = Number(state.budget.activeLoan?.annual_rate || 0);
+    const nextRate = Math.max(0, currentRate - 2);
+    return [{ type: "RATE_CHANGE", date: d, annual_rate: Number(nextRate.toFixed(2)) }];
+  }
+  if (preset === "holiday3") {
+    const start = baseDate;
+    const end = addMonthsYmd(baseDate, 2);
+    return [{ type: "HOLIDAY", start_date: start, end_date: end, holiday_type: "INTEREST_ONLY" }];
+  }
+  return [];
+}
+
+async function runScenarioPreset(preset) {
+  const loanId = Number(state.budget.activeLoanId || 0);
+  if (!loanId) return;
+  const events = buildLoanPresetEvent(preset);
+  const data = await api(`/api/miniapp/loans/${loanId}/scenarios/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ events }),
+    loadingText: "Считаю сценарий…",
+  });
+  if (el.loanScenarioResult) {
+    el.loanScenarioResult.textContent = [
+      `Экономия процентов: ${money(data.interest_saving || 0)}`,
+      `На сколько раньше закрытие: ${Math.max(0, Number(data.months_diff || 0))} мес`,
+      `Новая дата закрытия: ${formatDateRu(data.scenario_summary?.payoff_date)}`,
+      `Новый платеж: ${money(data.scenario_summary?.monthly_payment || 0)}`,
+    ].join("\n");
+  }
+  if (el.loanScenarioSchedule) {
+    el.loanScenarioSchedule.innerHTML = "";
+    (data.schedule_preview || []).slice(0, 12).forEach((row) => {
+      const node = createListRow({
+        title: formatDateRu(row.date),
+        subtitle: `Проценты ${money(row.interest)} • Тело ${money(row.principal)}`,
+        right: `${money(row.payment)}`,
+      });
+      el.loanScenarioSchedule.appendChild(node);
+    });
+  }
+}
+
+async function loadLoanTips() {
+  const loanId = Number(state.budget.activeLoanId || 0);
+  if (!loanId || !el.loanTipsList) return;
+  const data = await api(`/api/miniapp/loans/${loanId}/tips`, { loadingText: "Готовлю советы…" });
+  el.loanTipsList.innerHTML = "";
+  (data.tips || []).forEach((tip) => {
+    const node = createListRow({
+      title: String(tip.title || "Совет"),
+      subtitle: String(tip.text || ""),
+    });
+    el.loanTipsList.appendChild(node);
+  });
+  if (!(data.tips || []).length) {
+    renderEmpty(el.loanTipsList, "Советы появятся после первого расчета.");
   }
 }
 
@@ -2398,6 +2799,128 @@ function setupEvents() {
   el.editBudgetBtn?.addEventListener("click", () => {
     setBudgetTab("income");
   });
+  el.loansOpenCreateBtn?.addEventListener("click", () => {
+    resetLoanCreateForm();
+    setLoanView("create");
+  });
+  el.loanCreateCancelBtn?.addEventListener("click", () => {
+    setLoanView("list");
+  });
+  el.loanCreateSaveBtn?.addEventListener("click", async () => {
+    try {
+      const principal = parseMoneyInput(el.loanPrincipalInput?.value || "");
+      const annualRate = Number(String(el.loanAnnualRateInput?.value || "").replace(",", "."));
+      const termMonths = Number(el.loanTermMonthsInput?.value || 0);
+      const paymentType = String(el.loanPaymentTypeInput?.value || "ANNUITY");
+      const firstPaymentDate = String(el.loanFirstPaymentDateInput?.value || "").trim();
+      const issueDate = String(el.loanIssueDateInput?.value || "").trim();
+      if (!Number.isFinite(annualRate) || annualRate < 0 || annualRate > 100) {
+        throw new Error("Ставка должна быть от 0 до 100");
+      }
+      if (!Number.isInteger(termMonths) || termMonths < 1 || termMonths > 600) {
+        throw new Error("Срок должен быть от 1 до 600 месяцев");
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(firstPaymentDate)) {
+        throw new Error("Укажите дату первого платежа");
+      }
+      if (issueDate && !/^\d{4}-\d{2}-\d{2}$/.test(issueDate)) {
+        throw new Error("Проверьте дату выдачи");
+      }
+      if (issueDate && firstPaymentDate <= issueDate) {
+        throw new Error("Дата первого платежа должна быть после даты выдачи");
+      }
+      const created = await apiLoanCreate({
+        name: (el.loanNameInput?.value || "").trim(),
+        principal: principal.toFixed(2),
+        annual_rate: annualRate.toFixed(2),
+        payment_type: paymentType,
+        term_months: termMonths,
+        first_payment_date: firstPaymentDate,
+        issue_date: issueDate || null,
+        currency: String(el.loanCurrencyInput?.value || "RUB"),
+      });
+      toast("Кредит добавлен");
+      await loadLoansList();
+      await openLoanCard(Number(created.loan_id));
+    } catch (e) {
+      showLoanCreateError(e?.message || "Не удалось сохранить кредит");
+    }
+  });
+  el.loanBackToListBtn?.addEventListener("click", async () => {
+    setLoanView("list");
+    await loadLoansList();
+  });
+  el.loanActionScheduleBtn?.addEventListener("click", async () => {
+    setLoanActionChip("schedule");
+    setLoanView("schedule");
+    await loadLoanSchedule();
+  });
+  el.loanActionExtraBtn?.addEventListener("click", async () => {
+    setLoanActionChip("extra");
+    setLoanView("extra");
+    if (el.loanExtraDateInput && !el.loanExtraDateInput.value) {
+      el.loanExtraDateInput.value = fmtDate(0);
+    }
+    if (el.loanExtraPreview) el.loanExtraPreview.textContent = "";
+  });
+  el.loanActionScenarioBtn?.addEventListener("click", () => {
+    setLoanActionChip("scenario");
+    setLoanView("scenario");
+    if (el.loanScenarioResult) el.loanScenarioResult.textContent = "";
+    if (el.loanScenarioSchedule) el.loanScenarioSchedule.innerHTML = "";
+  });
+  el.loanActionTipsBtn?.addEventListener("click", async () => {
+    setLoanActionChip("tips");
+    setLoanView("tips");
+    await loadLoanTips();
+  });
+  el.loanScheduleApplyBtn?.addEventListener("click", async () => {
+    await loadLoanSchedule();
+  });
+  el.loanScheduleBackBtn?.addEventListener("click", async () => {
+    const loanId = Number(state.budget.activeLoanId || 0);
+    if (loanId) await openLoanCard(loanId);
+  });
+  el.loanExtraPreviewBtn?.addEventListener("click", async () => {
+    try {
+      await previewExtraPayment();
+    } catch (e) {
+      toast(e?.message || "Не удалось посчитать превью");
+    }
+  });
+  el.loanExtraSaveBtn?.addEventListener("click", async () => {
+    try {
+      await saveExtraPayment();
+      toast("Досрочка сохранена");
+      const loanId = Number(state.budget.activeLoanId || 0);
+      if (loanId) await openLoanCard(loanId);
+    } catch (e) {
+      toast(e?.message || "Не удалось сохранить досрочку");
+    }
+  });
+  el.loanExtraBackBtn?.addEventListener("click", async () => {
+    const loanId = Number(state.budget.activeLoanId || 0);
+    if (loanId) await openLoanCard(loanId);
+  });
+  document.querySelectorAll("[data-loan-preset]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      document.querySelectorAll("[data-loan-preset]").forEach((x) => x.classList.remove("active"));
+      btn.classList.add("active");
+      try {
+        await runScenarioPreset(btn.dataset.loanPreset || "");
+      } catch (e) {
+        toast(e?.message || "Не удалось рассчитать сценарий");
+      }
+    });
+  });
+  el.loanScenarioBackBtn?.addEventListener("click", async () => {
+    const loanId = Number(state.budget.activeLoanId || 0);
+    if (loanId) await openLoanCard(loanId);
+  });
+  el.loanTipsBackBtn?.addEventListener("click", async () => {
+    const loanId = Number(state.budget.activeLoanId || 0);
+    if (loanId) await openLoanCard(loanId);
+  });
   el.addGoalBtn?.addEventListener("click", () => openGoalDetail(null));
   el.closeMonthOpenBtn?.addEventListener("click", openMonthCloseFlow);
   el.budgetIncomeOpenAddBtn?.addEventListener("click", () => {
@@ -2655,6 +3178,7 @@ function setupEvents() {
   clearExpenseForm();
   resetIncomeForm();
   resetSavingForm();
+  resetLoanCreateForm();
 
   state.searchControllers.trade = bindSearch({
     inputEl: el.tradeSearch,

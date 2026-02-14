@@ -421,6 +421,163 @@
           <div id="budgetFundsList" class="list"></div>
         </article>
 
+        <article id="budgetLoansCard" class="card" style="display:none">
+          <h2>Ипотека и кредиты</h2>
+          <p class="hint">Считайте платежи, досрочки и экономию без Excel.</p>
+          <div class="section-actions">
+            <button id="loansOpenCreateBtn" class="btn primary">+ Добавить кредит</button>
+          </div>
+          <div id="loansList" class="list"></div>
+        </article>
+
+        <article id="budgetLoanCreateCard" class="card" style="display:none">
+          <h2>Новый кредит</h2>
+          <p class="hint">Введите условия, и я покажу график и подсказки.</p>
+          <div class="form-grid two">
+            <label>Название (необязательно)
+              <input id="loanNameInput" type="text" placeholder="Ипотека • Банк" />
+            </label>
+            <label>Сумма кредита, ₽
+              <input id="loanPrincipalInput" type="text" placeholder="3500000" />
+            </label>
+          </div>
+          <div class="form-grid three">
+            <label>Ставка, % годовых
+              <input id="loanAnnualRateInput" type="text" placeholder="12.9" />
+            </label>
+            <label>Тип платежа
+              <select id="loanPaymentTypeInput">
+                <option value="ANNUITY">Аннуитет</option>
+                <option value="DIFFERENTIATED">Дифференцированный</option>
+              </select>
+            </label>
+            <label>Срок, месяцев
+              <input id="loanTermMonthsInput" type="number" min="1" max="600" step="1" placeholder="240" />
+            </label>
+          </div>
+          <div class="form-grid three">
+            <label>Дата первого платежа
+              <input id="loanFirstPaymentDateInput" type="date" />
+            </label>
+            <label>Дата выдачи (необязательно)
+              <input id="loanIssueDateInput" type="date" />
+            </label>
+            <label>Валюта
+              <select id="loanCurrencyInput">
+                <option value="RUB">RUB</option>
+              </select>
+            </label>
+          </div>
+          <div id="loanCreateError" class="hint" style="display:none"></div>
+          <div class="wizard-actions">
+            <button id="loanCreateSaveBtn" class="btn primary">Сохранить и показать расчёт</button>
+            <button id="loanCreateCancelBtn" class="btn ghost">Отмена</button>
+          </div>
+        </article>
+
+        <article id="budgetLoanCard" class="card" style="display:none">
+          <h2 id="loanCardTitle">Кредит</h2>
+          <p id="loanCardSubtitle" class="hint"></p>
+          <div id="loanKeyStats" class="list compact"></div>
+          <div class="overview-mix">
+            <div id="loanStructureDonut" class="overview-donut" aria-label="Структура выплат"></div>
+            <div id="loanStructureShare" class="list compact overview-share"></div>
+          </div>
+          <div class="loan-balance-wrap">
+            <h3>Остаток долга по времени</h3>
+            <div id="loanBalanceLine" class="loan-balance-line"></div>
+          </div>
+          <div class="loan-next-wrap">
+            <h3>Ближайший платёж</h3>
+            <div id="loanNextPayment" class="plain"></div>
+          </div>
+          <div class="chips">
+            <button id="loanActionExtraBtn" class="chip active">Досрочное</button>
+            <button id="loanActionScheduleBtn" class="chip">План платежей</button>
+            <button id="loanActionScenarioBtn" class="chip">Сценарии</button>
+            <button id="loanActionTipsBtn" class="chip">Советы</button>
+          </div>
+          <div class="wizard-actions">
+            <button id="loanBackToListBtn" class="btn ghost">К списку кредитов</button>
+          </div>
+        </article>
+
+        <article id="budgetLoanScheduleCard" class="card" style="display:none">
+          <h2>План платежей</h2>
+          <div class="form-grid three">
+            <label>Страница
+              <input id="loanSchedulePageInput" type="number" min="1" step="1" value="1" />
+            </label>
+            <label>Периодов на странице
+              <input id="loanSchedulePageSizeInput" type="number" min="10" max="120" step="10" value="60" />
+            </label>
+            <label>&nbsp;
+              <button id="loanScheduleApplyBtn" class="btn ghost">Показать</button>
+            </label>
+          </div>
+          <div id="loanScheduleMeta" class="hint"></div>
+          <div id="loanScheduleList" class="list compact"></div>
+          <div class="wizard-actions">
+            <button id="loanScheduleBackBtn" class="btn ghost">Назад к карте кредита</button>
+          </div>
+        </article>
+
+        <article id="budgetLoanExtraCard" class="card" style="display:none">
+          <h2>Досрочное погашение</h2>
+          <p class="hint">Посмотрим, что выгоднее: уменьшить срок или платеж.</p>
+          <div class="form-grid two">
+            <label>Сумма досрочки, ₽
+              <input id="loanExtraAmountInput" type="text" placeholder="100000" />
+            </label>
+            <label>Дата досрочки
+              <input id="loanExtraDateInput" type="date" />
+            </label>
+          </div>
+          <div class="form-grid two">
+            <label>Режим
+              <select id="loanExtraModeInput">
+                <option value="ONE_TIME">Разовая</option>
+                <option value="MONTHLY">Каждый месяц</option>
+              </select>
+            </label>
+            <label>Стратегия
+              <select id="loanExtraStrategyInput">
+                <option value="REDUCE_TERM">Уменьшить срок</option>
+                <option value="REDUCE_PAYMENT">Уменьшить платеж</option>
+              </select>
+            </label>
+          </div>
+          <button id="loanExtraPreviewBtn" class="btn ghost">Обновить превью</button>
+          <div id="loanExtraPreview" class="plain"></div>
+          <div class="wizard-actions">
+            <button id="loanExtraSaveBtn" class="btn primary">Сохранить досрочку</button>
+            <button id="loanExtraBackBtn" class="btn ghost">Назад к карте кредита</button>
+          </div>
+        </article>
+
+        <article id="budgetLoanScenarioCard" class="card" style="display:none">
+          <h2>Сценарии: что если</h2>
+          <div class="chips">
+            <button class="chip" data-loan-preset="plus5k">+5 000 ₽/мес</button>
+            <button class="chip" data-loan-preset="one100k">Разовая 100 000 ₽</button>
+            <button class="chip" data-loan-preset="rateMinus2">Ставка -2% через 6 мес</button>
+            <button class="chip" data-loan-preset="holiday3">Каникулы 3 мес</button>
+          </div>
+          <div id="loanScenarioResult" class="plain"></div>
+          <div id="loanScenarioSchedule" class="list compact"></div>
+          <div class="wizard-actions">
+            <button id="loanScenarioBackBtn" class="btn ghost">Назад к карте кредита</button>
+          </div>
+        </article>
+
+        <article id="budgetLoanTipsCard" class="card" style="display:none">
+          <h2>Советы</h2>
+          <div id="loanTipsList" class="list"></div>
+          <div class="wizard-actions">
+            <button id="loanTipsBackBtn" class="btn ghost">Назад к карте кредита</button>
+          </div>
+        </article>
+
         <article id="goalDetailCard" class="card" style="display:none">
           <h2>Цель</h2>
           <div class="form-grid two">
@@ -571,6 +728,7 @@
       <button class="tab-btn" data-budget-tab="overview">Обзор</button>
       <button class="tab-btn" data-budget-tab="income">Доходы</button>
       <button class="tab-btn" data-budget-tab="expenses">Расходы</button>
+      <button class="tab-btn" data-budget-tab="loans">Кредиты</button>
       <button class="tab-btn" data-budget-tab="funds">Цели</button>
       <button class="tab-btn" data-budget-tab="savings">Накопления</button>
       <button class="tab-btn" data-budget-tab="close">Закрытие</button>

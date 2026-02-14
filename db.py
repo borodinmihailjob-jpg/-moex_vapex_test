@@ -5,6 +5,7 @@ import logging
 import random
 from functools import wraps
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 import asyncpg
@@ -248,6 +249,43 @@ CREATE TABLE IF NOT EXISTS budget_history (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS loan_accounts (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT,
+  principal NUMERIC(18,2) NOT NULL CHECK (principal > 0),
+  annual_rate NUMERIC(7,4) NOT NULL CHECK (annual_rate >= 0 AND annual_rate <= 100),
+  payment_type TEXT NOT NULL CHECK (payment_type IN ('ANNUITY', 'DIFFERENTIATED')),
+  term_months INTEGER NOT NULL CHECK (term_months >= 1 AND term_months <= 600),
+  issue_date DATE,
+  first_payment_date DATE NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'RUB',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'ARCHIVED')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS loan_events (
+  id BIGSERIAL PRIMARY KEY,
+  loan_id BIGINT NOT NULL REFERENCES loan_accounts(id) ON DELETE CASCADE,
+  user_id BIGINT NOT NULL,
+  event_type TEXT NOT NULL CHECK (event_type IN ('EXTRA_PAYMENT', 'RATE_CHANGE', 'HOLIDAY')),
+  event_date DATE NOT NULL,
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  client_request_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS loan_schedule_cache (
+  loan_id BIGINT PRIMARY KEY REFERENCES loan_accounts(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  version_hash TEXT NOT NULL,
+  summary_json JSONB NOT NULL,
+  payload_json JSONB NOT NULL,
+  computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS schema_meta (
   key TEXT PRIMARY KEY,
   value TEXT,
@@ -298,6 +336,9 @@ MIGRATION_SQL = [
     "CREATE TABLE IF NOT EXISTS budget_month_closes (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, month_key TEXT NOT NULL, planned_expenses_base DOUBLE PRECISION NOT NULL DEFAULT 0, actual_expenses_base DOUBLE PRECISION NOT NULL DEFAULT 0, extra_income_total DOUBLE PRECISION NOT NULL DEFAULT 0, extra_income_items JSONB NOT NULL DEFAULT '[]'::jsonb, closed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (user_id, month_key))",
     "CREATE TABLE IF NOT EXISTS budget_notification_settings (user_id BIGINT PRIMARY KEY, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, budget_summary_enabled BOOLEAN NOT NULL DEFAULT TRUE, goal_deadline_enabled BOOLEAN NOT NULL DEFAULT TRUE, month_close_enabled BOOLEAN NOT NULL DEFAULT TRUE, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS budget_history (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, entity TEXT NOT NULL, entity_id BIGINT, action TEXT NOT NULL, payload JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS loan_accounts (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, name TEXT, principal NUMERIC(18,2) NOT NULL CHECK (principal > 0), annual_rate NUMERIC(7,4) NOT NULL CHECK (annual_rate >= 0 AND annual_rate <= 100), payment_type TEXT NOT NULL CHECK (payment_type IN ('ANNUITY', 'DIFFERENTIATED')), term_months INTEGER NOT NULL CHECK (term_months >= 1 AND term_months <= 600), issue_date DATE, first_payment_date DATE NOT NULL, currency CHAR(3) NOT NULL DEFAULT 'RUB', status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'ARCHIVED')), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS loan_events (id BIGSERIAL PRIMARY KEY, loan_id BIGINT NOT NULL REFERENCES loan_accounts(id) ON DELETE CASCADE, user_id BIGINT NOT NULL, event_type TEXT NOT NULL CHECK (event_type IN ('EXTRA_PAYMENT', 'RATE_CHANGE', 'HOLIDAY')), event_date DATE NOT NULL, payload JSONB NOT NULL DEFAULT '{}'::jsonb, client_request_id TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS loan_schedule_cache (loan_id BIGINT PRIMARY KEY REFERENCES loan_accounts(id) ON DELETE CASCADE, version INTEGER NOT NULL, version_hash TEXT NOT NULL, summary_json JSONB NOT NULL, payload_json JSONB NOT NULL, computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
 ]
 
@@ -321,6 +362,10 @@ POST_MIGRATION_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS ix_budget_month_closes_user_month ON budget_month_closes (user_id, month_key)",
     "CREATE INDEX IF NOT EXISTS ix_budget_notification_settings_user_ref ON budget_notification_settings (user_ref_id)",
     "CREATE INDEX IF NOT EXISTS ix_budget_history_user_created ON budget_history (user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_loan_accounts_user_status ON loan_accounts (user_id, status)",
+    "CREATE INDEX IF NOT EXISTS ix_loan_events_loan_date ON loan_events (loan_id, event_date)",
+    "CREATE INDEX IF NOT EXISTS ix_loan_events_user_date ON loan_events (user_id, event_date)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_loan_events_req_id ON loan_events (loan_id, client_request_id) WHERE client_request_id IS NOT NULL",
 ]
 
 _pools: dict[str, asyncpg.Pool] = {}
@@ -3161,3 +3206,310 @@ async def get_budget_dashboard(db_path: str, user_id: int) -> dict[str, Any]:
         "previous_month": prev_month,
         "need_close_previous_month": not bool(closed_prev),
     }
+
+
+def _decimal_to_str(value: Decimal | float | int | str | None, fallback: str = "0.00") -> str:
+    if value is None:
+        return fallback
+    return format(Decimal(str(value)), "f")
+
+
+@db_operation()
+async def create_loan_account(
+    db_path: str,
+    user_id: int,
+    *,
+    name: str | None,
+    principal: Decimal,
+    annual_rate: Decimal,
+    payment_type: str,
+    term_months: int,
+    first_payment_date: date,
+    issue_date: date | None,
+    currency: str = "RUB",
+) -> int:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                user_ref_id, _ = await _ensure_user_context(conn, int(user_id))
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO loan_accounts (
+                      user_id, user_ref_id, name, principal, annual_rate, payment_type, term_months,
+                      issue_date, first_payment_date, currency, status, created_at, updated_at
+                    )
+                    VALUES ($1, $2, $3, $4::numeric, $5::numeric, $6, $7, $8, $9, $10, 'ACTIVE', NOW(), NOW())
+                    RETURNING id
+                    """,
+                    int(user_id),
+                    int(user_ref_id),
+                    (name or "").strip() or None,
+                    _decimal_to_str(principal),
+                    _decimal_to_str(annual_rate),
+                    str(payment_type).upper(),
+                    int(term_months),
+                    issue_date,
+                    first_payment_date,
+                    (currency or "RUB").upper()[:3],
+                )
+                return int(row["id"])
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed create_loan_account user=%s", user_id)
+        raise
+
+
+@db_operation()
+async def list_loan_accounts(db_path: str, user_id: int, include_archived: bool = False) -> list[dict[str, Any]]:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            status_filter = "" if include_archived else "AND l.status = 'ACTIVE'"
+            rows = await conn.fetch(
+                f"""
+                SELECT l.id, l.name, l.principal, l.annual_rate, l.payment_type, l.term_months, l.issue_date,
+                       l.first_payment_date, l.currency, l.status, l.created_at, l.updated_at
+                FROM loan_accounts l
+                WHERE l.user_id = $1
+                {status_filter}
+                ORDER BY l.created_at DESC, l.id DESC
+                """,
+                int(user_id),
+            )
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "id": int(r["id"]),
+                    "name": r["name"],
+                    "principal": _decimal_to_str(r["principal"]),
+                    "annual_rate": _decimal_to_str(r["annual_rate"], "0"),
+                    "payment_type": r["payment_type"],
+                    "term_months": int(r["term_months"]),
+                    "issue_date": r["issue_date"].isoformat() if r["issue_date"] else None,
+                    "first_payment_date": r["first_payment_date"].isoformat(),
+                    "currency": r["currency"] or "RUB",
+                    "status": r["status"] or "ACTIVE",
+                    "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                    "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+                }
+            )
+        return out
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed list_loan_accounts user=%s", user_id)
+        raise
+
+
+@db_operation()
+async def get_loan_account(db_path: str, user_id: int, loan_id: int) -> dict[str, Any] | None:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT l.id, l.name, l.principal, l.annual_rate, l.payment_type, l.term_months, l.issue_date,
+                       l.first_payment_date, l.currency, l.status, l.created_at, l.updated_at
+                FROM loan_accounts l
+                WHERE l.id = $1 AND l.user_id = $2
+                LIMIT 1
+                """,
+                int(loan_id),
+                int(user_id),
+            )
+        if not row:
+            return None
+        return {
+            "id": int(row["id"]),
+            "name": row["name"],
+            "principal": _decimal_to_str(row["principal"]),
+            "annual_rate": _decimal_to_str(row["annual_rate"], "0"),
+            "payment_type": row["payment_type"],
+            "term_months": int(row["term_months"]),
+            "issue_date": row["issue_date"].isoformat() if row["issue_date"] else None,
+            "first_payment_date": row["first_payment_date"].isoformat(),
+            "currency": row["currency"] or "RUB",
+            "status": row["status"] or "ACTIVE",
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+        }
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed get_loan_account user=%s loan=%s", user_id, loan_id)
+        raise
+
+
+@db_operation()
+async def archive_loan_account(db_path: str, user_id: int, loan_id: int) -> bool:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE loan_accounts
+                SET status = 'ARCHIVED', updated_at = NOW()
+                WHERE id = $1 AND user_id = $2 AND status <> 'ARCHIVED'
+                """,
+                int(loan_id),
+                int(user_id),
+            )
+            return _affected_count(result) > 0
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed archive_loan_account user=%s loan=%s", user_id, loan_id)
+        raise
+
+
+@db_operation()
+async def list_loan_events(db_path: str, user_id: int, loan_id: int) -> list[dict[str, Any]]:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT e.id, e.loan_id, e.user_id, e.event_type, e.event_date, e.payload, e.client_request_id, e.created_at
+                FROM loan_events e
+                INNER JOIN loan_accounts l ON l.id = e.loan_id
+                WHERE e.loan_id = $1 AND l.user_id = $2
+                ORDER BY e.event_date ASC, e.id ASC
+                """,
+                int(loan_id),
+                int(user_id),
+            )
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            payload = row["payload"] if isinstance(row["payload"], dict) else {}
+            out.append(
+                {
+                    "id": int(row["id"]),
+                    "loan_id": int(row["loan_id"]),
+                    "user_id": int(row["user_id"]),
+                    "event_type": row["event_type"],
+                    "event_date": row["event_date"].isoformat(),
+                    "payload": payload,
+                    "client_request_id": row["client_request_id"],
+                    "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                }
+            )
+        return out
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed list_loan_events user=%s loan=%s", user_id, loan_id)
+        raise
+
+
+@db_operation()
+async def create_loan_event(
+    db_path: str,
+    user_id: int,
+    loan_id: int,
+    *,
+    event_type: str,
+    event_date: date,
+    payload: dict[str, Any],
+    client_request_id: str | None = None,
+) -> tuple[int, bool]:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                owner_ok = await conn.fetchval(
+                    "SELECT 1 FROM loan_accounts WHERE id = $1 AND user_id = $2",
+                    int(loan_id),
+                    int(user_id),
+                )
+                if not owner_ok:
+                    return 0, False
+                req_id = (client_request_id or "").strip() or None
+                if req_id:
+                    existing_id = await conn.fetchval(
+                        """
+                        SELECT id FROM loan_events
+                        WHERE loan_id = $1 AND client_request_id = $2
+                        LIMIT 1
+                        """,
+                        int(loan_id),
+                        req_id,
+                    )
+                    if existing_id:
+                        return int(existing_id), False
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO loan_events (loan_id, user_id, event_type, event_date, payload, client_request_id, created_at)
+                    VALUES ($1, $2, $3, $4, $5::jsonb, $6, NOW())
+                    RETURNING id
+                    """,
+                    int(loan_id),
+                    int(user_id),
+                    str(event_type).upper(),
+                    event_date,
+                    json.dumps(payload or {}),
+                    req_id,
+                )
+                await conn.execute("DELETE FROM loan_schedule_cache WHERE loan_id = $1", int(loan_id))
+                return int(row["id"]), True
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed create_loan_event user=%s loan=%s", user_id, loan_id)
+        raise
+
+
+@db_operation()
+async def get_loan_schedule_cache(db_path: str, user_id: int, loan_id: int) -> dict[str, Any] | None:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT c.loan_id, c.version, c.version_hash, c.summary_json, c.payload_json, c.computed_at
+                FROM loan_schedule_cache c
+                INNER JOIN loan_accounts l ON l.id = c.loan_id
+                WHERE c.loan_id = $1 AND l.user_id = $2
+                LIMIT 1
+                """,
+                int(loan_id),
+                int(user_id),
+            )
+        if not row:
+            return None
+        return {
+            "loan_id": int(row["loan_id"]),
+            "version": int(row["version"]),
+            "version_hash": row["version_hash"],
+            "summary_json": row["summary_json"] if isinstance(row["summary_json"], dict) else {},
+            "payload_json": row["payload_json"] if isinstance(row["payload_json"], list) else [],
+            "computed_at": row["computed_at"].isoformat() if row["computed_at"] else None,
+        }
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed get_loan_schedule_cache user=%s loan=%s", user_id, loan_id)
+        raise
+
+
+@db_operation()
+async def upsert_loan_schedule_cache(
+    db_path: str,
+    *,
+    loan_id: int,
+    version: int,
+    version_hash: str,
+    summary_json: dict[str, Any],
+    payload_json: list[dict[str, Any]],
+) -> None:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO loan_schedule_cache (loan_id, version, version_hash, summary_json, payload_json, computed_at)
+                VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, NOW())
+                ON CONFLICT (loan_id) DO UPDATE
+                SET version = EXCLUDED.version,
+                    version_hash = EXCLUDED.version_hash,
+                    summary_json = EXCLUDED.summary_json,
+                    payload_json = EXCLUDED.payload_json,
+                    computed_at = EXCLUDED.computed_at
+                """,
+                int(loan_id),
+                int(version),
+                str(version_hash),
+                json.dumps(summary_json or {}),
+                json.dumps(payload_json or []),
+            )
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed upsert_loan_schedule_cache loan=%s version=%s", loan_id, version)
+        raise
