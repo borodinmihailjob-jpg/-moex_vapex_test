@@ -88,7 +88,7 @@ body {
     var(--surface)
   );
   border: 1px solid var(--separator);
-  border-radius: var(--r16);
+  border-radius: var(--radius-card);
   box-shadow: var(--shadow-1);
   padding: var(--s16);
 }
@@ -241,8 +241,8 @@ textarea {
   width: 100%;
   min-height: 46px;
   margin-top: var(--s4);
-  border: 1px solid var(--separator);
-  border-radius: var(--r12);
+  border: var(--field-border);
+  border-radius: var(--radius-control);
   padding: 12px;
   background: color-mix(in srgb, var(--surface-elevated) 88%, #ffffff 12%);
   color: var(--text-primary);
@@ -305,7 +305,7 @@ button:focus-visible,
 
 .btn {
   border: 1px solid transparent;
-  border-radius: var(--r12);
+  border-radius: var(--radius-control);
   min-height: 46px;
   padding: var(--control-py) var(--control-px);
   font-size: 14px;
@@ -388,7 +388,7 @@ button:focus-visible,
   border: 1px solid var(--separator);
   background: color-mix(in srgb, var(--surface-elevated) 90%, black 10%);
   color: var(--text-secondary);
-  border-radius: 999px;
+  border-radius: var(--radius-control);
   min-height: 44px;
   padding: var(--control-py) var(--control-px);
   font-size: var(--subhead-size);
@@ -555,7 +555,7 @@ button:focus-visible,
 
 .tab-btn {
   border: 1px solid transparent;
-  border-radius: var(--r12);
+  border-radius: var(--radius-control);
   min-height: 46px;
   width: 100%;
   background: transparent;
@@ -589,7 +589,7 @@ button:focus-visible,
   background: color-mix(in srgb, var(--surface-elevated) 92%, black 8%);
   border: 1px solid var(--separator);
   color: var(--text-primary);
-  border-radius: var(--r12);
+  border-radius: var(--radius-control);
   padding: 12px 14px;
   opacity: 0;
   visibility: hidden;
@@ -660,6 +660,19 @@ button:focus-visible,
   margin: var(--s4) 0 0;
   font-size: var(--subhead-size);
   color: var(--text-secondary);
+}
+
+.search-control input,
+.search-control .search-clear {
+  border-radius: var(--radius-control);
+}
+
+.switch .slider {
+  border-radius: var(--radius-control);
+}
+
+.progress-line {
+  border-radius: var(--radius-control);
 }
 
 .skeleton-item {

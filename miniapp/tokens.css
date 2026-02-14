@@ -23,6 +23,8 @@
   --r16: 16px;
   --r20: 20px;
   --r24: 24px;
+  --radius-control: var(--r16);
+  --radius-card: var(--r24);
 
   --s4: 4px;
   --s8: 8px;
@@ -42,6 +44,7 @@
 
   --shadow-1: 0 6px 16px rgba(0, 0, 0, 0.25);
   --shadow-2: 0 14px 30px rgba(0, 0, 0, 0.35);
+  --field-border: 1.5px solid color-mix(in srgb, var(--text-primary) 24%, transparent);
 
   --motion-fast: 150ms;
   --motion-base: 200ms;
