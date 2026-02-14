@@ -472,6 +472,20 @@
                 <option value="RUB">RUB</option>
               </select>
             </label>
+            <label>Метод процентов
+              <select id="loanAccrualModeInput">
+                <option value="MONTHLY">Месячный</option>
+                <option value="ACT_365">По дням (ACT/365)</option>
+              </select>
+            </label>
+          </div>
+          <div class="form-grid two">
+            <label>Страховка в месяц, ₽
+              <input id="loanInsuranceMonthlyInput" type="text" placeholder="0" />
+            </label>
+            <label>Разовые расходы, ₽
+              <input id="loanOneTimeCostsInput" type="text" placeholder="0" />
+            </label>
           </div>
           <div class="card-inline">
             <h3>Периоды ставки</h3>
@@ -510,6 +524,9 @@
           </div>
           <div class="wizard-actions">
             <button id="loanBackToListBtn" class="btn ghost">К списку кредитов</button>
+            <button id="loanExportCsvBtn" class="btn ghost">Экспорт Excel/CSV</button>
+            <button id="loanExportPdfBtn" class="btn ghost">Экспорт PDF</button>
+            <button id="loanShareBtn" class="btn ghost">Поделиться</button>
           </div>
         </article>
 
@@ -562,6 +579,7 @@
           <div id="loanExtraPreview" class="plain"></div>
           <div class="wizard-actions">
             <button id="loanExtraSaveBtn" class="btn primary">Сохранить досрочку</button>
+            <button id="loanActualPaymentSaveBtn" class="btn ghost">Добавить факт платежа</button>
             <button id="loanExtraBackBtn" class="btn ghost">Назад к карте кредита</button>
           </div>
         </article>
@@ -576,6 +594,29 @@
           </div>
           <div id="loanScenarioResult" class="plain"></div>
           <div id="loanScenarioSchedule" class="list compact"></div>
+          <div class="form-grid two">
+            <label>Новая ставка, %
+              <input id="loanRefNewRateInput" type="text" placeholder="10.9" />
+            </label>
+            <label>Расходы на рефинанс, ₽
+              <input id="loanRefCostInput" type="text" placeholder="0" />
+            </label>
+          </div>
+          <div class="wizard-actions">
+            <button id="loanRefPreviewBtn" class="btn ghost">Сравнить рефинанс</button>
+          </div>
+          <div class="form-grid two">
+            <label>Цель: закрыть к дате
+              <input id="loanOptimizeDateInput" type="date" />
+            </label>
+            <label>Цель: платеж до, ₽
+              <input id="loanOptimizePaymentInput" type="text" placeholder="30000" />
+            </label>
+          </div>
+          <div class="wizard-actions">
+            <button id="loanOptimizeDateBtn" class="btn ghost">Подобрать досрочку к дате</button>
+            <button id="loanOptimizePaymentBtn" class="btn ghost">Подобрать досрочку для платежа</button>
+          </div>
           <div class="wizard-actions">
             <button id="loanScenarioBackBtn" class="btn ghost">Назад к карте кредита</button>
           </div>
@@ -583,6 +624,21 @@
 
         <article id="budgetLoanTipsCard" class="card" style="display:none">
           <h2>Советы</h2>
+          <div class="toggle-row">
+            <span>Напоминать о платеже за N дней</span>
+            <label class="switch">
+              <input id="loanReminderEnabledToggle" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="form-grid two">
+            <label>Дней до платежа
+              <input id="loanReminderDaysInput" type="number" min="1" max="30" step="1" value="3" />
+            </label>
+            <label>&nbsp;
+              <button id="loanReminderSaveBtn" class="btn ghost">Сохранить напоминание</button>
+            </label>
+          </div>
           <div id="loanTipsList" class="list"></div>
           <div class="wizard-actions">
             <button id="loanTipsBackBtn" class="btn ghost">Назад к карте кредита</button>

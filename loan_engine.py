@@ -4,7 +4,7 @@ import calendar
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_EVEN
 from typing import Literal
 
@@ -13,7 +13,8 @@ RATE_MONTHS = Decimal("12")
 RATE_100 = Decimal("100")
 
 PaymentType = Literal["ANNUITY", "DIFFERENTIATED"]
-ExtraMode = Literal["ONE_TIME", "MONTHLY"]
+AccrualMode = Literal["MONTHLY", "ACT_365"]
+ExtraMode = Literal["ONE_TIME", "MONTHLY", "WEEKLY", "BIWEEKLY", "YEARLY"]
 ExtraStrategy = Literal["REDUCE_TERM", "REDUCE_PAYMENT"]
 HolidayType = Literal["INTEREST_ONLY", "PAUSE_CAPITALIZE"]
 
@@ -29,6 +30,9 @@ class LoanInput:
     issue_date: date | None = None
     currency: str = "RUB"
     calc_date: date | None = None
+    accrual_mode: AccrualMode = "MONTHLY"
+    insurance_monthly: Decimal = Decimal("0")
+    one_time_costs: Decimal = Decimal("0")
 
 
 @dataclass(slots=True)
@@ -37,6 +41,7 @@ class ExtraPaymentEvent:
     amount: Decimal
     mode: ExtraMode
     strategy: ExtraStrategy
+    end_date: date | None = None
 
 
 @dataclass(slots=True)
@@ -105,6 +110,7 @@ def _event_dict(ev: LoanEvent) -> dict:
             "amount": str(ev.amount),
             "mode": ev.mode,
             "strategy": ev.strategy,
+            "end_date": ev.end_date.isoformat() if ev.end_date else None,
         }
     if isinstance(ev, RateChangeEvent):
         return {
@@ -132,6 +138,9 @@ def build_version_hash(loan: LoanInput, events: list[LoanEvent]) -> tuple[int, s
             "issue_date": loan.issue_date.isoformat() if loan.issue_date else None,
             "currency": loan.currency,
             "calc_date": loan.calc_date.isoformat() if loan.calc_date else None,
+            "accrual_mode": loan.accrual_mode,
+            "insurance_monthly": str(loan.insurance_monthly),
+            "one_time_costs": str(loan.one_time_costs),
         },
         "events": sorted((_event_dict(ev) for ev in events), key=lambda x: json.dumps(x, sort_keys=True)),
     }
@@ -139,6 +148,50 @@ def build_version_hash(loan: LoanInput, events: list[LoanEvent]) -> tuple[int, s
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     version = int(digest[:8], 16)
     return version, digest
+
+
+def _count_recurring_occurrences(event: ExtraPaymentEvent, prev_date: date, payment_date: date) -> int:
+    if event.end_date and prev_date > event.end_date:
+        return 0
+    if payment_date < event.date:
+        return 0
+
+    start_window = max(prev_date, event.date)
+    end_window = payment_date
+    if event.end_date is not None:
+        end_window = min(end_window, event.end_date)
+    if start_window > end_window:
+        return 0
+
+    if event.mode == "MONTHLY":
+        return 1 if payment_date.day == event.date.day else 0
+    if event.mode == "YEARLY":
+        return 1 if (payment_date.month, payment_date.day) == (event.date.month, event.date.day) else 0
+
+    step = 7 if event.mode == "WEEKLY" else 14
+    cur = event.date
+    if cur < start_window:
+        delta_days = (start_window - cur).days
+        jumps = delta_days // step
+        cur = cur + timedelta(days=jumps * step)
+        while cur < start_window:
+            cur = cur + timedelta(days=step)
+
+    cnt = 0
+    while cur <= end_window:
+        cnt += 1
+        cur = cur + timedelta(days=step)
+    return cnt
+
+
+def _calc_interest(balance: Decimal, annual_rate: Decimal, accrual_mode: AccrualMode, prev_payment_date: date, payment_date: date) -> Decimal:
+    if annual_rate <= 0 or balance <= 0:
+        return Decimal("0.00")
+    if accrual_mode == "ACT_365":
+        days = max(1, (payment_date - prev_payment_date).days)
+        return q_money(balance * (annual_rate / RATE_100) * Decimal(days) / Decimal(365))
+    monthly_rate = annual_rate / RATE_MONTHS / RATE_100
+    return q_money(balance * monthly_rate)
 
 
 def calculate(loan: LoanInput, events: list[LoanEvent]) -> tuple[dict, list[dict], int, str]:
@@ -154,6 +207,8 @@ def calculate(loan: LoanInput, events: list[LoanEvent]) -> tuple[dict, list[dict
         raise ValueError("current_principal must be <= principal")
     if loan.annual_rate < 0 or loan.annual_rate > 100:
         raise ValueError("annual_rate must be in [0, 100]")
+    if loan.accrual_mode not in {"MONTHLY", "ACT_365"}:
+        raise ValueError("accrual_mode invalid")
 
     version, version_hash = build_version_hash(loan, events)
 
@@ -182,6 +237,8 @@ def calculate(loan: LoanInput, events: list[LoanEvent]) -> tuple[dict, list[dict
     paid_interest_future = Decimal("0")
     paid_principal_future = Decimal("0")
 
+    prev_payment_date = add_months(start_date, -1)
+
     for month_idx in range(1200):
         if balance <= 0:
             break
@@ -207,8 +264,7 @@ def calculate(loan: LoanInput, events: list[LoanEvent]) -> tuple[dict, list[dict
                 in_holiday = he
                 break
 
-        monthly_rate = current_rate / RATE_MONTHS / RATE_100
-        interest = q_money(balance * monthly_rate)
+        interest = _calc_interest(balance, current_rate, loan.accrual_mode, prev_payment_date, payment_date)
         payment = Decimal("0")
         principal_part = Decimal("0")
 
@@ -231,6 +287,7 @@ def calculate(loan: LoanInput, events: list[LoanEvent]) -> tuple[dict, list[dict
                         "event": "HOLIDAY_PAUSE_CAPITALIZE",
                     }
                 )
+                prev_payment_date = payment_date
                 continue
         else:
             if loan.payment_type == "ANNUITY":
@@ -254,28 +311,27 @@ def calculate(loan: LoanInput, events: list[LoanEvent]) -> tuple[dict, list[dict
         month_event_notes: list[str] = []
 
         for ex in extra_events:
+            cnt = 0
             if ex.mode == "ONE_TIME":
-                if ex.date != payment_date:
-                    continue
+                cnt = 1 if ex.date == payment_date else 0
             else:
-                if payment_date < ex.date:
-                    continue
-                if payment_date.day != ex.date.day:
-                    continue
-            if balance <= 0:
-                break
-            extra_amt = q_money(ex.amount)
-            if extra_amt <= 0:
+                cnt = _count_recurring_occurrences(ex, prev_payment_date + timedelta(days=1), payment_date)
+            if cnt <= 0 or balance <= 0:
                 continue
+
+            extra_amt = q_money(ex.amount * Decimal(cnt))
             if extra_amt > balance:
                 extra_amt = balance
+            if extra_amt <= 0:
+                continue
+
             balance = q_money(balance - extra_amt)
             month_extra += extra_amt
-            month_event_notes.append(f"EXTRA_{ex.strategy}")
+            month_event_notes.append(f"EXTRA_{ex.mode}_{ex.strategy}")
+
             if loan.payment_type == "ANNUITY":
                 if ex.strategy == "REDUCE_PAYMENT":
                     annuity_target_payment = annuity_payment(balance, current_rate, max(1, months_left - 1))
-                # REDUCE_TERM: keep annuity_target_payment unchanged
             else:
                 if ex.strategy == "REDUCE_PAYMENT" and balance > 0:
                     principal_part_fixed = q_money(balance / Decimal(max(1, months_left - 1)))
@@ -295,6 +351,7 @@ def calculate(loan: LoanInput, events: list[LoanEvent]) -> tuple[dict, list[dict
                 "event": ",".join(month_event_notes) if month_event_notes else None,
             }
         )
+        prev_payment_date = payment_date
 
     if schedule and Decimal(schedule[-1]["balance"]) != Decimal("0.00"):
         tail = Decimal(schedule[-1]["balance"])
@@ -307,6 +364,8 @@ def calculate(loan: LoanInput, events: list[LoanEvent]) -> tuple[dict, list[dict
 
     next_payment = schedule[0] if schedule else None
     paid_principal_to_date = q_money(loan.principal - loan.current_principal)
+    insurance_total = q_money(loan.insurance_monthly * Decimal(len(schedule)))
+    total_future_cost = q_money(paid_total_future + insurance_total + loan.one_time_costs)
 
     summary = {
         "principal": str(q_money(loan.principal)),
@@ -322,5 +381,9 @@ def calculate(loan: LoanInput, events: list[LoanEvent]) -> tuple[dict, list[dict
         "payoff_date": schedule[-1]["date"] if schedule else None,
         "next_payment": next_payment,
         "schedule_start_date": start_date.isoformat(),
+        "accrual_mode": loan.accrual_mode,
+        "insurance_total": str(insurance_total),
+        "one_time_costs": str(q_money(loan.one_time_costs)),
+        "total_future_cost": str(total_future_cost),
     }
     return summary, schedule, version, version_hash

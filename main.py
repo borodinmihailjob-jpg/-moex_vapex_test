@@ -99,6 +99,10 @@ from db import (
     disable_price_target_alert,
     get_loan_account,
     list_loan_accounts,
+    get_loan_schedule_cache,
+    get_loan_reminder_settings,
+    list_users_with_loan_reminders,
+    update_loan_reminder_last_sent,
 )
 from portfolio_cards import build_portfolio_map_png, build_portfolio_share_card_png
 from moex_iss import (
@@ -1593,6 +1597,39 @@ async def process_user_alerts(bot: Bot, user_id: int, now_utc: datetime):
                 await bot.send_message(user_id, close_header + text, parse_mode="HTML")
                 await update_close_sent_date(DB_DSN, user_id, today)
 
+    loan_rem = await get_loan_reminder_settings(DB_DSN, user_id)
+    if loan_rem.get("enabled"):
+        now_msk = now_utc.astimezone(MSK_TZ)
+        today = now_msk.date()
+        if loan_rem.get("last_sent_on") != today.isoformat():
+            days_before = max(1, min(30, int(loan_rem.get("days_before") or 3)))
+            loans = await list_loan_accounts(DB_DSN, user_id)
+            due_lines: list[str] = []
+            for loan in loans:
+                cache = await get_loan_schedule_cache(DB_DSN, user_id, int(loan["id"]))
+                summary = (cache or {}).get("summary_json") or {}
+                next_payment = summary.get("next_payment") or {}
+                next_date_raw = str(next_payment.get("date") or "").strip()
+                if not next_date_raw:
+                    continue
+                try:
+                    next_date = date.fromisoformat(next_date_raw)
+                except ValueError:
+                    continue
+                days_left = (next_date - today).days
+                if 0 <= days_left <= days_before:
+                    due_lines.append(
+                        f"• {loan.get('name') or f'Кредит #{loan['id']}'}: {next_date.strftime('%d.%m.%Y')} • {money(next_payment.get('payment') or 0)}"
+                    )
+            if due_lines:
+                await bot.send_message(
+                    user_id,
+                    "Напоминание по кредитам:\n"
+                    f"Ближайшие платежи в горизонте {days_before} дн:\n\n"
+                    + "\n".join(due_lines),
+                )
+                await update_loan_reminder_last_sent(DB_DSN, user_id, today)
+
     target_alerts = await list_active_price_target_alerts(DB_DSN, user_id)
     if not target_alerts:
         return
@@ -1651,7 +1688,9 @@ async def notifications_worker(bot: Bot):
         now_utc = datetime.now(timezone.utc)
         try:
             await refresh_price_cache_once()
-            users = await list_users_with_alerts(DB_DSN)
+            users_alerts = await list_users_with_alerts(DB_DSN)
+            users_loans = await list_users_with_loan_reminders(DB_DSN)
+            users = sorted(set([*users_alerts, *users_loans]))
             sem = asyncio.Semaphore(USER_ALERTS_CONCURRENCY)
 
             async def run_user(uid: int) -> None:

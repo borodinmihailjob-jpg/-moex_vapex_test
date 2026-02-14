@@ -257,6 +257,9 @@ CREATE TABLE IF NOT EXISTS loan_accounts (
   principal NUMERIC(18,2) NOT NULL CHECK (principal > 0),
   current_principal NUMERIC(18,2) NOT NULL CHECK (current_principal > 0),
   annual_rate NUMERIC(7,4) NOT NULL CHECK (annual_rate >= 0 AND annual_rate <= 100),
+  accrual_mode TEXT NOT NULL DEFAULT 'MONTHLY' CHECK (accrual_mode IN ('MONTHLY', 'ACT_365')),
+  insurance_monthly NUMERIC(18,2) NOT NULL DEFAULT 0 CHECK (insurance_monthly >= 0),
+  one_time_costs NUMERIC(18,2) NOT NULL DEFAULT 0 CHECK (one_time_costs >= 0),
   payment_type TEXT NOT NULL CHECK (payment_type IN ('ANNUITY', 'DIFFERENTIATED')),
   term_months INTEGER NOT NULL CHECK (term_months >= 1 AND term_months <= 600),
   issue_date DATE,
@@ -276,6 +279,39 @@ CREATE TABLE IF NOT EXISTS loan_events (
   payload JSONB NOT NULL DEFAULT '{}'::jsonb,
   client_request_id TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS loan_actual_payments (
+  id BIGSERIAL PRIMARY KEY,
+  loan_id BIGINT NOT NULL REFERENCES loan_accounts(id) ON DELETE CASCADE,
+  user_id BIGINT NOT NULL,
+  payment_date DATE NOT NULL,
+  amount NUMERIC(18,2) NOT NULL CHECK (amount > 0),
+  principal_paid NUMERIC(18,2) NOT NULL DEFAULT 0 CHECK (principal_paid >= 0),
+  interest_paid NUMERIC(18,2) NOT NULL DEFAULT 0 CHECK (interest_paid >= 0),
+  note TEXT,
+  client_request_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (loan_id, client_request_id)
+);
+
+CREATE TABLE IF NOT EXISTS loan_share_links (
+  id BIGSERIAL PRIMARY KEY,
+  loan_id BIGINT NOT NULL REFERENCES loan_accounts(id) ON DELETE CASCADE,
+  user_id BIGINT NOT NULL,
+  token TEXT NOT NULL UNIQUE,
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  expires_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS loan_reminder_settings (
+  user_id BIGINT PRIMARY KEY,
+  user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+  enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  days_before INTEGER NOT NULL DEFAULT 3,
+  last_sent_on DATE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS loan_schedule_cache (
@@ -337,12 +373,18 @@ MIGRATION_SQL = [
     "CREATE TABLE IF NOT EXISTS budget_month_closes (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, month_key TEXT NOT NULL, planned_expenses_base DOUBLE PRECISION NOT NULL DEFAULT 0, actual_expenses_base DOUBLE PRECISION NOT NULL DEFAULT 0, extra_income_total DOUBLE PRECISION NOT NULL DEFAULT 0, extra_income_items JSONB NOT NULL DEFAULT '[]'::jsonb, closed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (user_id, month_key))",
     "CREATE TABLE IF NOT EXISTS budget_notification_settings (user_id BIGINT PRIMARY KEY, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, budget_summary_enabled BOOLEAN NOT NULL DEFAULT TRUE, goal_deadline_enabled BOOLEAN NOT NULL DEFAULT TRUE, month_close_enabled BOOLEAN NOT NULL DEFAULT TRUE, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS budget_history (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, entity TEXT NOT NULL, entity_id BIGINT, action TEXT NOT NULL, payload JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
-    "CREATE TABLE IF NOT EXISTS loan_accounts (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, name TEXT, principal NUMERIC(18,2) NOT NULL CHECK (principal > 0), current_principal NUMERIC(18,2) NOT NULL CHECK (current_principal > 0), annual_rate NUMERIC(7,4) NOT NULL CHECK (annual_rate >= 0 AND annual_rate <= 100), payment_type TEXT NOT NULL CHECK (payment_type IN ('ANNUITY', 'DIFFERENTIATED')), term_months INTEGER NOT NULL CHECK (term_months >= 1 AND term_months <= 600), issue_date DATE, first_payment_date DATE NOT NULL, currency CHAR(3) NOT NULL DEFAULT 'RUB', status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'ARCHIVED')), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS loan_accounts (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, name TEXT, principal NUMERIC(18,2) NOT NULL CHECK (principal > 0), current_principal NUMERIC(18,2) NOT NULL CHECK (current_principal > 0), annual_rate NUMERIC(7,4) NOT NULL CHECK (annual_rate >= 0 AND annual_rate <= 100), accrual_mode TEXT NOT NULL DEFAULT 'MONTHLY' CHECK (accrual_mode IN ('MONTHLY', 'ACT_365')), insurance_monthly NUMERIC(18,2) NOT NULL DEFAULT 0 CHECK (insurance_monthly >= 0), one_time_costs NUMERIC(18,2) NOT NULL DEFAULT 0 CHECK (one_time_costs >= 0), payment_type TEXT NOT NULL CHECK (payment_type IN ('ANNUITY', 'DIFFERENTIATED')), term_months INTEGER NOT NULL CHECK (term_months >= 1 AND term_months <= 600), issue_date DATE, first_payment_date DATE NOT NULL, currency CHAR(3) NOT NULL DEFAULT 'RUB', status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'ARCHIVED')), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS loan_events (id BIGSERIAL PRIMARY KEY, loan_id BIGINT NOT NULL REFERENCES loan_accounts(id) ON DELETE CASCADE, user_id BIGINT NOT NULL, event_type TEXT NOT NULL CHECK (event_type IN ('EXTRA_PAYMENT', 'RATE_CHANGE', 'HOLIDAY')), event_date DATE NOT NULL, payload JSONB NOT NULL DEFAULT '{}'::jsonb, client_request_id TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS loan_actual_payments (id BIGSERIAL PRIMARY KEY, loan_id BIGINT NOT NULL REFERENCES loan_accounts(id) ON DELETE CASCADE, user_id BIGINT NOT NULL, payment_date DATE NOT NULL, amount NUMERIC(18,2) NOT NULL CHECK (amount > 0), principal_paid NUMERIC(18,2) NOT NULL DEFAULT 0 CHECK (principal_paid >= 0), interest_paid NUMERIC(18,2) NOT NULL DEFAULT 0 CHECK (interest_paid >= 0), note TEXT, client_request_id TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (loan_id, client_request_id))",
+    "CREATE TABLE IF NOT EXISTS loan_share_links (id BIGSERIAL PRIMARY KEY, loan_id BIGINT NOT NULL REFERENCES loan_accounts(id) ON DELETE CASCADE, user_id BIGINT NOT NULL, token TEXT NOT NULL UNIQUE, payload JSONB NOT NULL DEFAULT '{}'::jsonb, expires_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS loan_reminder_settings (user_id BIGINT PRIMARY KEY, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, enabled BOOLEAN NOT NULL DEFAULT FALSE, days_before INTEGER NOT NULL DEFAULT 3, last_sent_on DATE, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS loan_schedule_cache (loan_id BIGINT PRIMARY KEY REFERENCES loan_accounts(id) ON DELETE CASCADE, version INTEGER NOT NULL, version_hash TEXT NOT NULL, summary_json JSONB NOT NULL, payload_json JSONB NOT NULL, computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "ALTER TABLE loan_accounts ADD COLUMN IF NOT EXISTS current_principal NUMERIC(18,2)",
     "UPDATE loan_accounts SET current_principal = principal WHERE current_principal IS NULL",
     "ALTER TABLE loan_accounts ALTER COLUMN current_principal SET NOT NULL",
+    "ALTER TABLE loan_accounts ADD COLUMN IF NOT EXISTS accrual_mode TEXT NOT NULL DEFAULT 'MONTHLY'",
+    "ALTER TABLE loan_accounts ADD COLUMN IF NOT EXISTS insurance_monthly NUMERIC(18,2) NOT NULL DEFAULT 0",
+    "ALTER TABLE loan_accounts ADD COLUMN IF NOT EXISTS one_time_costs NUMERIC(18,2) NOT NULL DEFAULT 0",
     "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
 ]
 
@@ -370,6 +412,9 @@ POST_MIGRATION_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS ix_loan_events_loan_date ON loan_events (loan_id, event_date)",
     "CREATE INDEX IF NOT EXISTS ix_loan_events_user_date ON loan_events (user_id, event_date)",
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_loan_events_req_id ON loan_events (loan_id, client_request_id) WHERE client_request_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS ix_loan_actual_payments_loan_date ON loan_actual_payments (loan_id, payment_date)",
+    "CREATE INDEX IF NOT EXISTS ix_loan_share_links_loan ON loan_share_links (loan_id)",
+    "CREATE INDEX IF NOT EXISTS ix_loan_reminder_settings_enabled ON loan_reminder_settings (enabled)",
 ]
 
 _pools: dict[str, asyncpg.Pool] = {}
@@ -3227,6 +3272,9 @@ async def create_loan_account(
     principal: Decimal,
     current_principal: Decimal,
     annual_rate: Decimal,
+    accrual_mode: str = "MONTHLY",
+    insurance_monthly: Decimal = Decimal("0"),
+    one_time_costs: Decimal = Decimal("0"),
     payment_type: str,
     term_months: int,
     first_payment_date: date,
@@ -3241,10 +3289,10 @@ async def create_loan_account(
                 row = await conn.fetchrow(
                     """
                     INSERT INTO loan_accounts (
-                      user_id, user_ref_id, name, principal, current_principal, annual_rate, payment_type, term_months,
+                      user_id, user_ref_id, name, principal, current_principal, annual_rate, accrual_mode, insurance_monthly, one_time_costs, payment_type, term_months,
                       issue_date, first_payment_date, currency, status, created_at, updated_at
                     )
-                    VALUES ($1, $2, $3, $4::numeric, $5::numeric, $6::numeric, $7, $8, $9, $10, $11, 'ACTIVE', NOW(), NOW())
+                    VALUES ($1, $2, $3, $4::numeric, $5::numeric, $6::numeric, $7, $8::numeric, $9::numeric, $10, $11, $12, $13, $14, 'ACTIVE', NOW(), NOW())
                     RETURNING id
                     """,
                     int(user_id),
@@ -3253,6 +3301,9 @@ async def create_loan_account(
                     _decimal_to_str(principal),
                     _decimal_to_str(current_principal),
                     _decimal_to_str(annual_rate),
+                    str(accrual_mode or "MONTHLY").upper(),
+                    _decimal_to_str(insurance_monthly),
+                    _decimal_to_str(one_time_costs),
                     str(payment_type).upper(),
                     int(term_months),
                     issue_date,
@@ -3273,7 +3324,7 @@ async def list_loan_accounts(db_path: str, user_id: int, include_archived: bool 
             status_filter = "" if include_archived else "AND l.status = 'ACTIVE'"
             rows = await conn.fetch(
                 f"""
-                SELECT l.id, l.name, l.principal, l.current_principal, l.annual_rate, l.payment_type, l.term_months, l.issue_date,
+                SELECT l.id, l.name, l.principal, l.current_principal, l.annual_rate, l.accrual_mode, l.insurance_monthly, l.one_time_costs, l.payment_type, l.term_months, l.issue_date,
                        l.first_payment_date, l.currency, l.status, l.created_at, l.updated_at
                 FROM loan_accounts l
                 WHERE l.user_id = $1
@@ -3291,6 +3342,9 @@ async def list_loan_accounts(db_path: str, user_id: int, include_archived: bool 
                     "principal": _decimal_to_str(r["principal"]),
                     "current_principal": _decimal_to_str(r["current_principal"]),
                     "annual_rate": _decimal_to_str(r["annual_rate"], "0"),
+                    "accrual_mode": r["accrual_mode"] or "MONTHLY",
+                    "insurance_monthly": _decimal_to_str(r["insurance_monthly"]),
+                    "one_time_costs": _decimal_to_str(r["one_time_costs"]),
                     "payment_type": r["payment_type"],
                     "term_months": int(r["term_months"]),
                     "issue_date": r["issue_date"].isoformat() if r["issue_date"] else None,
@@ -3314,7 +3368,7 @@ async def get_loan_account(db_path: str, user_id: int, loan_id: int) -> dict[str
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT l.id, l.name, l.principal, l.current_principal, l.annual_rate, l.payment_type, l.term_months, l.issue_date,
+                SELECT l.id, l.name, l.principal, l.current_principal, l.annual_rate, l.accrual_mode, l.insurance_monthly, l.one_time_costs, l.payment_type, l.term_months, l.issue_date,
                        l.first_payment_date, l.currency, l.status, l.created_at, l.updated_at
                 FROM loan_accounts l
                 WHERE l.id = $1 AND l.user_id = $2
@@ -3331,6 +3385,9 @@ async def get_loan_account(db_path: str, user_id: int, loan_id: int) -> dict[str
             "principal": _decimal_to_str(row["principal"]),
             "current_principal": _decimal_to_str(row["current_principal"]),
             "annual_rate": _decimal_to_str(row["annual_rate"], "0"),
+            "accrual_mode": row["accrual_mode"] or "MONTHLY",
+            "insurance_monthly": _decimal_to_str(row["insurance_monthly"]),
+            "one_time_costs": _decimal_to_str(row["one_time_costs"]),
             "payment_type": row["payment_type"],
             "term_months": int(row["term_months"]),
             "issue_date": row["issue_date"].isoformat() if row["issue_date"] else None,
@@ -3520,4 +3577,255 @@ async def upsert_loan_schedule_cache(
             )
     except _LOGGABLE_DB_ERRORS:
         logger.exception("Failed upsert_loan_schedule_cache loan=%s version=%s", loan_id, version)
+        raise
+
+
+@db_operation()
+async def list_loan_actual_payments(db_path: str, user_id: int, loan_id: int) -> list[dict[str, Any]]:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT p.id, p.loan_id, p.user_id, p.payment_date, p.amount, p.principal_paid, p.interest_paid, p.note, p.client_request_id, p.created_at
+                FROM loan_actual_payments p
+                INNER JOIN loan_accounts l ON l.id = p.loan_id
+                WHERE p.loan_id = $1 AND l.user_id = $2
+                ORDER BY p.payment_date ASC, p.id ASC
+                """,
+                int(loan_id),
+                int(user_id),
+            )
+        return [
+            {
+                "id": int(r["id"]),
+                "loan_id": int(r["loan_id"]),
+                "user_id": int(r["user_id"]),
+                "payment_date": r["payment_date"].isoformat(),
+                "amount": _decimal_to_str(r["amount"]),
+                "principal_paid": _decimal_to_str(r["principal_paid"]),
+                "interest_paid": _decimal_to_str(r["interest_paid"]),
+                "note": r["note"],
+                "client_request_id": r["client_request_id"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ]
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed list_loan_actual_payments user=%s loan=%s", user_id, loan_id)
+        raise
+
+
+@db_operation()
+async def create_loan_actual_payment(
+    db_path: str,
+    user_id: int,
+    loan_id: int,
+    *,
+    payment_date: date,
+    amount: Decimal,
+    principal_paid: Decimal,
+    interest_paid: Decimal,
+    note: str | None = None,
+    client_request_id: str | None = None,
+) -> tuple[int, bool]:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                owner_ok = await conn.fetchval(
+                    "SELECT 1 FROM loan_accounts WHERE id = $1 AND user_id = $2",
+                    int(loan_id),
+                    int(user_id),
+                )
+                if not owner_ok:
+                    return 0, False
+                req_id = (client_request_id or "").strip() or None
+                if req_id:
+                    existing = await conn.fetchval(
+                        "SELECT id FROM loan_actual_payments WHERE loan_id = $1 AND client_request_id = $2 LIMIT 1",
+                        int(loan_id),
+                        req_id,
+                    )
+                    if existing:
+                        return int(existing), False
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO loan_actual_payments (
+                      loan_id, user_id, payment_date, amount, principal_paid, interest_paid, note, client_request_id, created_at
+                    ) VALUES ($1, $2, $3, $4::numeric, $5::numeric, $6::numeric, $7, $8, NOW())
+                    RETURNING id
+                    """,
+                    int(loan_id),
+                    int(user_id),
+                    payment_date,
+                    _decimal_to_str(amount),
+                    _decimal_to_str(principal_paid),
+                    _decimal_to_str(interest_paid),
+                    (note or "").strip() or None,
+                    req_id,
+                )
+                await conn.execute("DELETE FROM loan_schedule_cache WHERE loan_id = $1", int(loan_id))
+                return int(row["id"]), True
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed create_loan_actual_payment user=%s loan=%s", user_id, loan_id)
+        raise
+
+
+@db_operation()
+async def create_loan_share_link(
+    db_path: str,
+    *,
+    user_id: int,
+    loan_id: int,
+    token: str,
+    payload: dict[str, Any],
+    expires_at: datetime | None,
+) -> bool:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            owner_ok = await conn.fetchval("SELECT 1 FROM loan_accounts WHERE id = $1 AND user_id = $2", int(loan_id), int(user_id))
+            if not owner_ok:
+                return False
+            await conn.execute(
+                """
+                INSERT INTO loan_share_links (loan_id, user_id, token, payload, expires_at, created_at)
+                VALUES ($1, $2, $3, $4::jsonb, $5, NOW())
+                """,
+                int(loan_id),
+                int(user_id),
+                str(token),
+                json.dumps(payload or {}),
+                expires_at,
+            )
+            return True
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed create_loan_share_link user=%s loan=%s", user_id, loan_id)
+        raise
+
+
+@db_operation()
+async def get_loan_share_link(db_path: str, token: str) -> dict[str, Any] | None:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT loan_id, user_id, token, payload, expires_at, created_at
+                FROM loan_share_links
+                WHERE token = $1
+                LIMIT 1
+                """,
+                str(token),
+            )
+        if not row:
+            return None
+        return {
+            "loan_id": int(row["loan_id"]),
+            "user_id": int(row["user_id"]),
+            "token": row["token"],
+            "payload": row["payload"] if isinstance(row["payload"], dict) else {},
+            "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        }
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed get_loan_share_link token=%s", token)
+        raise
+
+
+@db_operation()
+async def get_loan_reminder_settings(db_path: str, user_id: int) -> dict[str, Any]:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                user_ref_id, _ = await _ensure_user_context(conn, int(user_id))
+                await conn.execute(
+                    """
+                    INSERT INTO loan_reminder_settings (user_id, user_ref_id, enabled, days_before, updated_at)
+                    VALUES ($1, $2, FALSE, 3, NOW())
+                    ON CONFLICT (user_id) DO NOTHING
+                    """,
+                    int(user_id),
+                    int(user_ref_id),
+                )
+                row = await conn.fetchrow(
+                    """
+                    SELECT enabled, days_before, last_sent_on
+                    FROM loan_reminder_settings
+                    WHERE user_id = $1
+                    """,
+                    int(user_id),
+                )
+        return {
+            "enabled": bool(row["enabled"]) if row else False,
+            "days_before": int(row["days_before"]) if row else 3,
+            "last_sent_on": row["last_sent_on"].isoformat() if row and row["last_sent_on"] else None,
+        }
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed get_loan_reminder_settings user=%s", user_id)
+        raise
+
+
+@db_operation()
+async def set_loan_reminder_settings(db_path: str, user_id: int, *, enabled: bool | None = None, days_before: int | None = None) -> dict[str, Any]:
+    current = await get_loan_reminder_settings(db_path, user_id)
+    next_enabled = bool(current["enabled"]) if enabled is None else bool(enabled)
+    next_days_before = int(current["days_before"]) if days_before is None else int(days_before)
+    next_days_before = max(1, min(30, next_days_before))
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                user_ref_id, _ = await _ensure_user_context(conn, int(user_id))
+                await conn.execute(
+                    """
+                    INSERT INTO loan_reminder_settings (user_id, user_ref_id, enabled, days_before, updated_at)
+                    VALUES ($1, $2, $3, $4, NOW())
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET user_ref_id = EXCLUDED.user_ref_id,
+                        enabled = EXCLUDED.enabled,
+                        days_before = EXCLUDED.days_before,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    int(user_id),
+                    int(user_ref_id),
+                    next_enabled,
+                    next_days_before,
+                )
+        return await get_loan_reminder_settings(db_path, user_id)
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed set_loan_reminder_settings user=%s", user_id)
+        raise
+
+
+@db_operation()
+async def list_users_with_loan_reminders(db_path: str) -> list[int]:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT user_id FROM loan_reminder_settings WHERE enabled = TRUE")
+        return [int(r["user_id"]) for r in rows]
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed list_users_with_loan_reminders")
+        raise
+
+
+@db_operation()
+async def update_loan_reminder_last_sent(db_path: str, user_id: int, sent_on: date) -> None:
+    try:
+        pool = await _get_pool(db_path)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE loan_reminder_settings
+                SET last_sent_on = $1, updated_at = NOW()
+                WHERE user_id = $2
+                """,
+                sent_on,
+                int(user_id),
+            )
+    except _LOGGABLE_DB_ERRORS:
+        logger.exception("Failed update_loan_reminder_last_sent user=%s", user_id)
         raise

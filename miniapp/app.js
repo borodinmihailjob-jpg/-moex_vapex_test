@@ -272,6 +272,9 @@ const el = {
   loanFirstPaymentDateInput: document.getElementById("loanFirstPaymentDateInput"),
   loanIssueDateInput: document.getElementById("loanIssueDateInput"),
   loanCurrencyInput: document.getElementById("loanCurrencyInput"),
+  loanAccrualModeInput: document.getElementById("loanAccrualModeInput"),
+  loanInsuranceMonthlyInput: document.getElementById("loanInsuranceMonthlyInput"),
+  loanOneTimeCostsInput: document.getElementById("loanOneTimeCostsInput"),
   loanRatePeriodsList: document.getElementById("loanRatePeriodsList"),
   loanAddRatePeriodBtn: document.getElementById("loanAddRatePeriodBtn"),
   loanCreateError: document.getElementById("loanCreateError"),
@@ -289,6 +292,9 @@ const el = {
   loanActionScenarioBtn: document.getElementById("loanActionScenarioBtn"),
   loanActionTipsBtn: document.getElementById("loanActionTipsBtn"),
   loanBackToListBtn: document.getElementById("loanBackToListBtn"),
+  loanExportCsvBtn: document.getElementById("loanExportCsvBtn"),
+  loanExportPdfBtn: document.getElementById("loanExportPdfBtn"),
+  loanShareBtn: document.getElementById("loanShareBtn"),
   loanSchedulePageInput: document.getElementById("loanSchedulePageInput"),
   loanSchedulePageSizeInput: document.getElementById("loanSchedulePageSizeInput"),
   loanScheduleApplyBtn: document.getElementById("loanScheduleApplyBtn"),
@@ -302,11 +308,22 @@ const el = {
   loanExtraPreviewBtn: document.getElementById("loanExtraPreviewBtn"),
   loanExtraPreview: document.getElementById("loanExtraPreview"),
   loanExtraSaveBtn: document.getElementById("loanExtraSaveBtn"),
+  loanActualPaymentSaveBtn: document.getElementById("loanActualPaymentSaveBtn"),
   loanExtraBackBtn: document.getElementById("loanExtraBackBtn"),
   loanScenarioResult: document.getElementById("loanScenarioResult"),
   loanScenarioSchedule: document.getElementById("loanScenarioSchedule"),
+  loanRefNewRateInput: document.getElementById("loanRefNewRateInput"),
+  loanRefCostInput: document.getElementById("loanRefCostInput"),
+  loanRefPreviewBtn: document.getElementById("loanRefPreviewBtn"),
+  loanOptimizeDateInput: document.getElementById("loanOptimizeDateInput"),
+  loanOptimizePaymentInput: document.getElementById("loanOptimizePaymentInput"),
+  loanOptimizeDateBtn: document.getElementById("loanOptimizeDateBtn"),
+  loanOptimizePaymentBtn: document.getElementById("loanOptimizePaymentBtn"),
   loanScenarioBackBtn: document.getElementById("loanScenarioBackBtn"),
   loanTipsList: document.getElementById("loanTipsList"),
+  loanReminderEnabledToggle: document.getElementById("loanReminderEnabledToggle"),
+  loanReminderDaysInput: document.getElementById("loanReminderDaysInput"),
+  loanReminderSaveBtn: document.getElementById("loanReminderSaveBtn"),
   loanTipsBackBtn: document.getElementById("loanTipsBackBtn"),
   budgetSavingTypeInput: document.getElementById("budgetSavingTypeInput"),
   budgetSavingsOpenAddBtn: document.getElementById("budgetSavingsOpenAddBtn"),
@@ -424,6 +441,25 @@ function parseMoneyInput(raw) {
   const n = Number(text) * mult;
   if (!Number.isFinite(n)) throw new Error("Введите сумму числом. Например: 120000");
   if (n <= 0) throw new Error("Сумма должна быть больше 0");
+  return n;
+}
+
+function parseMoneyOptional(raw) {
+  const text = String(raw ?? "").trim();
+  if (!text) return 0;
+  const normalized = text.toLowerCase().replace(/₽/g, "").replace(/\s+/g, "").replace(/_/g, "").replace(",", ".");
+  if (!normalized) return 0;
+  let v = normalized;
+  let mult = 1;
+  if (v.endsWith("млн")) {
+    v = v.slice(0, -3);
+    mult = 1_000_000;
+  } else if (v.endsWith("м") || v.endsWith("m")) {
+    v = v.slice(0, -1);
+    mult = 1_000_000;
+  }
+  const n = Number(v) * mult;
+  if (!Number.isFinite(n) || n < 0) throw new Error("Введите сумму >= 0");
   return n;
 }
 
@@ -1230,6 +1266,9 @@ function resetLoanCreateForm() {
   if (el.loanFirstPaymentDateInput) el.loanFirstPaymentDateInput.value = addMonthsYmd(fmtDate(0), 1) || fmtDate(0);
   if (el.loanIssueDateInput) el.loanIssueDateInput.value = fmtDate(0);
   if (el.loanCurrencyInput) el.loanCurrencyInput.value = "RUB";
+  if (el.loanAccrualModeInput) el.loanAccrualModeInput.value = "MONTHLY";
+  if (el.loanInsuranceMonthlyInput) el.loanInsuranceMonthlyInput.value = "0";
+  if (el.loanOneTimeCostsInput) el.loanOneTimeCostsInput.value = "0";
   const start = el.loanFirstPaymentDateInput?.value || fmtDate(0);
   const end = addMonthsYmd(start, Number(el.loanTermMonthsInput?.value || 240) - 1) || start;
   state.budget.loanRateRows = [{ start_date: start, end_date: end, annual_rate: "" }];
@@ -1399,7 +1438,8 @@ function renderLoanBalanceBars(schedule) {
 function renderLoanCard(loan, summary, schedulePreview) {
   if (el.loanCardTitle) el.loanCardTitle.textContent = String(loan.name || `Кредит #${loan.id}`);
   if (el.loanCardSubtitle) {
-    el.loanCardSubtitle.textContent = `Вы платите ${money(summary.monthly_payment)} в месяц. Закрытие: ${formatDateRu(summary.payoff_date)}.`;
+    const modeLabel = summary.accrual_mode === "ACT_365" ? "по дням" : "месячный";
+    el.loanCardSubtitle.textContent = `Вы платите ${money(summary.monthly_payment)} в месяц (${modeLabel}). Закрытие: ${formatDateRu(summary.payoff_date)}.`;
   }
   if (el.loanKeyStats) {
     const alreadyPaidPrincipal = Number(summary.paid_principal_to_date || 0);
@@ -1407,6 +1447,7 @@ function renderLoanCard(loan, summary, schedulePreview) {
       { title: "Остаток долга", value: money(summary.remaining_balance) },
       { title: "Ежемесячный платеж", value: money(summary.monthly_payment) },
       { title: "Переплата по процентам", value: money(summary.total_interest) },
+      { title: "Полная стоимость (c расходами)", value: money(summary.total_future_cost || summary.total_paid || 0) },
       { title: "Выплачено тела долга", value: `${money(alreadyPaidPrincipal)} • осталось ${summary.payments_count || 0} платежей` },
     ];
     el.loanKeyStats.innerHTML = "";
@@ -1565,6 +1606,11 @@ async function loadLoanTips() {
   const loanId = Number(state.budget.activeLoanId || 0);
   if (!loanId || !el.loanTipsList) return;
   const data = await api(`/api/miniapp/loans/${loanId}/tips`, { loadingText: "Готовлю советы…" });
+  try {
+    const reminder = await api("/api/miniapp/loan-reminders/settings", { skipLoader: true });
+    if (el.loanReminderEnabledToggle) el.loanReminderEnabledToggle.checked = !!reminder.enabled;
+    if (el.loanReminderDaysInput) el.loanReminderDaysInput.value = String(reminder.days_before || 3);
+  } catch (_) {}
   el.loanTipsList.innerHTML = "";
   (data.tips || []).forEach((tip) => {
     const node = createListRow({
@@ -2916,6 +2962,9 @@ function setupEvents() {
       const paymentType = String(el.loanPaymentTypeInput?.value || "ANNUITY");
       const firstPaymentDate = String(el.loanFirstPaymentDateInput?.value || "").trim();
       const issueDate = String(el.loanIssueDateInput?.value || "").trim();
+      const accrualMode = String(el.loanAccrualModeInput?.value || "MONTHLY").trim();
+      const insuranceMonthly = parseMoneyOptional(el.loanInsuranceMonthlyInput?.value || "0");
+      const oneTimeCosts = parseMoneyOptional(el.loanOneTimeCostsInput?.value || "0");
       if (!Number.isFinite(annualRate) || annualRate < 0 || annualRate > 100) {
         throw new Error("Ставка должна быть от 0 до 100");
       }
@@ -2947,6 +2996,9 @@ function setupEvents() {
         first_payment_date: firstPaymentDate,
         issue_date: issueDate || null,
         currency: String(el.loanCurrencyInput?.value || "RUB"),
+        accrual_mode: accrualMode,
+        insurance_monthly: Math.max(0, insuranceMonthly).toFixed(2),
+        one_time_costs: Math.max(0, oneTimeCosts).toFixed(2),
         rate_periods: ratePeriods,
       });
       toast("Кредит добавлен");
@@ -2959,6 +3011,33 @@ function setupEvents() {
   el.loanBackToListBtn?.addEventListener("click", async () => {
     setLoanView("list");
     await loadLoansList();
+  });
+  el.loanExportCsvBtn?.addEventListener("click", () => {
+    const loanId = Number(state.budget.activeLoanId || 0);
+    if (!loanId) return;
+    window.open(`/api/miniapp/loans/${loanId}/export?format=excel`, "_blank");
+  });
+  el.loanExportPdfBtn?.addEventListener("click", () => {
+    const loanId = Number(state.budget.activeLoanId || 0);
+    if (!loanId) return;
+    window.open(`/api/miniapp/loans/${loanId}/export?format=pdf`, "_blank");
+  });
+  el.loanShareBtn?.addEventListener("click", async () => {
+    const loanId = Number(state.budget.activeLoanId || 0);
+    if (!loanId) return;
+    try {
+      const data = await api(`/api/miniapp/loans/${loanId}/share`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ttl_hours: 72 }),
+      });
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(data.share_url || "");
+      }
+      toast("Ссылка создана и скопирована");
+    } catch (e) {
+      toast(e?.message || "Не удалось создать ссылку");
+    }
   });
   el.loanActionScheduleBtn?.addEventListener("click", async () => {
     setLoanActionChip("schedule");
@@ -3008,6 +3087,28 @@ function setupEvents() {
       toast(e?.message || "Не удалось сохранить досрочку");
     }
   });
+  el.loanActualPaymentSaveBtn?.addEventListener("click", async () => {
+    const loanId = Number(state.budget.activeLoanId || 0);
+    if (!loanId) return;
+    try {
+      const amount = parseMoneyInput(el.loanExtraAmountInput?.value || "");
+      const paymentDate = String(el.loanExtraDateInput?.value || "").trim();
+      await api(`/api/miniapp/loans/${loanId}/actual-payments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          payment_date: paymentDate,
+          amount,
+          principal_paid: amount,
+          interest_paid: 0,
+        }),
+      });
+      toast("Факт платежа сохранен");
+      await openLoanCard(loanId);
+    } catch (e) {
+      toast(e?.message || "Не удалось сохранить факт платежа");
+    }
+  });
   el.loanExtraBackBtn?.addEventListener("click", async () => {
     const loanId = Number(state.budget.activeLoanId || 0);
     if (loanId) await openLoanCard(loanId);
@@ -3023,6 +3124,58 @@ function setupEvents() {
       }
     });
   });
+  el.loanRefPreviewBtn?.addEventListener("click", async () => {
+    const loanId = Number(state.budget.activeLoanId || 0);
+    if (!loanId) return;
+    try {
+      const newRate = Number(String(el.loanRefNewRateInput?.value || "").replace(",", "."));
+      const refCost = parseMoneyOptional(el.loanRefCostInput?.value || "0");
+      const data = await api(`/api/miniapp/loans/${loanId}/refinance/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ new_annual_rate: newRate, refinance_cost: refCost }),
+      });
+      if (el.loanScenarioResult) {
+        el.loanScenarioResult.textContent = [
+          `Экономия всего: ${money(data.total_saving || 0)}`,
+          `Экономия в месяц: ${money(data.monthly_saving || 0)}`,
+          `Окупаемость: ${data.breakeven_months ?? "—"} мес`,
+        ].join("\\n");
+      }
+    } catch (e) {
+      toast(e?.message || "Не удалось посчитать рефинанс");
+    }
+  });
+  el.loanOptimizeDateBtn?.addEventListener("click", async () => {
+    const loanId = Number(state.budget.activeLoanId || 0);
+    if (!loanId) return;
+    try {
+      const targetDate = String(el.loanOptimizeDateInput?.value || "").trim();
+      const data = await api(`/api/miniapp/loans/${loanId}/optimize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ goal_type: "CLOSE_BY_DATE", target_date: targetDate }),
+      });
+      toast(`Рекомендованная досрочка: ${money(data.recommended_extra || 0)}/мес`);
+    } catch (e) {
+      toast(e?.message || "Не удалось подобрать досрочку");
+    }
+  });
+  el.loanOptimizePaymentBtn?.addEventListener("click", async () => {
+    const loanId = Number(state.budget.activeLoanId || 0);
+    if (!loanId) return;
+    try {
+      const targetPayment = parseMoneyInput(el.loanOptimizePaymentInput?.value || "");
+      const data = await api(`/api/miniapp/loans/${loanId}/optimize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ goal_type: "PAYMENT_TARGET", target_payment: targetPayment }),
+      });
+      toast(`Рекомендованная разовая досрочка: ${money(data.recommended_extra || 0)}`);
+    } catch (e) {
+      toast(e?.message || "Не удалось подобрать досрочку");
+    }
+  });
   el.loanScenarioBackBtn?.addEventListener("click", async () => {
     const loanId = Number(state.budget.activeLoanId || 0);
     if (loanId) await openLoanCard(loanId);
@@ -3030,6 +3183,20 @@ function setupEvents() {
   el.loanTipsBackBtn?.addEventListener("click", async () => {
     const loanId = Number(state.budget.activeLoanId || 0);
     if (loanId) await openLoanCard(loanId);
+  });
+  el.loanReminderSaveBtn?.addEventListener("click", async () => {
+    try {
+      const enabled = !!el.loanReminderEnabledToggle?.checked;
+      const days = Number(el.loanReminderDaysInput?.value || 3);
+      await api("/api/miniapp/loan-reminders/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled, days_before: days }),
+      });
+      toast("Напоминания сохранены");
+    } catch (e) {
+      toast(e?.message || "Не удалось сохранить напоминания");
+    }
   });
   el.addGoalBtn?.addEventListener("click", () => openGoalDetail(null));
   el.closeMonthOpenBtn?.addEventListener("click", openMonthCloseFlow);

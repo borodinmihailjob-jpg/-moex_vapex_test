@@ -3,7 +3,7 @@ import calendar
 import logging
 import os
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,9 @@ from db import (
     clear_user_portfolio,
     close_budget_month,
     create_loan_account,
+    create_loan_actual_payment,
     create_loan_event,
+    create_loan_share_link,
     create_budget_fund,
     create_price_target_alert,
     disable_budget_expense,
@@ -38,7 +40,9 @@ from db import (
     get_budget_notification_settings,
     get_budget_profile,
     get_loan_account,
+    get_loan_share_link,
     get_loan_schedule_cache,
+    get_loan_reminder_settings,
     get_active_app_text,
     get_user_last_mode,
     get_position_agg,
@@ -53,9 +57,11 @@ from db import (
     list_budget_history,
     list_budget_savings,
     list_loan_accounts,
+    list_loan_actual_payments,
     list_loan_events,
     reset_budget_data,
     set_user_last_mode,
+    set_loan_reminder_settings,
     set_budget_notification_settings,
     set_open_close_alert,
     update_budget_income,
@@ -107,6 +113,10 @@ MSK_TZ = ZoneInfo("Europe/Moscow")
 
 def _utc_now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
+
+
+def _is_postgres_dsn(dsn: str) -> bool:
+    return str(dsn or "").startswith(("postgresql://", "postgres://"))
 
 
 def _today_msk() -> date:
@@ -1741,6 +1751,9 @@ def _loan_row_to_input(loan: dict[str, Any]) -> LoanInput:
         issue_date=issue_date,
         currency=str(loan.get("currency") or "RUB"),
         calc_date=_today_msk(),
+        accrual_mode=str(loan.get("accrual_mode") or "MONTHLY").upper(),  # type: ignore[arg-type]
+        insurance_monthly=Decimal(str(loan.get("insurance_monthly") or "0")),
+        one_time_costs=Decimal(str(loan.get("one_time_costs") or "0")),
     )
 
 
@@ -1787,6 +1800,7 @@ def _loan_event_from_row(row: dict[str, Any]) -> ExtraPaymentEvent | RateChangeE
             amount=Decimal(str(payload.get("amount") or "0")),
             mode=str(payload.get("mode") or "ONE_TIME").upper(),  # type: ignore[arg-type]
             strategy=str(payload.get("strategy") or "REDUCE_TERM").upper(),  # type: ignore[arg-type]
+            end_date=_parse_date_ymd(str(payload.get("end_date"))) if payload.get("end_date") else None,
         )
     if event_type == "RATE_CHANGE":
         return RateChangeEvent(
@@ -1809,6 +1823,20 @@ async def _compute_loan_cached(
     event_rows: list[dict[str, Any]],
 ) -> tuple[dict, list[dict], int]:
     loan_input = _loan_row_to_input(loan_row)
+    actual_rows: list[dict[str, Any]] = []
+    if _is_postgres_dsn(db_dsn):
+        try:
+            actual_rows = await list_loan_actual_payments(db_dsn, user_id, int(loan_row["id"]))
+        except Exception:
+            logger.exception("Failed to load actual loan payments for loan_id=%s", loan_row.get("id"))
+    if actual_rows:
+        total_principal_paid = sum(Decimal(str(r.get("principal_paid") or "0")) for r in actual_rows)
+        adjusted_current = loan_input.current_principal - total_principal_paid
+        if adjusted_current <= Decimal("0"):
+            adjusted_current = Decimal("0.01")
+        loan_input.current_principal = adjusted_current
+        latest_date = max(_parse_date_ymd(str(r["payment_date"])) for r in actual_rows)
+        loan_input.calc_date = latest_date + timedelta(days=1)
     events: list[ExtraPaymentEvent | RateChangeEvent | HolidayEvent] = []
     for row in event_rows:
         ev = _loan_event_from_row(row)
@@ -1866,6 +1894,11 @@ async def api_loans(request: web.Request) -> web.Response:
             raise ValueError("first_payment_date must be after issue_date")
         currency = str(payload.get("currency") or "RUB").strip().upper()[:3]
         name = str(payload.get("name") or "").strip() or None
+        accrual_mode = str(payload.get("accrual_mode") or "MONTHLY").strip().upper()
+        if accrual_mode not in {"MONTHLY", "ACT_365"}:
+            raise ValueError("accrual_mode must be MONTHLY or ACT_365")
+        insurance_monthly = _parse_decimal(payload.get("insurance_monthly") if payload.get("insurance_monthly") is not None else "0", field="insurance_monthly", min_value=Decimal("0"))
+        one_time_costs = _parse_decimal(payload.get("one_time_costs") if payload.get("one_time_costs") is not None else "0", field="one_time_costs", min_value=Decimal("0"))
         rate_periods = _normalize_loan_rate_periods(payload.get("rate_periods"), first_payment_date, term_months, annual_rate)
         base_rate = Decimal(rate_periods[0]["annual_rate"])
     except (ValueError, TypeError) as exc:
@@ -1878,6 +1911,9 @@ async def api_loans(request: web.Request) -> web.Response:
         principal=principal,
         current_principal=current_principal,
         annual_rate=base_rate,
+        accrual_mode=accrual_mode,
+        insurance_monthly=insurance_monthly,
+        one_time_costs=one_time_costs,
         payment_type=payment_type,
         term_months=term_months,
         first_payment_date=first_payment_date,
@@ -1973,10 +2009,13 @@ async def api_loan_events_extra(request: web.Request) -> web.Response:
         amount = _parse_decimal(payload.get("amount"), field="amount", min_value=Decimal("0.01"))
         mode = str(payload.get("mode") or "ONE_TIME").upper()
         strategy = str(payload.get("strategy") or "REDUCE_TERM").upper()
-        if mode not in {"ONE_TIME", "MONTHLY"}:
+        if mode not in {"ONE_TIME", "MONTHLY", "WEEKLY", "BIWEEKLY", "YEARLY"}:
             raise ValueError("mode invalid")
         if strategy not in {"REDUCE_TERM", "REDUCE_PAYMENT"}:
             raise ValueError("strategy invalid")
+        end_date = _parse_date_ymd(str(payload.get("end_date"))) if payload.get("end_date") else None
+        if end_date and end_date < event_date:
+            raise ValueError("end_date must be >= date")
     except (ValueError, TypeError) as exc:
         return _json_error("VALIDATION_ERROR", str(exc), status=400)
 
@@ -1991,6 +2030,7 @@ async def api_loan_events_extra(request: web.Request) -> web.Response:
             "amount": format(amount, "f"),
             "mode": mode,
             "strategy": strategy,
+            "end_date": end_date.isoformat() if end_date else None,
         },
         client_request_id=req_id,
     )
@@ -2103,12 +2143,16 @@ async def api_loan_scenario_preview(request: web.Request) -> web.Response:
                 continue
             tp = str(row.get("type") or "").upper()
             if tp == "EXTRA_PAYMENT":
+                mode = str(row.get("mode") or "ONE_TIME").upper()
+                if mode not in {"ONE_TIME", "MONTHLY", "WEEKLY", "BIWEEKLY", "YEARLY"}:
+                    raise ValueError("mode invalid")
                 base_events.append(
                     ExtraPaymentEvent(
                         date=_parse_date_ymd(str(row.get("date") or "")),
                         amount=_parse_decimal(row.get("amount"), field="amount", min_value=Decimal("0.01")),
-                        mode=str(row.get("mode") or "ONE_TIME").upper(),  # type: ignore[arg-type]
+                        mode=mode,  # type: ignore[arg-type]
                         strategy=str(row.get("strategy") or "REDUCE_TERM").upper(),  # type: ignore[arg-type]
+                        end_date=_parse_date_ymd(str(row.get("end_date"))) if row.get("end_date") else None,
                     )
                 )
             elif tp == "RATE_CHANGE":
@@ -2186,6 +2230,288 @@ async def api_loan_tips(request: web.Request) -> web.Response:
     return _json_ok({"summary": summary, "tips": tips})
 
 
+def _render_schedule_csv(summary: dict[str, Any], schedule: list[dict[str, Any]]) -> str:
+    rows = [
+        "date,payment,interest,principal,balance,annual_rate,event",
+    ]
+    for r in schedule:
+        rows.append(
+            ",".join(
+                [
+                    str(r.get("date") or ""),
+                    str(r.get("payment") or ""),
+                    str(r.get("interest") or ""),
+                    str(r.get("principal") or ""),
+                    str(r.get("balance") or ""),
+                    str(r.get("annual_rate") or ""),
+                    str(r.get("event") or ""),
+                ]
+            )
+        )
+    rows.append("")
+    rows.append(f"monthly_payment,{summary.get('monthly_payment')}")
+    rows.append(f"total_interest,{summary.get('total_interest')}")
+    rows.append(f"payoff_date,{summary.get('payoff_date')}")
+    return "\n".join(rows)
+
+
+def _render_simple_pdf(title: str, lines: list[str]) -> bytes:
+    # Minimal valid PDF with one text page.
+    safe_lines = [line.replace("(", "[").replace(")", "]") for line in lines]
+    text_chunks = ["BT /F1 12 Tf 50 780 Td"]
+    for idx, line in enumerate([title, *safe_lines]):
+        if idx == 0:
+            text_chunks.append(f"({line[:110]}) Tj")
+        else:
+            text_chunks.append(f"0 -16 Td ({line[:110]}) Tj")
+    text_chunks.append("ET")
+    stream = "\n".join(text_chunks).encode("latin-1", errors="ignore")
+    objects = [
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n",
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n",
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n",
+        b"4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n",
+        b"5 0 obj << /Length " + str(len(stream)).encode("ascii") + b" >> stream\n" + stream + b"\nendstream endobj\n",
+    ]
+    pdf = b"%PDF-1.4\n"
+    offsets = [0]
+    for obj in objects:
+        offsets.append(len(pdf))
+        pdf += obj
+    xref_pos = len(pdf)
+    xref = [b"xref\n0 6\n0000000000 65535 f \n"]
+    for off in offsets[1:]:
+        xref.append(f"{off:010d} 00000 n \n".encode("ascii"))
+    pdf += b"".join(xref)
+    pdf += b"trailer << /Size 6 /Root 1 0 R >>\nstartxref\n"
+    pdf += str(xref_pos).encode("ascii") + b"\n%%EOF\n"
+    return pdf
+
+
+async def api_loan_actual_payments(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    try:
+        loan_id = int(request.match_info["loan_id"])
+    except (TypeError, ValueError):
+        return _json_error("VALIDATION_ERROR", "invalid loan_id", status=400)
+
+    if request.method == "GET":
+        items = await list_loan_actual_payments(db_dsn, user_id, loan_id)
+        return _json_ok({"items": items})
+
+    payload = await _read_json(request)
+    try:
+        payment_date = _parse_date_ymd(str(payload.get("payment_date") or payload.get("date") or ""))
+        amount = _parse_decimal(payload.get("amount"), field="amount", min_value=Decimal("0.01"))
+        principal_paid = _parse_decimal(payload.get("principal_paid") if payload.get("principal_paid") is not None else "0", field="principal_paid", min_value=Decimal("0"))
+        interest_paid = _parse_decimal(payload.get("interest_paid") if payload.get("interest_paid") is not None else "0", field="interest_paid", min_value=Decimal("0"))
+        if principal_paid + interest_paid > amount + Decimal("0.01"):
+            raise ValueError("principal_paid + interest_paid must be <= amount")
+        note = str(payload.get("note") or "").strip() or None
+    except (ValueError, TypeError) as exc:
+        return _json_error("VALIDATION_ERROR", str(exc), status=400)
+
+    req_id = (request.headers.get("Idempotency-Key") or "").strip() or None
+    payment_id, created = await create_loan_actual_payment(
+        db_dsn,
+        user_id=user_id,
+        loan_id=loan_id,
+        payment_date=payment_date,
+        amount=amount,
+        principal_paid=principal_paid,
+        interest_paid=interest_paid,
+        note=note,
+        client_request_id=req_id,
+    )
+    if payment_id == 0:
+        return _json_error("NOT_FOUND", "loan not found", status=404)
+    return _json_ok({"payment_id": payment_id, "created": created})
+
+
+async def api_loan_refinance_preview(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    try:
+        loan_id = int(request.match_info["loan_id"])
+    except (TypeError, ValueError):
+        return _json_error("VALIDATION_ERROR", "invalid loan_id", status=400)
+    payload = await _read_json(request)
+    loan = await get_loan_account(db_dsn, user_id, loan_id)
+    if not loan:
+        return _json_error("NOT_FOUND", "loan not found", status=404)
+    events = await list_loan_events(db_dsn, user_id, loan_id)
+    base_summary, _, _ = await _compute_loan_cached(db_dsn, user_id, loan, events)
+    try:
+        new_rate = _parse_decimal(payload.get("new_annual_rate"), field="new_annual_rate", min_value=Decimal("0"), max_value=Decimal("100"))
+        new_term = int(payload.get("new_term_months") or int(base_summary.get("payments_count") or 1))
+        refinance_cost = _parse_decimal(payload.get("refinance_cost") if payload.get("refinance_cost") is not None else "0", field="refinance_cost", min_value=Decimal("0"))
+    except (ValueError, TypeError) as exc:
+        return _json_error("VALIDATION_ERROR", str(exc), status=400)
+
+    loan_input = _loan_row_to_input(loan)
+    loan_input.annual_rate = new_rate
+    loan_input.term_months = max(1, new_term + month_diff(loan_input.first_payment_date, loan_input.calc_date or _today_msk()))
+    scenario_summary, _, _, _ = calculate_loan_schedule(loan_input, [])
+    base_cost = Decimal(str(base_summary.get("total_future_cost") or base_summary.get("total_paid") or "0"))
+    new_cost = Decimal(str(scenario_summary.get("total_future_cost") or scenario_summary.get("total_paid") or "0")) + refinance_cost
+    saving = base_cost - new_cost
+    monthly_saving = Decimal(str(base_summary.get("monthly_payment") or "0")) - Decimal(str(scenario_summary.get("monthly_payment") or "0"))
+    breakeven_months = int((refinance_cost / monthly_saving).to_integral_value(rounding=ROUND_HALF_EVEN)) if monthly_saving > 0 else None
+    return _json_ok(
+        {
+            "base_summary": base_summary,
+            "refinance_summary": scenario_summary,
+            "refinance_cost": format(refinance_cost, "f"),
+            "total_saving": format(saving, "f"),
+            "monthly_saving": format(monthly_saving, "f"),
+            "breakeven_months": breakeven_months,
+        }
+    )
+
+
+async def api_loan_optimizer(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    try:
+        loan_id = int(request.match_info["loan_id"])
+    except (TypeError, ValueError):
+        return _json_error("VALIDATION_ERROR", "invalid loan_id", status=400)
+    payload = await _read_json(request)
+    loan = await get_loan_account(db_dsn, user_id, loan_id)
+    if not loan:
+        return _json_error("NOT_FOUND", "loan not found", status=404)
+    loan_input = _loan_row_to_input(loan)
+    goal_type = str(payload.get("goal_type") or "").upper()
+    if goal_type not in {"CLOSE_BY_DATE", "PAYMENT_TARGET"}:
+        return _json_error("VALIDATION_ERROR", "goal_type must be CLOSE_BY_DATE|PAYMENT_TARGET", status=400)
+
+    low = Decimal("0")
+    high = Decimal(str(loan_input.current_principal))
+    best = high
+    for _ in range(20):
+        mid = (low + high) / Decimal("2")
+        if goal_type == "CLOSE_BY_DATE":
+            target_date = _parse_date_ymd(str(payload.get("target_date") or ""))
+            events = [ExtraPaymentEvent(date=loan_input.calc_date or _today_msk(), amount=q_money(mid), mode="MONTHLY", strategy="REDUCE_TERM")]
+            s, _, _, _ = calculate_loan_schedule(loan_input, events)
+            ok = bool(s.get("payoff_date")) and str(s.get("payoff_date")) <= target_date.isoformat()
+        else:
+            target_payment = _parse_decimal(payload.get("target_payment"), field="target_payment", min_value=Decimal("0.01"))
+            events = [ExtraPaymentEvent(date=loan_input.calc_date or _today_msk(), amount=q_money(mid), mode="ONE_TIME", strategy="REDUCE_PAYMENT")]
+            s, _, _, _ = calculate_loan_schedule(loan_input, events)
+            ok = Decimal(str(s.get("monthly_payment") or "0")) <= target_payment
+        if ok:
+            best = mid
+            high = mid
+        else:
+            low = mid
+    return _json_ok({"goal_type": goal_type, "recommended_extra": format(q_money(best), "f")})
+
+
+async def api_loan_export(request: web.Request) -> web.StreamResponse:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    try:
+        loan_id = int(request.match_info["loan_id"])
+    except (TypeError, ValueError):
+        return _json_error("VALIDATION_ERROR", "invalid loan_id", status=400)
+    fmt = (request.query.get("format") or "csv").strip().lower()
+    loan = await get_loan_account(db_dsn, user_id, loan_id)
+    if not loan:
+        return _json_error("NOT_FOUND", "loan not found", status=404)
+    events = await list_loan_events(db_dsn, user_id, loan_id)
+    summary, schedule, _ = await _compute_loan_cached(db_dsn, user_id, loan, events)
+
+    if fmt in {"excel", "csv"}:
+        body = _render_schedule_csv(summary, schedule).encode("utf-8")
+        resp = web.Response(body=body)
+        resp.content_type = "text/csv"
+        resp.headers["Content-Disposition"] = f'attachment; filename=\"loan_{loan_id}_schedule.csv\"'
+        return resp
+    if fmt == "pdf":
+        lines = [
+            f"Loan: {loan.get('name') or loan_id}",
+            f"Current principal: {summary.get('remaining_balance')}",
+            f"Monthly payment: {summary.get('monthly_payment')}",
+            f"Payoff date: {summary.get('payoff_date')}",
+        ]
+        body = _render_simple_pdf("Loan report", lines)
+        resp = web.Response(body=body)
+        resp.content_type = "application/pdf"
+        resp.headers["Content-Disposition"] = f'attachment; filename=\"loan_{loan_id}_report.pdf\"'
+        return resp
+    return _json_error("VALIDATION_ERROR", "format must be csv|excel|pdf", status=400)
+
+
+async def api_loan_share_create(request: web.Request) -> web.Response:
+    import secrets
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    try:
+        loan_id = int(request.match_info["loan_id"])
+    except (TypeError, ValueError):
+        return _json_error("VALIDATION_ERROR", "invalid loan_id", status=400)
+    payload = await _read_json(request)
+    ttl_hours = int(payload.get("ttl_hours") or 72)
+    ttl_hours = max(1, min(24 * 30, ttl_hours))
+    token = secrets.token_urlsafe(16)
+    ok = await create_loan_share_link(
+        db_dsn,
+        user_id=user_id,
+        loan_id=loan_id,
+        token=token,
+        payload={"scenario": payload.get("scenario") or {}},
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=ttl_hours),
+    )
+    if not ok:
+        return _json_error("NOT_FOUND", "loan not found", status=404)
+    return _json_ok({"token": token, "share_url": f"/api/miniapp/loans/share/{token}"})
+
+
+async def api_loan_share_get(request: web.Request) -> web.Response:
+    db_dsn = request.app["db_dsn"]
+    token = str(request.match_info.get("token") or "").strip()
+    if not token:
+        return _json_error("VALIDATION_ERROR", "token required", status=400)
+    row = await get_loan_share_link(db_dsn, token)
+    if not row:
+        return _json_error("NOT_FOUND", "share link not found", status=404)
+    if row.get("expires_at"):
+        exp = datetime.fromisoformat(str(row["expires_at"]).replace("Z", "+00:00"))
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) > exp:
+            return _json_error("NOT_FOUND", "share link expired", status=404)
+    loan = await get_loan_account(db_dsn, int(row["user_id"]), int(row["loan_id"]))
+    if not loan:
+        return _json_error("NOT_FOUND", "loan not found", status=404)
+    events = await list_loan_events(db_dsn, int(row["user_id"]), int(row["loan_id"]))
+    summary, schedule, version = await _compute_loan_cached(db_dsn, int(row["user_id"]), loan, events)
+    return _json_ok({"loan": loan, "summary": summary, "version": version, "preview": schedule[:24], "payload": row.get("payload") or {}})
+
+
+async def api_loan_reminders(request: web.Request) -> web.Response:
+    bot_token = request.app["bot_token"]
+    db_dsn = request.app["db_dsn"]
+    user_id = await _auth_user_id(request, bot_token)
+    if request.method == "GET":
+        return _json_ok(await get_loan_reminder_settings(db_dsn, user_id))
+    payload = await _read_json(request)
+    updated = await set_loan_reminder_settings(
+        db_dsn,
+        user_id=user_id,
+        enabled=payload.get("enabled"),
+        days_before=payload.get("days_before"),
+    )
+    return _json_ok(updated)
+
+
 def attach_miniapp_routes(app: web.Application, db_dsn: str, bot_token: str) -> None:
     app["db_dsn"] = db_dsn
     app["bot_token"] = bot_token
@@ -2246,5 +2572,14 @@ def attach_miniapp_routes(app: web.Application, db_dsn: str, bot_token: str) -> 
     app.router.add_post("/api/miniapp/loans/{loan_id}/events/extra-payment", api_loan_events_extra)
     app.router.add_post("/api/miniapp/loans/{loan_id}/events/rate-change", api_loan_events_rate)
     app.router.add_post("/api/miniapp/loans/{loan_id}/events/holiday", api_loan_events_holiday)
+    app.router.add_get("/api/miniapp/loans/{loan_id}/actual-payments", api_loan_actual_payments)
+    app.router.add_post("/api/miniapp/loans/{loan_id}/actual-payments", api_loan_actual_payments)
     app.router.add_post("/api/miniapp/loans/{loan_id}/scenarios/preview", api_loan_scenario_preview)
+    app.router.add_post("/api/miniapp/loans/{loan_id}/refinance/preview", api_loan_refinance_preview)
+    app.router.add_post("/api/miniapp/loans/{loan_id}/optimize", api_loan_optimizer)
+    app.router.add_get("/api/miniapp/loans/{loan_id}/export", api_loan_export)
+    app.router.add_post("/api/miniapp/loans/{loan_id}/share", api_loan_share_create)
     app.router.add_get("/api/miniapp/loans/{loan_id}/tips", api_loan_tips)
+    app.router.add_get("/api/miniapp/loans/share/{token}", api_loan_share_get)
+    app.router.add_get("/api/miniapp/loan-reminders/settings", api_loan_reminders)
+    app.router.add_post("/api/miniapp/loan-reminders/settings", api_loan_reminders)
