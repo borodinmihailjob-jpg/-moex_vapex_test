@@ -22,6 +22,12 @@ body {
   -webkit-text-size-adjust: 100%;
 }
 
+:root {
+  --control-px: 14px;
+  --control-py: 11px;
+  --menu-btn-w: 104px;
+}
+
 .app-shell {
   position: fixed;
   inset: 0;
@@ -167,6 +173,11 @@ body {
 .right {
   text-align: right;
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s8);
+  flex-wrap: wrap;
   font-variant-numeric: tabular-nums;
 }
 
@@ -296,11 +307,16 @@ button:focus-visible,
   border: 1px solid transparent;
   border-radius: var(--r12);
   min-height: 46px;
-  padding: 11px var(--s16);
+  padding: var(--control-py) var(--control-px);
   font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.01em;
   cursor: pointer;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
   transition:
     transform var(--motion-fast) var(--motion-ease),
     background var(--motion-fast) var(--motion-ease),
@@ -328,9 +344,15 @@ button:focus-visible,
 }
 
 .btn.danger {
-  background: color-mix(in srgb, var(--danger) 24%, var(--surface));
-  color: #ffd4d9;
-  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+  background: transparent;
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 60%, transparent);
+}
+
+.right .btn {
+  min-width: 118px;
+  max-width: min(42vw, 150px);
+  justify-content: center;
 }
 
 .btn[disabled] {
@@ -368,9 +390,12 @@ button:focus-visible,
   color: var(--text-secondary);
   border-radius: 999px;
   min-height: 44px;
-  padding: 10px 14px;
+  padding: var(--control-py) var(--control-px);
   font-size: var(--subhead-size);
   cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   transition: background var(--motion-fast) var(--motion-ease), color var(--motion-fast) var(--motion-ease);
 }
 
@@ -511,15 +536,19 @@ button:focus-visible,
   bottom: 0;
   z-index: 30;
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(var(--menu-btn-w), 1fr);
   gap: var(--s4);
   padding: var(--s8) var(--s8) calc(var(--s8) + env(safe-area-inset-bottom, 0px));
   background: color-mix(in srgb, var(--bg) 88%, black 12%);
   border-top: 1px solid var(--separator);
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
 }
 
-#tabbarBudget.tabbar {
-  grid-template-columns: repeat(8, minmax(0, 1fr));
+.tabbar::-webkit-scrollbar {
+  display: none;
 }
 
 .tabbar.hidden { display: none; }
@@ -528,15 +557,20 @@ button:focus-visible,
   border: 1px solid transparent;
   border-radius: var(--r12);
   min-height: 46px;
+  width: 100%;
   background: transparent;
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 600;
-  padding: 6px 4px;
+  padding: var(--control-py) var(--control-px);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  scroll-snap-align: start;
 }
 
 .tab-btn.active {
@@ -692,6 +726,10 @@ button:focus-visible,
 
   .tab-btn {
     min-height: 44px;
-    font-size: 10px;
+    font-size: 12px;
+  }
+
+  :root {
+    --menu-btn-w: 96px;
   }
 }
