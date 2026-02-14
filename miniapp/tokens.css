@@ -1,0 +1,52 @@
+:root {
+  --tg-bg-color: #0b0d10;
+  --tg-text-color: #f7f8fa;
+  --tg-hint-color: #a6afbc;
+  --tg-link-color: #1db954;
+  --tg-button-color: #1db954;
+  --tg-button-text-color: #041008;
+
+  --bg: #0b0d10;
+  --surface: #14181f;
+  --surface-elevated: #1a1f29;
+  --text-primary: #f7f8fa;
+  --text-secondary: #a6afbc;
+  --separator: rgba(247, 248, 250, 0.12);
+  --accent: #1db954;
+  --accent-text: #041008;
+  --success: #21c97a;
+  --warning: #e7b548;
+  --danger: #f15f6f;
+
+  --r8: 8px;
+  --r12: 12px;
+  --r16: 16px;
+  --r20: 20px;
+  --r24: 24px;
+
+  --s4: 4px;
+  --s8: 8px;
+  --s12: 12px;
+  --s16: 16px;
+  --s20: 20px;
+  --s24: 24px;
+  --s32: 32px;
+
+  --title-size: 32px;
+  --headline-size: 22px;
+  --body-size: 16px;
+  --subhead-size: 14px;
+  --caption-size: 12px;
+  --lh-tight: 1.2;
+  --lh-base: 1.45;
+
+  --shadow-1: 0 6px 16px rgba(0, 0, 0, 0.25);
+  --shadow-2: 0 14px 30px rgba(0, 0, 0, 0.35);
+
+  --motion-fast: 150ms;
+  --motion-base: 200ms;
+  --motion-ease: cubic-bezier(0.2, 0.9, 0.25, 1);
+
+  --tabbar-h: 76px;
+  --app-height: 100dvh;
+}

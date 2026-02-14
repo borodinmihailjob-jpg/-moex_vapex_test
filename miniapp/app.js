@@ -38,6 +38,70 @@ const state = {
   },
 };
 
+function clamp255(value) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function normalizeHex(color, fallback) {
+  const raw = String(color || "").trim();
+  if (!raw) return fallback;
+  const hex = raw.startsWith("#") ? raw.slice(1) : raw;
+  if (/^[0-9a-fA-F]{3}$/.test(hex)) {
+    return `#${hex.split("").map((c) => c + c).join("").toLowerCase()}`;
+  }
+  if (/^[0-9a-fA-F]{6}$/.test(hex)) {
+    return `#${hex.toLowerCase()}`;
+  }
+  return fallback;
+}
+
+function hexToRgb(hex) {
+  const n = normalizeHex(hex, "#000000").slice(1);
+  return {
+    r: parseInt(n.slice(0, 2), 16),
+    g: parseInt(n.slice(2, 4), 16),
+    b: parseInt(n.slice(4, 6), 16),
+  };
+}
+
+function rgbToHex({ r, g, b }) {
+  return `#${clamp255(r).toString(16).padStart(2, "0")}${clamp255(g).toString(16).padStart(2, "0")}${clamp255(b).toString(16).padStart(2, "0")}`;
+}
+
+function mixHex(base, withHex, ratio) {
+  const a = hexToRgb(base);
+  const b = hexToRgb(withHex);
+  const p = Math.max(0, Math.min(1, ratio));
+  return rgbToHex({
+    r: a.r + (b.r - a.r) * p,
+    g: a.g + (b.g - a.g) * p,
+    b: a.b + (b.b - a.b) * p,
+  });
+}
+
+function applyTelegramTheme() {
+  const root = document.documentElement;
+  const params = tg?.themeParams || {};
+  const bg = normalizeHex(params.bg_color || params.secondary_bg_color, "#0b0d10");
+  const surface = mixHex(bg, "#ffffff", 0.06);
+  const elevated = mixHex(bg, "#ffffff", 0.1);
+  const text = normalizeHex(params.text_color, "#f7f8fa");
+  const hint = normalizeHex(params.hint_color, "#a6afbc");
+  const button = normalizeHex(params.button_color || params.link_color, "#1db954");
+  const buttonText = normalizeHex(params.button_text_color, "#041008");
+  root.style.setProperty("--bg", bg);
+  root.style.setProperty("--surface", surface);
+  root.style.setProperty("--surface-elevated", elevated);
+  root.style.setProperty("--text-primary", text);
+  root.style.setProperty("--text-secondary", hint);
+  root.style.setProperty("--separator", "rgba(255,255,255,0.12)");
+  root.style.setProperty("--accent", button);
+  root.style.setProperty("--accent-text", buttonText);
+}
+
+applyTelegramTheme();
+tg?.onEvent?.("themeChanged", applyTelegramTheme);
+
 const POPULAR_FIAT_ALERT_PAIRS = [
   { secid: "USDRUB_TOM", boardid: "CETS", shortname: "Доллар США / Российский рубль" },
   { secid: "EURRUB_TOM", boardid: "CETS", shortname: "Евро / Российский рубль" },
@@ -521,7 +585,54 @@ function setBudgetTab(tab) {
 }
 
 function renderEmpty(container, text) {
-  container.innerHTML = `<p class="hint">${text}</p>`;
+  container.innerHTML = `
+    <div class="state">
+      <p class="state-title">Пока пусто</p>
+      <p class="state-text">${text}</p>
+    </div>
+  `;
+}
+
+function renderError(container, text) {
+  container.innerHTML = `
+    <div class="state">
+      <p class="state-title">Не удалось загрузить</p>
+      <p class="state-text">${text}</p>
+    </div>
+  `;
+}
+
+function renderSkeletonList(container, rows = 4) {
+  container.innerHTML = `<div class="skeleton-list">${Array.from({ length: rows }).map(() => `
+    <div class="skeleton-item">
+      <div>
+        <div class="skeleton-line"></div>
+        <div class="skeleton-line short" style="margin-top:8px;"></div>
+      </div>
+      <div>
+        <div class="skeleton-line"></div>
+      </div>
+    </div>
+  `).join("")}</div>`;
+}
+
+function createListRow({ title, subtitle = "", right = "", rightClass = "", actionLabel = "", actionClass = "ghost", onAction = null }) {
+  const item = document.createElement("div");
+  item.className = "item";
+  item.innerHTML = `
+    <div class="left">
+      <div class="name">${title}</div>
+      ${subtitle ? `<div class="sub">${subtitle}</div>` : ""}
+    </div>
+    <div class="right ${rightClass}">
+      ${right ? `<div>${right}</div>` : ""}
+      ${actionLabel ? `<button class="btn ${actionClass}">${actionLabel}</button>` : ""}
+    </div>
+  `;
+  if (actionLabel && onAction) {
+    item.querySelector("button")?.addEventListener("click", onAction);
+  }
+  return item;
 }
 
 function renderSearchList(container, items, onPick) {
@@ -531,11 +642,13 @@ function renderSearchList(container, items, onPick) {
     return;
   }
   items.forEach((s) => {
-    const item = document.createElement("div");
-    item.className = "item";
     const label = `${s.shortname || s.name || s.secid} (${s.secid})`;
-    item.innerHTML = `<div class="left"><div class="name">${label}</div><div class="sub">${s.boardid || ""}</div></div><div class="right"><button class="btn ghost">Выбрать</button></div>`;
-    item.querySelector("button").addEventListener("click", () => onPick(s, label));
+    const item = createListRow({
+      title: label,
+      subtitle: s.boardid || "Основной рынок",
+      actionLabel: "Выбрать",
+      onAction: () => onPick(s, label),
+    });
     container.appendChild(item);
   });
 }
@@ -637,7 +750,7 @@ function bindSearch({
           if (onSelected) onSelected(picked, label);
         });
       } catch (e) {
-        renderEmpty(resultEl, "Ошибка поиска");
+        renderError(resultEl, "Поиск временно недоступен. Попробуйте снова.");
       }
     }, 300);
   });
@@ -656,43 +769,60 @@ function renderPositions(rows) {
   rows.slice(0, 30).forEach((row) => {
     const pnlVal = Number(row.ret_30d || 0);
     const qtyText = formatQty(row.qty, row.asset_type);
-    const item = document.createElement("div");
-    item.className = "item";
-    item.innerHTML = `<div class="left"><div class="name">${row.name || row.ticker}</div><div class="sub">${row.ticker} · ${qtyText}</div></div><div class="right"><div>${money(row.value)}</div><div class="pnl ${pnlVal >= 0 ? "plus" : "minus"}">${pct(pnlVal)}</div></div>`;
+    const item = createListRow({
+      title: row.name || row.ticker,
+      subtitle: `${row.ticker} · ${qtyText}`,
+      right: `${money(row.value)}<div class="pnl ${pnlVal >= 0 ? "plus" : "minus"}">${pct(pnlVal)}</div>`,
+    });
     el.positions.appendChild(item);
   });
 }
 
 async function loadPortfolio() {
-  const data = await api("/api/miniapp/portfolio");
-  el.totalValue.textContent = money(data.summary?.total_value || 0);
-  const totalPnl = Number(data.summary?.pnl_pct || 0);
-  el.totalPnl.textContent = pct(totalPnl);
-  el.totalPnl.style.color = totalPnl >= 0 ? "var(--ok)" : "var(--bad)";
-  renderPositions(data.positions || []);
+  renderSkeletonList(el.positions, 4);
+  try {
+    const data = await api("/api/miniapp/portfolio");
+    el.totalValue.textContent = money(data.summary?.total_value || 0);
+    const totalPnl = Number(data.summary?.pnl_pct || 0);
+    el.totalPnl.textContent = pct(totalPnl);
+    el.totalPnl.style.color = totalPnl >= 0 ? "var(--success)" : "var(--danger)";
+    renderPositions(data.positions || []);
+  } catch (_) {
+    renderError(el.positions, "Проверьте соединение и обновите экран.");
+    throw _;
+  }
 }
 
 async function loadAlerts() {
-  const rows = await api("/api/miniapp/alerts");
-  el.alerts.innerHTML = "";
-  if (!rows.length) return renderEmpty(el.alerts, "Нет активных алертов");
-  rows.forEach((a) => {
-    const item = document.createElement("div");
-    item.className = "item";
-    const label = `${a.shortname || a.secid} (${a.secid})`;
-    const range = Number(a.range_percent || 0) > 0 ? `±${a.range_percent}%` : "точно";
-    item.innerHTML = `<div class="left"><div class="name">${label}</div><div class="sub">${money(a.target_price)} · ${range}</div></div><div class="right"><button class="btn danger">Отключить</button></div>`;
-    item.querySelector("button").addEventListener("click", async () => {
-      try {
-        await api(`/api/miniapp/alerts/${a.id}`, { method: "DELETE" });
-        toast("Алерт отключен");
-        await loadAlerts();
-      } catch (_) {
-        toast("Не удалось отключить алерт");
-      }
+  renderSkeletonList(el.alerts, 3);
+  try {
+    const rows = await api("/api/miniapp/alerts");
+    el.alerts.innerHTML = "";
+    if (!rows.length) return renderEmpty(el.alerts, "Активных алертов пока нет.");
+    rows.forEach((a) => {
+      const label = `${a.shortname || a.secid} (${a.secid})`;
+      const range = Number(a.range_percent || 0) > 0 ? `±${a.range_percent}%` : "Точная цена";
+      const item = createListRow({
+        title: label,
+        subtitle: `${money(a.target_price)} · ${range}`,
+        actionLabel: "Отключить",
+        actionClass: "danger",
+        onAction: async () => {
+          try {
+            await api(`/api/miniapp/alerts/${a.id}`, { method: "DELETE" });
+            toast("Алерт отключён");
+            await loadAlerts();
+          } catch (_) {
+            toast("Не удалось отключить алерт");
+          }
+        },
+      });
+      el.alerts.appendChild(item);
     });
-    el.alerts.appendChild(item);
-  });
+  } catch (_) {
+    renderError(el.alerts, "Не удалось получить список алертов.");
+    throw _;
+  }
 }
 
 function renderLookup(data) {
@@ -721,9 +851,11 @@ function renderMoversList(container, rows, type) {
     const v = Number(r.pct || 0);
     const last = r.last === null || r.last === undefined ? "н/д" : money(r.last);
     const volume = r.val_today === null || r.val_today === undefined ? "н/д" : money(r.val_today);
-    const item = document.createElement("div");
-    item.className = "item";
-    item.innerHTML = `<div class="left"><div class="name">${r.shortname || r.secid}</div><div class="sub">${r.secid} · Цена: ${last} · Объём: ${volume}</div></div><div class="right"><div class="pnl ${v >= 0 ? "plus" : "minus"}">${pct(v)}</div></div>`;
+    const item = createListRow({
+      title: r.shortname || r.secid,
+      subtitle: `${r.secid} · Цена: ${last} · Объём: ${volume}`,
+      right: `<div class="pnl ${v >= 0 ? "plus" : "minus"}">${pct(v)}</div>`,
+    });
     container.appendChild(item);
   });
 }
@@ -752,23 +884,30 @@ async function loadOpenCloseSetting() {
 }
 
 async function loadArticles() {
-  const rows = await api("/api/miniapp/articles");
-  el.articles.innerHTML = "";
-  if (!rows.length) return renderEmpty(el.articles, "Материалы пока не настроены");
-  rows.forEach((r) => {
-    const item = document.createElement("div");
-    item.className = "item";
-    item.innerHTML = `<div class="left"><div class="name">${r.button_name}</div></div><div class="right"><button class="btn ghost">Открыть</button></div>`;
-    item.querySelector("button").addEventListener("click", async () => {
-      try {
-        const article = await api(`/api/miniapp/articles/${encodeURIComponent(r.text_code)}`);
-        el.articleText.textContent = article.value || "";
-      } catch (_) {
-        toast("Не удалось загрузить текст");
-      }
+  renderSkeletonList(el.articles, 3);
+  try {
+    const rows = await api("/api/miniapp/articles");
+    el.articles.innerHTML = "";
+    if (!rows.length) return renderEmpty(el.articles, "Материалы появятся позже.");
+    rows.forEach((r) => {
+      const item = createListRow({
+        title: r.button_name,
+        actionLabel: "Открыть",
+        onAction: async () => {
+          try {
+            const article = await api(`/api/miniapp/articles/${encodeURIComponent(r.text_code)}`);
+            el.articleText.textContent = article.value || "";
+          } catch (_) {
+            toast("Не удалось открыть материал");
+          }
+        },
+      });
+      el.articles.appendChild(item);
     });
-    el.articles.appendChild(item);
-  });
+  } catch (_) {
+    renderError(el.articles, "Не удалось загрузить материалы.");
+    throw _;
+  }
 }
 
 async function loadModePreference() {

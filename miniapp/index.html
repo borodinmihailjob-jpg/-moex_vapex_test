@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-  <title>MOEX Portfolio Mini App</title>
+  <title>MOEX Portfolio</title>
+  <link rel="stylesheet" href="/miniapp/tokens.css" />
   <link rel="stylesheet" href="/miniapp/styles.css" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
@@ -11,8 +12,8 @@
   <div id="app" class="app-shell">
     <header class="app-header">
       <div>
-        <h1>MOEX Portfolio</h1>
-        <p id="userLine">Загрузка…</p>
+        <h1>Portfolio</h1>
+        <p id="userLine">Подключение…</p>
       </div>
       <div class="header-actions">
         <button id="switchModeBtn" class="btn ghost">Режим</button>
@@ -23,22 +24,22 @@
     <main id="content" class="content">
       <section id="tab-mode" class="tab-view active">
         <article class="card">
-          <h2>Выберите режим</h2>
-          <p class="hint">Бот умеет и в биржу, и в личный бюджет. Можно переключаться в любой момент.</p>
+          <h2>Выберите пространство</h2>
+          <p class="hint">Переключайтесь между инвестициями и личным бюджетом в один тап.</p>
           <div class="mode-grid">
             <div class="mode-card">
               <h3>Биржа</h3>
-              <p class="hint">Портфель, сделки, котировки и отчёты</p>
-              <button id="openExchangeBtn" class="btn primary">Открыть биржу</button>
+              <p class="hint">Портфель, сделки, котировки и сигналы</p>
+              <button id="openExchangeBtn" class="btn primary">Открыть</button>
             </div>
             <div class="mode-card">
               <h3>Бюджет</h3>
-              <p class="hint">План на месяц, цели и “крупные траты”</p>
-              <button id="openBudgetBtn" class="btn primary">Открыть бюджет</button>
+              <p class="hint">Доходы, расходы, цели и план месяца</p>
+              <button id="openBudgetBtn" class="btn primary">Открыть</button>
             </div>
           </div>
           <p id="lastModeLine" class="hint"></p>
-          <button id="openLastModeBtn" class="btn ghost" style="display:none">Открыть как в прошлый раз</button>
+          <button id="openLastModeBtn" class="btn ghost" style="display:none">Продолжить с прошлого режима</button>
         </article>
       </section>
 
@@ -104,7 +105,7 @@
               <input id="tradeCommission" type="number" step="0.0001" min="0" value="0" inputmode="decimal" />
             </label>
           </div>
-          <button id="saveTradeBtn" class="btn primary">Сохранить сделку</button>
+          <button id="saveTradeBtn" class="btn primary">Добавить</button>
         </article>
       </section>
 
@@ -128,7 +129,7 @@
           </div>
           <div id="lookupSearchResults" class="list compact"></div>
           <p id="lookupSelected" class="hint">Инструмент не выбран</p>
-          <button id="lookupBtn" class="btn primary">Показать динамику</button>
+          <button id="lookupBtn" class="btn primary">Посмотреть</button>
           <div id="lookupResult" class="lookup-result"></div>
         </article>
       </section>
@@ -184,7 +185,7 @@
               <input id="alertRange" type="number" step="0.1" min="0" max="50" value="" placeholder="Необязательно" inputmode="decimal" />
             </label>
           </div>
-          <button id="addAlertBtn" class="btn primary">Добавить алерт</button>
+          <button id="addAlertBtn" class="btn primary">Создать алерт</button>
         </article>
         <article class="card">
           <h2>Активные алерты</h2>
@@ -214,44 +215,44 @@
         </article>
 
         <article class="card">
-          <h2>Импорт XML</h2>
+          <h2>Импорт сделок</h2>
           <form id="xmlForm" class="upload-form">
             <input id="xmlFile" type="file" accept=".xml,text/xml,application/xml" />
-            <button class="btn primary" type="submit">Импортировать</button>
+            <button class="btn primary" type="submit">Загрузить</button>
           </form>
           <pre id="xmlResult" class="plain"></pre>
         </article>
 
         <article class="card">
-          <h2>Почему инвестировать</h2>
+          <h2>Полезные материалы</h2>
           <div id="articles" class="list compact"></div>
           <div id="articleText" class="plain"></div>
         </article>
 
         <article class="card danger-zone">
-          <h2>Очистка портфеля</h2>
-          <p class="hint">Удалит все сделки и позиции. Необратимо.</p>
+          <h2>Очистка данных</h2>
+          <p class="hint">Удалит все сделки и позиции. Это действие нельзя отменить.</p>
           <button id="clearPortfolioBtn" class="btn danger">Очистить портфель</button>
         </article>
       </section>
 
       <section id="tab-budget" class="tab-view">
         <article id="budgetWelcomeCard" class="card">
-          <h2>Давайте соберём ваш бюджет</h2>
-          <p class="hint">Это займёт 5–10 минут. Вы увидите, сколько у вас <strong>свободно в месяц</strong> и что делать для целей.</p>
+          <h2>Соберём бюджет</h2>
+          <p class="hint">5–10 минут, чтобы увидеть свободные деньги в месяц и план по целям.</p>
           <div class="mode-grid">
             <div class="mode-card">
               <h3>Быстро (5 минут)</h3>
               <p class="hint">Одна сумма расходов + обязательные платежи</p>
-              <button id="startQuickOnboardingBtn" class="btn primary">Начать быстро</button>
+              <button id="startQuickOnboardingBtn" class="btn primary">Начать</button>
             </div>
             <div class="mode-card">
               <h3>Точно (10 минут)</h3>
               <p class="hint">Чуть больше деталей → точнее прогноз</p>
-              <button id="startPreciseOnboardingBtn" class="btn primary">Начать точно</button>
+              <button id="startPreciseOnboardingBtn" class="btn primary">Начать</button>
             </div>
           </div>
-          <p class="hint">Мы не просим доступ к банку. Всё вводится вручную и можно изменить в любой момент.</p>
+          <p class="hint">Без доступа к банку: все данные можно изменить в любой момент.</p>
         </article>
 
         <article id="budgetWizardCard" class="card" style="display:none">
@@ -534,17 +535,17 @@
       </section>
     </main>
 
-    <nav class="tabbar" id="tabbarExchange">
-      <button class="tab-btn active" data-tab="mode">Режим</button>
+    <nav class="tabbar" id="tabbarExchange" aria-label="Навигация: Биржа">
+      <button class="tab-btn active" data-tab="mode">Старт</button>
       <button class="tab-btn" data-tab="dashboard">Портфель</button>
       <button class="tab-btn" data-tab="trade">Сделка</button>
-      <button class="tab-btn" data-tab="lookup">Поиск</button>
+      <button class="tab-btn" data-tab="lookup">Цена</button>
       <button class="tab-btn" data-tab="movers">Рынок</button>
       <button class="tab-btn" data-tab="alerts">Алерты</button>
       <button class="tab-btn" data-tab="more">Ещё</button>
     </nav>
-    <nav class="tabbar hidden" id="tabbarBudget">
-      <button class="tab-btn active" data-tab="mode">Режим</button>
+    <nav class="tabbar hidden" id="tabbarBudget" aria-label="Навигация: Бюджет">
+      <button class="tab-btn active" data-tab="mode">Старт</button>
       <button class="tab-btn" data-budget-tab="overview">Обзор</button>
       <button class="tab-btn" data-budget-tab="income">Доходы</button>
       <button class="tab-btn" data-budget-tab="expenses">Расходы</button>
