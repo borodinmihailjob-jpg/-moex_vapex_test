@@ -101,6 +101,24 @@ class LoanEngineTests(unittest.TestCase):
         self.assertEqual(Decimal(summary["remaining_balance"]), Decimal("3200000.00"))
         self.assertEqual(Decimal(summary["paid_principal_to_date"]), Decimal("1800000.00"))
 
+    def test_act_365_first_period_uses_calc_date(self):
+        loan = LoanInput(
+            principal=Decimal("1000000.00"),
+            current_principal=Decimal("900000.00"),
+            annual_rate=Decimal("12.00"),
+            payment_type="ANNUITY",
+            term_months=120,
+            first_payment_date=date(2026, 3, 3),
+            issue_date=date(2020, 2, 10),
+            currency="RUB",
+            calc_date=date(2026, 2, 14),
+            accrual_mode="ACT_365",
+        )
+        _, schedule, _, _ = calculate(loan, [])
+        first_interest = Decimal(schedule[0]["interest"])
+        full_month_interest = (loan.current_principal * loan.annual_rate / Decimal("100") * Decimal("17") / Decimal("365")).quantize(Decimal("0.01"))
+        self.assertEqual(first_interest, full_month_interest)
+
 
 if __name__ == "__main__":
     unittest.main()

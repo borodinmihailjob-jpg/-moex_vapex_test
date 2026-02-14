@@ -188,7 +188,7 @@ def _calc_interest(balance: Decimal, annual_rate: Decimal, accrual_mode: Accrual
     if annual_rate <= 0 or balance <= 0:
         return Decimal("0.00")
     if accrual_mode == "ACT_365":
-        days = max(1, (payment_date - prev_payment_date).days)
+        days = max(0, (payment_date - prev_payment_date).days)
         return q_money(balance * (annual_rate / RATE_100) * Decimal(days) / Decimal(365))
     monthly_rate = annual_rate / RATE_MONTHS / RATE_100
     return q_money(balance * monthly_rate)
@@ -238,6 +238,10 @@ def calculate(loan: LoanInput, events: list[LoanEvent]) -> tuple[dict, list[dict
     paid_principal_future = Decimal("0")
 
     prev_payment_date = add_months(start_date, -1)
+    # If current balance is provided "as of today", first ACT/365 period must
+    # accrue from calc_date (not from previous scheduled payment date).
+    if loan.accrual_mode == "ACT_365" and calc_date > prev_payment_date:
+        prev_payment_date = calc_date
 
     for month_idx in range(1200):
         if balance <= 0:
