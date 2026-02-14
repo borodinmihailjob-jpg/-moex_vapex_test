@@ -15,12 +15,14 @@ class LoanEngineTests(unittest.TestCase):
     def make_loan(self) -> LoanInput:
         return LoanInput(
             principal=Decimal("3500000.00"),
+            current_principal=Decimal("3500000.00"),
             annual_rate=Decimal("12.90"),
             payment_type="ANNUITY",
             term_months=240,
             first_payment_date=date(2026, 3, 3),
             issue_date=date(2026, 2, 10),
             currency="RUB",
+            calc_date=date(2026, 2, 14),
         )
 
     def test_annuity_without_events(self):
@@ -29,7 +31,7 @@ class LoanEngineTests(unittest.TestCase):
         self.assertEqual(len(schedule), 240)
         self.assertEqual(Decimal(schedule[-1]["balance"]), Decimal("0.00"))
         principal_sum = sum(Decimal(x["principal"]) for x in schedule)
-        self.assertAlmostEqual(float(principal_sum), float(loan.principal), places=1)
+        self.assertAlmostEqual(float(principal_sum), float(loan.current_principal), places=1)
         self.assertEqual(int(summary["payments_count"]), 240)
 
     def test_zero_rate(self):
@@ -80,6 +82,24 @@ class LoanEngineTests(unittest.TestCase):
         for item in affected:
             self.assertEqual(Decimal(item["principal"]), Decimal("0.00"))
         self.assertGreater(Decimal(summary["total_interest"]), Decimal("0.00"))
+
+    def test_calculation_from_current_principal_and_current_date(self):
+        loan = LoanInput(
+            principal=Decimal("5000000.00"),
+            current_principal=Decimal("3200000.00"),
+            annual_rate=Decimal("11.50"),
+            payment_type="ANNUITY",
+            term_months=240,
+            first_payment_date=date(2020, 3, 3),
+            issue_date=date(2020, 2, 10),
+            currency="RUB",
+            calc_date=date(2026, 2, 14),
+        )
+        summary, schedule, _, _ = calculate(loan, [])
+        self.assertGreater(len(schedule), 0)
+        self.assertGreater(Decimal(summary["monthly_payment"]), Decimal("0.00"))
+        self.assertEqual(Decimal(summary["remaining_balance"]), Decimal("3200000.00"))
+        self.assertEqual(Decimal(summary["paid_principal_to_date"]), Decimal("1800000.00"))
 
 
 if __name__ == "__main__":

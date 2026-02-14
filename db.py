@@ -255,6 +255,7 @@ CREATE TABLE IF NOT EXISTS loan_accounts (
   user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
   name TEXT,
   principal NUMERIC(18,2) NOT NULL CHECK (principal > 0),
+  current_principal NUMERIC(18,2) NOT NULL CHECK (current_principal > 0),
   annual_rate NUMERIC(7,4) NOT NULL CHECK (annual_rate >= 0 AND annual_rate <= 100),
   payment_type TEXT NOT NULL CHECK (payment_type IN ('ANNUITY', 'DIFFERENTIATED')),
   term_months INTEGER NOT NULL CHECK (term_months >= 1 AND term_months <= 600),
@@ -336,9 +337,12 @@ MIGRATION_SQL = [
     "CREATE TABLE IF NOT EXISTS budget_month_closes (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, month_key TEXT NOT NULL, planned_expenses_base DOUBLE PRECISION NOT NULL DEFAULT 0, actual_expenses_base DOUBLE PRECISION NOT NULL DEFAULT 0, extra_income_total DOUBLE PRECISION NOT NULL DEFAULT 0, extra_income_items JSONB NOT NULL DEFAULT '[]'::jsonb, closed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (user_id, month_key))",
     "CREATE TABLE IF NOT EXISTS budget_notification_settings (user_id BIGINT PRIMARY KEY, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, budget_summary_enabled BOOLEAN NOT NULL DEFAULT TRUE, goal_deadline_enabled BOOLEAN NOT NULL DEFAULT TRUE, month_close_enabled BOOLEAN NOT NULL DEFAULT TRUE, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS budget_history (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, entity TEXT NOT NULL, entity_id BIGINT, action TEXT NOT NULL, payload JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
-    "CREATE TABLE IF NOT EXISTS loan_accounts (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, name TEXT, principal NUMERIC(18,2) NOT NULL CHECK (principal > 0), annual_rate NUMERIC(7,4) NOT NULL CHECK (annual_rate >= 0 AND annual_rate <= 100), payment_type TEXT NOT NULL CHECK (payment_type IN ('ANNUITY', 'DIFFERENTIATED')), term_months INTEGER NOT NULL CHECK (term_months >= 1 AND term_months <= 600), issue_date DATE, first_payment_date DATE NOT NULL, currency CHAR(3) NOT NULL DEFAULT 'RUB', status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'ARCHIVED')), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS loan_accounts (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, user_ref_id BIGINT REFERENCES users(id) ON DELETE CASCADE, name TEXT, principal NUMERIC(18,2) NOT NULL CHECK (principal > 0), current_principal NUMERIC(18,2) NOT NULL CHECK (current_principal > 0), annual_rate NUMERIC(7,4) NOT NULL CHECK (annual_rate >= 0 AND annual_rate <= 100), payment_type TEXT NOT NULL CHECK (payment_type IN ('ANNUITY', 'DIFFERENTIATED')), term_months INTEGER NOT NULL CHECK (term_months >= 1 AND term_months <= 600), issue_date DATE, first_payment_date DATE NOT NULL, currency CHAR(3) NOT NULL DEFAULT 'RUB', status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'ARCHIVED')), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS loan_events (id BIGSERIAL PRIMARY KEY, loan_id BIGINT NOT NULL REFERENCES loan_accounts(id) ON DELETE CASCADE, user_id BIGINT NOT NULL, event_type TEXT NOT NULL CHECK (event_type IN ('EXTRA_PAYMENT', 'RATE_CHANGE', 'HOLIDAY')), event_date DATE NOT NULL, payload JSONB NOT NULL DEFAULT '{}'::jsonb, client_request_id TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS loan_schedule_cache (loan_id BIGINT PRIMARY KEY REFERENCES loan_accounts(id) ON DELETE CASCADE, version INTEGER NOT NULL, version_hash TEXT NOT NULL, summary_json JSONB NOT NULL, payload_json JSONB NOT NULL, computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "ALTER TABLE loan_accounts ADD COLUMN IF NOT EXISTS current_principal NUMERIC(18,2)",
+    "UPDATE loan_accounts SET current_principal = principal WHERE current_principal IS NULL",
+    "ALTER TABLE loan_accounts ALTER COLUMN current_principal SET NOT NULL",
     "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
 ]
 
@@ -3221,6 +3225,7 @@ async def create_loan_account(
     *,
     name: str | None,
     principal: Decimal,
+    current_principal: Decimal,
     annual_rate: Decimal,
     payment_type: str,
     term_months: int,
@@ -3236,16 +3241,17 @@ async def create_loan_account(
                 row = await conn.fetchrow(
                     """
                     INSERT INTO loan_accounts (
-                      user_id, user_ref_id, name, principal, annual_rate, payment_type, term_months,
+                      user_id, user_ref_id, name, principal, current_principal, annual_rate, payment_type, term_months,
                       issue_date, first_payment_date, currency, status, created_at, updated_at
                     )
-                    VALUES ($1, $2, $3, $4::numeric, $5::numeric, $6, $7, $8, $9, $10, 'ACTIVE', NOW(), NOW())
+                    VALUES ($1, $2, $3, $4::numeric, $5::numeric, $6::numeric, $7, $8, $9, $10, $11, 'ACTIVE', NOW(), NOW())
                     RETURNING id
                     """,
                     int(user_id),
                     int(user_ref_id),
                     (name or "").strip() or None,
                     _decimal_to_str(principal),
+                    _decimal_to_str(current_principal),
                     _decimal_to_str(annual_rate),
                     str(payment_type).upper(),
                     int(term_months),
@@ -3267,7 +3273,7 @@ async def list_loan_accounts(db_path: str, user_id: int, include_archived: bool 
             status_filter = "" if include_archived else "AND l.status = 'ACTIVE'"
             rows = await conn.fetch(
                 f"""
-                SELECT l.id, l.name, l.principal, l.annual_rate, l.payment_type, l.term_months, l.issue_date,
+                SELECT l.id, l.name, l.principal, l.current_principal, l.annual_rate, l.payment_type, l.term_months, l.issue_date,
                        l.first_payment_date, l.currency, l.status, l.created_at, l.updated_at
                 FROM loan_accounts l
                 WHERE l.user_id = $1
@@ -3283,6 +3289,7 @@ async def list_loan_accounts(db_path: str, user_id: int, include_archived: bool 
                     "id": int(r["id"]),
                     "name": r["name"],
                     "principal": _decimal_to_str(r["principal"]),
+                    "current_principal": _decimal_to_str(r["current_principal"]),
                     "annual_rate": _decimal_to_str(r["annual_rate"], "0"),
                     "payment_type": r["payment_type"],
                     "term_months": int(r["term_months"]),
@@ -3307,7 +3314,7 @@ async def get_loan_account(db_path: str, user_id: int, loan_id: int) -> dict[str
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT l.id, l.name, l.principal, l.annual_rate, l.payment_type, l.term_months, l.issue_date,
+                SELECT l.id, l.name, l.principal, l.current_principal, l.annual_rate, l.payment_type, l.term_months, l.issue_date,
                        l.first_payment_date, l.currency, l.status, l.created_at, l.updated_at
                 FROM loan_accounts l
                 WHERE l.id = $1 AND l.user_id = $2
@@ -3322,6 +3329,7 @@ async def get_loan_account(db_path: str, user_id: int, loan_id: int) -> dict[str
             "id": int(row["id"]),
             "name": row["name"],
             "principal": _decimal_to_str(row["principal"]),
+            "current_principal": _decimal_to_str(row["current_principal"]),
             "annual_rate": _decimal_to_str(row["annual_rate"], "0"),
             "payment_type": row["payment_type"],
             "term_months": int(row["term_months"]),

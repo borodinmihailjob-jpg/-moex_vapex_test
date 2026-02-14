@@ -37,6 +37,7 @@ class _FakeLoansRepo:
             "user_id": user_id,
             "name": kwargs.get("name"),
             "principal": format(kwargs["principal"], "f"),
+            "current_principal": format(kwargs["current_principal"], "f"),
             "annual_rate": format(kwargs["annual_rate"], "f"),
             "payment_type": kwargs["payment_type"],
             "term_months": kwargs["term_months"],
@@ -146,12 +147,17 @@ class LoansApiTests(unittest.IsolatedAsyncioTestCase):
         payload = {
             "name": "Ипотека • Тест",
             "principal": "3500000.00",
+            "current_principal": "3200000.00",
             "annual_rate": "12.90",
             "payment_type": "ANNUITY",
             "term_months": 240,
             "first_payment_date": "2026-03-03",
             "issue_date": "2026-02-10",
             "currency": "RUB",
+            "rate_periods": [
+                {"start_date": "2026-03-03", "end_date": "2030-12-03", "annual_rate": "12.90"},
+                {"start_date": "2030-12-04", "end_date": "2046-02-03", "annual_rate": "10.90"},
+            ],
         }
         resp = await self.client.post("/api/miniapp/loans", json=payload)
         self.assertEqual(resp.status, 201)
@@ -228,6 +234,7 @@ class LoansApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_validation_error(self):
         bad_payload = {
             "principal": "0",
+            "current_principal": "0",
             "annual_rate": "12.90",
             "payment_type": "ANNUITY",
             "term_months": 240,

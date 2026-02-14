@@ -441,10 +441,15 @@
               <input id="loanPrincipalInput" type="text" placeholder="3500000" />
             </label>
           </div>
-          <div class="form-grid three">
-            <label>Ставка, % годовых
+          <div class="form-grid two">
+            <label>Остаток основного долга сейчас, ₽
+              <input id="loanCurrentPrincipalInput" type="text" placeholder="3200000" />
+            </label>
+            <label>Ставка по умолчанию, % годовых
               <input id="loanAnnualRateInput" type="text" placeholder="12.9" />
             </label>
+          </div>
+          <div class="form-grid three">
             <label>Тип платежа
               <select id="loanPaymentTypeInput">
                 <option value="ANNUITY">Аннуитет</option>
@@ -467,6 +472,12 @@
                 <option value="RUB">RUB</option>
               </select>
             </label>
+          </div>
+          <div class="card-inline">
+            <h3>Периоды ставки</h3>
+            <p class="hint">Ставка может меняться. Добавьте периоды без разрывов.</p>
+            <div id="loanRatePeriodsList" class="form-grid"></div>
+            <button id="loanAddRatePeriodBtn" class="btn ghost" type="button">+ Добавить период ставки</button>
           </div>
           <div id="loanCreateError" class="hint" style="display:none"></div>
           <div class="wizard-actions">

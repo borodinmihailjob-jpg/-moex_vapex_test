@@ -1733,13 +1733,47 @@ def _loan_row_to_input(loan: dict[str, Any]) -> LoanInput:
     issue_date = _parse_date_ymd(str(loan.get("issue_date"))) if loan.get("issue_date") else None
     return LoanInput(
         principal=Decimal(str(loan["principal"])),
+        current_principal=Decimal(str(loan.get("current_principal") or loan["principal"])),
         annual_rate=Decimal(str(loan["annual_rate"])),
         payment_type=str(loan["payment_type"]),
         term_months=int(loan["term_months"]),
         first_payment_date=_parse_date_ymd(str(loan["first_payment_date"])),
         issue_date=issue_date,
         currency=str(loan.get("currency") or "RUB"),
+        calc_date=_today_msk(),
     )
+
+
+def _normalize_loan_rate_periods(periods_raw: Any, first_payment_date: date, term_months: int, fallback_rate: Decimal) -> list[dict[str, Any]]:
+    if not isinstance(periods_raw, list) or not periods_raw:
+        return [
+            {
+                "start_date": first_payment_date,
+                "end_date": _add_months(first_payment_date, max(0, term_months - 1)),
+                "annual_rate": fallback_rate,
+            }
+        ]
+    out: list[dict[str, Any]] = []
+    for row in periods_raw:
+        if not isinstance(row, dict):
+            raise ValueError("rate_periods must contain objects")
+        start = _parse_date_ymd(str(row.get("start_date") or ""))
+        end = _parse_date_ymd(str(row.get("end_date") or ""))
+        if end < start:
+            raise ValueError("rate period end_date before start_date")
+        rate = _parse_decimal(row.get("annual_rate"), field="annual_rate", min_value=Decimal("0"), max_value=Decimal("100"))
+        out.append({"start_date": start, "end_date": end, "annual_rate": rate})
+    out.sort(key=lambda x: x["start_date"])
+
+    # Continuous non-overlapping periods improve predictability for the user.
+    if out[0]["start_date"] > first_payment_date:
+        raise ValueError("rate_periods must start not later than first_payment_date")
+    expected_start = out[0]["start_date"]
+    for row in out:
+        if row["start_date"] != expected_start:
+            raise ValueError("rate_periods must be continuous without gaps")
+        expected_start = row["end_date"] + timedelta(days=1)
+    return out
 
 
 def _loan_event_from_row(row: dict[str, Any]) -> ExtraPaymentEvent | RateChangeEvent | HolidayEvent | None:
@@ -1816,7 +1850,10 @@ async def api_loans(request: web.Request) -> web.Response:
     payload = await _read_json(request)
     try:
         principal = _parse_decimal(payload.get("principal"), field="principal", min_value=Decimal("0.01"))
-        annual_rate = _parse_decimal(payload.get("annual_rate"), field="annual_rate", min_value=Decimal("0"), max_value=Decimal("100"))
+        current_principal = _parse_decimal(payload.get("current_principal"), field="current_principal", min_value=Decimal("0.01"))
+        if current_principal > principal:
+            raise ValueError("current_principal must be <= principal")
+        annual_rate = _parse_decimal(payload.get("annual_rate") if payload.get("annual_rate") is not None else "0", field="annual_rate", min_value=Decimal("0"), max_value=Decimal("100"))
         payment_type = str(payload.get("payment_type") or "ANNUITY").strip().upper()
         if payment_type not in {"ANNUITY", "DIFFERENTIATED"}:
             raise ValueError("payment_type invalid")
@@ -1829,6 +1866,8 @@ async def api_loans(request: web.Request) -> web.Response:
             raise ValueError("first_payment_date must be after issue_date")
         currency = str(payload.get("currency") or "RUB").strip().upper()[:3]
         name = str(payload.get("name") or "").strip() or None
+        rate_periods = _normalize_loan_rate_periods(payload.get("rate_periods"), first_payment_date, term_months, annual_rate)
+        base_rate = Decimal(rate_periods[0]["annual_rate"])
     except (ValueError, TypeError) as exc:
         return _json_error("VALIDATION_ERROR", str(exc), status=400)
 
@@ -1837,13 +1876,29 @@ async def api_loans(request: web.Request) -> web.Response:
         user_id=user_id,
         name=name,
         principal=principal,
-        annual_rate=annual_rate,
+        current_principal=current_principal,
+        annual_rate=base_rate,
         payment_type=payment_type,
         term_months=term_months,
         first_payment_date=first_payment_date,
         issue_date=issue_date,
         currency=currency,
     )
+    # Persist floating-rate periods as RATE_CHANGE milestones.
+    for idx, period in enumerate(rate_periods):
+        await create_loan_event(
+            db_dsn,
+            user_id=user_id,
+            loan_id=loan_id,
+            event_type="RATE_CHANGE",
+            event_date=period["start_date"],
+            payload={
+                "annual_rate": format(Decimal(period["annual_rate"]), "f"),
+                "period_end_date": period["end_date"].isoformat(),
+                "source": "RATE_PERIOD",
+            },
+            client_request_id=f"loan-create-rate-{loan_id}-{idx}",
+        )
     return web.json_response({"loan_id": loan_id, "status": "ACTIVE"}, status=201)
 
 

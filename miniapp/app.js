@@ -39,6 +39,7 @@ const state = {
     activeLoan: null,
     activeLoanSummary: null,
     loanView: "list",
+    loanRateRows: [],
   },
 };
 
@@ -264,12 +265,15 @@ const el = {
   loansList: document.getElementById("loansList"),
   loanNameInput: document.getElementById("loanNameInput"),
   loanPrincipalInput: document.getElementById("loanPrincipalInput"),
+  loanCurrentPrincipalInput: document.getElementById("loanCurrentPrincipalInput"),
   loanAnnualRateInput: document.getElementById("loanAnnualRateInput"),
   loanPaymentTypeInput: document.getElementById("loanPaymentTypeInput"),
   loanTermMonthsInput: document.getElementById("loanTermMonthsInput"),
   loanFirstPaymentDateInput: document.getElementById("loanFirstPaymentDateInput"),
   loanIssueDateInput: document.getElementById("loanIssueDateInput"),
   loanCurrencyInput: document.getElementById("loanCurrencyInput"),
+  loanRatePeriodsList: document.getElementById("loanRatePeriodsList"),
+  loanAddRatePeriodBtn: document.getElementById("loanAddRatePeriodBtn"),
   loanCreateError: document.getElementById("loanCreateError"),
   loanCreateSaveBtn: document.getElementById("loanCreateSaveBtn"),
   loanCreateCancelBtn: document.getElementById("loanCreateCancelBtn"),
@@ -1219,16 +1223,74 @@ function setLoanActionChip(active) {
 function resetLoanCreateForm() {
   if (el.loanNameInput) el.loanNameInput.value = "";
   if (el.loanPrincipalInput) el.loanPrincipalInput.value = "";
+  if (el.loanCurrentPrincipalInput) el.loanCurrentPrincipalInput.value = "";
   if (el.loanAnnualRateInput) el.loanAnnualRateInput.value = "";
   if (el.loanPaymentTypeInput) el.loanPaymentTypeInput.value = "ANNUITY";
   if (el.loanTermMonthsInput) el.loanTermMonthsInput.value = "240";
   if (el.loanFirstPaymentDateInput) el.loanFirstPaymentDateInput.value = addMonthsYmd(fmtDate(0), 1) || fmtDate(0);
   if (el.loanIssueDateInput) el.loanIssueDateInput.value = fmtDate(0);
   if (el.loanCurrencyInput) el.loanCurrencyInput.value = "RUB";
+  const start = el.loanFirstPaymentDateInput?.value || fmtDate(0);
+  const end = addMonthsYmd(start, Number(el.loanTermMonthsInput?.value || 240) - 1) || start;
+  state.budget.loanRateRows = [{ start_date: start, end_date: end, annual_rate: "" }];
+  renderLoanRateRows();
   if (el.loanCreateError) {
     el.loanCreateError.style.display = "none";
     el.loanCreateError.textContent = "";
   }
+}
+
+function addDaysYmdSafe(ymd, days) {
+  return addDaysYmd(ymd, days) || ymd;
+}
+
+function normalizeLoanRateRows(rows, fallbackRate, firstPaymentDate, termMonths) {
+  const out = (rows || []).map((x) => ({
+    start_date: String(x.start_date || "").trim(),
+    end_date: String(x.end_date || "").trim(),
+    annual_rate: Number(x.annual_rate),
+  })).filter((x) => x.start_date && x.end_date && Number.isFinite(x.annual_rate));
+  if (!out.length) {
+    const end = addMonthsYmd(firstPaymentDate, termMonths - 1) || firstPaymentDate;
+    return [{ start_date: firstPaymentDate, end_date: end, annual_rate: fallbackRate }];
+  }
+  out.sort((a, b) => a.start_date.localeCompare(b.start_date));
+  return out;
+}
+
+function renderLoanRateRows() {
+  if (!el.loanRatePeriodsList) return;
+  el.loanRatePeriodsList.innerHTML = "";
+  if (!state.budget.loanRateRows.length) {
+    state.budget.loanRateRows = [{ start_date: "", end_date: "", annual_rate: "" }];
+  }
+  state.budget.loanRateRows.forEach((row, idx) => {
+    const wrap = document.createElement("div");
+    wrap.className = "form-grid three";
+    wrap.innerHTML = `
+      <label>Ставка, %\n<input type=\"number\" step=\"0.01\" min=\"0\" max=\"100\" data-loan-rate-field=\"annual_rate\" data-loan-rate-idx=\"${idx}\" value=\"${row.annual_rate}\"></label>
+      <label>Начало периода\n<input type=\"date\" data-loan-rate-field=\"start_date\" data-loan-rate-idx=\"${idx}\" value=\"${row.start_date}\"></label>
+      <label>Конец периода\n<input type=\"date\" data-loan-rate-field=\"end_date\" data-loan-rate-idx=\"${idx}\" value=\"${row.end_date}\"></label>
+      <div class=\"wizard-actions\"><button class=\"btn ghost\" data-loan-rate-remove=\"${idx}\" type=\"button\">Удалить период</button></div>
+    `;
+    el.loanRatePeriodsList.appendChild(wrap);
+  });
+  el.loanRatePeriodsList.querySelectorAll("[data-loan-rate-field]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const idx = Number(input.dataset.loanRateIdx || -1);
+      const key = input.dataset.loanRateField;
+      if (!Number.isInteger(idx) || idx < 0 || !key) return;
+      state.budget.loanRateRows[idx][key] = input.value;
+    });
+  });
+  el.loanRatePeriodsList.querySelectorAll("[data-loan-rate-remove]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.loanRateRemove || -1);
+      if (!Number.isInteger(idx) || idx < 0) return;
+      state.budget.loanRateRows.splice(idx, 1);
+      renderLoanRateRows();
+    });
+  });
 }
 
 function showLoanCreateError(text) {
@@ -1268,7 +1330,7 @@ function renderLoanListRows(items) {
   items.forEach((loan) => {
     const row = createListRow({
       title: String(loan.name || `Кредит #${loan.id}`),
-      subtitle: `${money(loan.principal)} • ${Number(loan.annual_rate).toFixed(2)}% • ${loan.term_months} мес.`,
+      subtitle: `Остаток ${money(loan.current_principal || loan.principal)} из ${money(loan.principal)} • ${Number(loan.annual_rate).toFixed(2)}% • ${loan.term_months} мес.`,
       actionLabel: "Открыть",
       onAction: async () => {
         await openLoanCard(Number(loan.id));
@@ -1340,11 +1402,12 @@ function renderLoanCard(loan, summary, schedulePreview) {
     el.loanCardSubtitle.textContent = `Вы платите ${money(summary.monthly_payment)} в месяц. Закрытие: ${formatDateRu(summary.payoff_date)}.`;
   }
   if (el.loanKeyStats) {
+    const alreadyPaidPrincipal = Number(summary.paid_principal_to_date || 0);
     const items = [
       { title: "Остаток долга", value: money(summary.remaining_balance) },
       { title: "Ежемесячный платеж", value: money(summary.monthly_payment) },
       { title: "Переплата по процентам", value: money(summary.total_interest) },
-      { title: "Выплачено", value: `${money(summary.total_paid)} (${summary.payments_count} платежей)` },
+      { title: "Выплачено тела долга", value: `${money(alreadyPaidPrincipal)} • осталось ${summary.payments_count || 0} платежей` },
     ];
     el.loanKeyStats.innerHTML = "";
     items.forEach((x) => {
@@ -2803,12 +2866,51 @@ function setupEvents() {
     resetLoanCreateForm();
     setLoanView("create");
   });
+  const syncLoanCreateRatePeriodRange = () => {
+    const firstPaymentDate = String(el.loanFirstPaymentDateInput?.value || "").trim();
+    const termMonths = Math.max(1, Number(el.loanTermMonthsInput?.value || 1));
+    const end = addMonthsYmd(firstPaymentDate, termMonths - 1) || firstPaymentDate;
+    if (!state.budget.loanRateRows.length) {
+      state.budget.loanRateRows = [{ start_date: firstPaymentDate, end_date: end, annual_rate: el.loanAnnualRateInput?.value || "" }];
+    }
+    if (state.budget.loanRateRows.length === 1) {
+      state.budget.loanRateRows[0].start_date = firstPaymentDate;
+      state.budget.loanRateRows[0].end_date = end;
+      if (!String(state.budget.loanRateRows[0].annual_rate || "").trim()) {
+        state.budget.loanRateRows[0].annual_rate = el.loanAnnualRateInput?.value || "";
+      }
+    }
+    renderLoanRateRows();
+  };
+  el.loanFirstPaymentDateInput?.addEventListener("change", syncLoanCreateRatePeriodRange);
+  el.loanTermMonthsInput?.addEventListener("input", syncLoanCreateRatePeriodRange);
+  el.loanAnnualRateInput?.addEventListener("input", () => {
+    if (state.budget.loanRateRows.length === 1) {
+      state.budget.loanRateRows[0].annual_rate = el.loanAnnualRateInput?.value || "";
+      renderLoanRateRows();
+    }
+  });
+  el.loanAddRatePeriodBtn?.addEventListener("click", () => {
+    const rows = state.budget.loanRateRows || [];
+    const firstPaymentDate = String(el.loanFirstPaymentDateInput?.value || "").trim();
+    const termMonths = Math.max(1, Number(el.loanTermMonthsInput?.value || 1));
+    const loanEnd = addMonthsYmd(firstPaymentDate, termMonths - 1) || firstPaymentDate;
+    const last = rows[rows.length - 1];
+    const nextStart = last?.end_date ? addDaysYmdSafe(last.end_date, 1) : firstPaymentDate;
+    rows.push({ start_date: nextStart, end_date: loanEnd, annual_rate: el.loanAnnualRateInput?.value || "" });
+    state.budget.loanRateRows = rows;
+    renderLoanRateRows();
+  });
   el.loanCreateCancelBtn?.addEventListener("click", () => {
     setLoanView("list");
   });
   el.loanCreateSaveBtn?.addEventListener("click", async () => {
     try {
       const principal = parseMoneyInput(el.loanPrincipalInput?.value || "");
+      const currentPrincipal = parseMoneyInput(el.loanCurrentPrincipalInput?.value || "");
+      if (currentPrincipal > principal) {
+        throw new Error("Остаток основного долга не может быть больше суммы кредита");
+      }
       const annualRate = Number(String(el.loanAnnualRateInput?.value || "").replace(",", "."));
       const termMonths = Number(el.loanTermMonthsInput?.value || 0);
       const paymentType = String(el.loanPaymentTypeInput?.value || "ANNUITY");
@@ -2829,15 +2931,23 @@ function setupEvents() {
       if (issueDate && firstPaymentDate <= issueDate) {
         throw new Error("Дата первого платежа должна быть после даты выдачи");
       }
+      const ratePeriods = normalizeLoanRateRows(
+        state.budget.loanRateRows,
+        annualRate,
+        firstPaymentDate,
+        termMonths,
+      );
       const created = await apiLoanCreate({
         name: (el.loanNameInput?.value || "").trim(),
         principal: principal.toFixed(2),
+        current_principal: currentPrincipal.toFixed(2),
         annual_rate: annualRate.toFixed(2),
         payment_type: paymentType,
         term_months: termMonths,
         first_payment_date: firstPaymentDate,
         issue_date: issueDate || null,
         currency: String(el.loanCurrencyInput?.value || "RUB"),
+        rate_periods: ratePeriods,
       });
       toast("Кредит добавлен");
       await loadLoansList();
